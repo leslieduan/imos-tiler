@@ -1,0 +1,10 @@
+[project]
+name = "titiler-project"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "titiler-core>=2.0.2",
+    "uvicorn>=0.46.0",
+]
