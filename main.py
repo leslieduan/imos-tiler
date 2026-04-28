@@ -1,27 +1,24 @@
 from fastapi import FastAPI
+from starlette.middleware.cors import CORSMiddleware
 from titiler.core.factory import TilerFactory
 
-from starlette.middleware.cors import CORSMiddleware
+from routers.tiles import router as tiles_router
 
 app = FastAPI()
 
-# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allows all origins (for development - be more specific in production)
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Create a TilerFactory for Cloud-Optimized GeoTIFFs
 cog = TilerFactory()
-
-# Register all the COG endpoints automatically
 app.include_router(cog.router, tags=["Cloud Optimized GeoTIFF"])
+app.include_router(tiles_router, prefix="/tiles", tags=["Tiles"])
 
 
-# Optional: Add a welcome message for the root endpoint
 @app.get("/")
 def read_index():
     return {"message": "Welcome to TiTiler"}
