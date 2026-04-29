@@ -65,3 +65,27 @@ PRODUCTS: dict[str, Product] = {
         MARINE_HEATWAVE_SSTA_MOSAIC,
     ]
 }
+
+# ── Zarr products ─────────────────────────────────────────────────────────────
+# Single Zarr store containing all dates; coord names normalised in zarr_loader.
+# source_path unused — the store URL lives in services/zarr_loader.py.
+_ZARR_COORD_NAMES = {"LATITUDE": "lat", "LONGITUDE": "lon"}
+
+ZARR_SEA_LEVEL_ANOMALY = Product(
+    id="zarr_sea_level_anomaly",
+    source_path="",
+    variable="GSLA",
+    lod_grids={1: (2, 2)},
+    coord_names=_ZARR_COORD_NAMES,
+)
+ZARR_OCEAN_CURRENT = Product(
+    id="zarr_ocean_current",
+    source_path="",
+    variable=["UCUR", "VCUR"],
+    lod_grids={1: (2, 2)},
+    coord_names=_ZARR_COORD_NAMES,
+)
+
+ZARR_PRODUCTS: dict[str, Product] = {
+    p.id: p for p in [ZARR_SEA_LEVEL_ANOMALY, ZARR_OCEAN_CURRENT]
+}

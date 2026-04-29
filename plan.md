@@ -2,79 +2,99 @@
 
 ## Architecture
 
+Two parallel stacks — NetCDF on-demand (`/tiles`) and Zarr (`/zarr`) — sharing the same product config and PNG encoding logic.
+
 ```
-                        ┌─────────────────────────────────────────┐
-                        │              Frontend (WebGL)            │
-                        └──────────────┬──────────────────────────┘
-                                       │ HTTP
-                        ┌──────────────▼──────────────────────────┐
-                        │               FastAPI app                │
-                        │                 main.py                  │
-                        └──────────────┬──────────────────────────┘
-                                       │
-                        ┌──────────────▼──────────────────────────┐
-                        │           routers/tiles.py               │
-                        │                                          │
-                        │  GET /{product_id}/{date}/{z}/{x}/{y}.png│
-                        │  GET /{product_id}/{date}/manifest.json  │
-                        │            + prewarm trigger             │
-                        └──────┬───────────────────┬──────────────┘
-                               │                   │
-               ┌───────────────▼──────┐  ┌─────────▼──────────────┐
-               │  services/loader.py  │  │  services/renderer.py  │
-               │                      │  │                        │
-               │  load_dataset()       │  │  render_tile()         │
-               │                      │  │  render_manifest()     │
-               │  ┌────────────────┐  │  │                        │
-               │  │  Dataset cache │  │  │  ┌──────────────────┐  │
-               │  │  LRU maxsize=10│  │  │  │ Processed cache  │  │
-               │  │  key:          │  │  │  │ LRU maxsize=20   │  │
-               │  │  (product,date)│  │  │  │ key: (id(ds),lod)│  │
-               │  └───────┬────────┘  │  │  └────────┬─────────┘  │
-               └──────────┼───────────┘  └───────────┼────────────┘
-                          │                           │
-                          │ cache miss                │ cache miss
-                          │                           │
-               ┌──────────▼───────────┐  ┌───────────▼────────────┐
-               │       AWS S3         │  │  resample + normalise  │
-               │  (anonymous, IMOS)   │  │                        │
-               │  NetCDF via s3fs     │  │  ds.interp() (scipy)   │
-               │  + h5netcdf engine   │  │  nan_to_num / clip     │
-               └──────────────────────┘  │  → numpy arrays        │
-                                         └────────────────────────┘
+                             ┌──────────────────────────────┐
+                             │       Frontend (WebGL)        │
+                             └──────────────┬───────────────┘
+                                            │ HTTP
+                             ┌──────────────▼───────────────┐
+                             │        FastAPI  main.py       │
+                             └───────┬───────────────┬───────┘
+                                     │               │
+                   ┌─────────────────▼──┐       ┌────▼──────────────────┐
+                   │  routers/tiles.py  │       │  routers/zarr_tiles.py│
+                   │  /tiles prefix     │       │  /zarr prefix         │
+                   │  + prewarm trigger │       │  no prewarm needed    │
+                   └────┬──────────┬───┘       └────┬──────────┬────────┘
+                        │          │                 │          │
+          ┌─────────────▼───┐  ┌───▼──────────┐  ┌──▼──────────────┐  ┌────────────────────┐
+          │ services/       │  │ services/    │  │ services/       │  │ services/          │
+          │ loader.py       │  │ renderer.py  │  │ zarr_loader.py  │  │ zarr_renderer.py   │
+          │                 │  │              │  │                 │  │                    │
+          │ load_dataset()  │  │ render_tile()│  │ load_zarr_      │  │ render_zarr_tile() │
+          │                 │  │ render_      │  │ slice()         │  │ render_zarr_       │
+          │ ┌─────────────┐ │  │ manifest()   │  │                 │  │ manifest()         │
+          │ │Dataset cache│ │  │              │  │ ┌─────────────┐ │  │                    │
+          │ │LRU maxsize=10│ │  │ ┌──────────┐│  │ │Store single-│ │  │ per-tile bbox read │
+          │ │(product,date)│ │  │ │Processed ││  │ │ton (open    │ │  │ ds.sel() + interp()│
+          │ └──────┬──────┘ │  │ │cache     ││  │ │once)        │ │  │ on small region    │
+          └────────┼────────┘  │ │LRU max=20││  │ ├─────────────┤ │  └────────────────────┘
+                   │           │ │(id(ds),  ││  │ │Slice cache  │ │
+                   │ cache miss│ │lod)      ││  │ │LRU maxsize=20│ │
+                   │           │ └──────────┘│  │ │(date)       │ │
+          ┌────────▼────────┐  └─────────────┘  │ └──────┬──────┘ │
+          │     AWS S3      │                    └────────┼────────┘
+          │ NetCDF per date │                             │ cache miss
+          │ s3fs+h5netcdf   │                    ┌────────▼────────┐
+          └─────────────────┘                    │     AWS S3      │
+                                                 │ Zarr store      │
+                                                 │ (all dates,     │
+                                                 │  single store)  │
+                                                 └─────────────────┘
 ```
 
-**Request flows**
+**Request flows — NetCDF `/tiles`**
 
-Manifest request (first time for a date):
 ```
-router → loader (S3 download + cache) → render_manifest → respond
-                                      ↘ background thread → _get_processed (all LODs)
-```
+manifest → loader (S3 download + cache) → render_manifest → respond
+                                        ↘ background threads → _get_processed (all LODs in parallel)
 
-Tile request (after prewarm):
-```
-router → loader (cache hit) → render_tile → _get_processed (cache hit)
-       → _extract_chunk → PNG encode → respond
+tile (warm) → loader (cache hit) → _get_processed (cache hit) → _extract_chunk → PNG encode
+
+tile (cold) → loader (S3 download) → _get_processed (full resample + normalise) → _extract_chunk → PNG encode
 ```
 
-Tile request (cold, no prewarm):
+**Request flows — Zarr `/zarr`**
+
 ```
-router → loader (cache hit or S3 download) → render_tile → _get_processed (resample + normalise)
-       → _extract_chunk → PNG encode → respond
+manifest → zarr_loader (store open once, slice cache) → render_zarr_manifest → respond
+
+tile → zarr_loader (slice cache hit) → bbox select → interp small region → PNG encode
 ```
 
 ---
 
 ## URL contract
 
+**NetCDF stack** (per-date files on S3):
 ```
 GET /tiles/{product_id}/{date}/{z}/{x}/{y}.png   → RGBA PNG tile
 GET /tiles/{product_id}/{date}/manifest.json     → bounds + value ranges + LOD grid config
 ```
 
+**Zarr stack** (single store, all dates):
+```
+GET /zarr/{product_id}/{date}/{z}/{x}/{y}.png    → RGBA PNG tile
+GET /zarr/{product_id}/{date}/manifest.json      → bounds + value ranges + LOD grid config
+```
+
 `z` = LOD level, `x` = cx (chunk column, 0 = westernmost), `y` = cy (chunk row, 0 = northernmost).  
 Not Web Mercator — custom atlas grid in geographic (lat/lon) space.
+
+**Available products**
+
+NetCDF (`/tiles`):
+- `ocean_current_gsla_ucur_vcur` — UCUR/VCUR, LOD 1
+- `ocean_current_gsla_gsla` — GSLA, LOD 1
+- `austemp_sst_anomaly_sst_anom_mosaic` — SST anomaly, LODs 1/2/3
+- `ausTemp_marine_heatwave_aus_dhd_mosaic` — DHD, LODs 1/2/3
+- `ausTemp_marine_heatwave_aus_ssta_mosaic` — SSTA, LODs 1/2/3
+
+Zarr (`/zarr`):
+- `zarr_sea_level_anomaly` — GSLA, LOD 1
+- `zarr_ocean_current` — UCUR/VCUR, LOD 1
 
 ---
 
@@ -82,13 +102,16 @@ Not Web Mercator — custom atlas grid in geographic (lat/lon) space.
 
 ```
 titiler-project/
-  main.py                    ← tiles router wired up
-  constants.py               ← Product dataclass + all 5 product configs + PRODUCTS dict
+  main.py                      ← both routers wired up
+  constants.py                 ← Product dataclass + 5 NetCDF products + 2 Zarr products
   routers/
-    tiles.py                 ← 2 endpoints: tile PNG + manifest + prewarm trigger
+    tiles.py                   ← /tiles: tile PNG + manifest + parallel prewarm
+    zarr_tiles.py              ← /zarr: tile PNG + manifest (no prewarm)
   services/
-    loader.py                ← S3 open → xr.Dataset → time-select → LRU cache
-    renderer.py              ← resample cache + chunk extract + PNG encode
+    loader.py                  ← NetCDF: S3 open → xr.Dataset → LRU cache
+    renderer.py                ← NetCDF: processed grid cache + chunk extract + PNG encode
+    zarr_loader.py             ← Zarr: singleton store + per-date slice cache
+    zarr_renderer.py           ← Zarr: per-tile bbox read + small resample + PNG encode
 ```
 
 ---
@@ -97,9 +120,10 @@ titiler-project/
 
 ### Dependencies
 
-`xarray`, `s3fs`, `Pillow`, `scipy`, `netCDF4`, `h5netcdf`, `h5py`, `cachetools`
+`xarray`, `s3fs`, `Pillow`, `scipy`, `netCDF4`, `h5netcdf`, `h5py`, `cachetools`, `zarr`
 
-`h5netcdf` + `h5py` are required because `netCDF4` does not support file-like objects from s3fs. `h5netcdf` does.
+`h5netcdf` + `h5py` are required because `netCDF4` does not support file-like objects from s3fs.  
+`zarr` is required for `xr.open_zarr()`.
 
 ### `constants.py`
 
@@ -140,7 +164,43 @@ render_manifest(product, ds) -> dict
 
 **Tile endpoint** — validates product, lod, and cx/cy bounds, loads dataset, renders and returns PNG.
 
-**Manifest endpoint** — returns manifest JSON, then fires a `daemon=True` background thread that calls `_get_processed` for every LOD of the product. The frontend always fetches the manifest first, so by the time the user starts requesting tiles all LODs are pre-warmed.
+**Manifest endpoint** — returns manifest JSON, then fires parallel `daemon=True` background threads (one per LOD) that call `_get_processed` for every LOD simultaneously. The frontend always fetches the manifest first, so all LODs are pre-warmed in parallel before the user starts requesting tiles.
+
+---
+
+### Zarr stack (`services/zarr_loader.py` + `services/zarr_renderer.py` + `routers/zarr_tiles.py`)
+
+**Data source**: `s3://aodn-cloud-optimised/model_sea_level_anomaly_gridded_realtime.zarr/`  
+Single store containing all dates (TIME: 2020–2026, LATITUDE: −60→10, LONGITUDE: 57→185).  
+Variables: `GSLA`, `UCUR`, `VCUR`.
+
+**`zarr_loader.py`**
+
+```python
+load_zarr_slice(date: str) -> xr.Dataset
+```
+
+- Opens the Zarr store once as a **singleton** (near-instant, metadata only) with `.sortby("TIME")` to ensure monotonic index for nearest-match selection
+- `store.sel(TIME=date, method="nearest").compute()` — fetches only that date's data (~7 MB for all variables)
+- Renames `LATITUDE`/`LONGITUDE` → `lat`/`lon`
+- **Slice cache** (`maxsize=20`, thread-safe) keyed on `date` — subsequent requests for the same date return the cached 2D slice instantly
+
+**`zarr_renderer.py`**
+
+```python
+render_zarr_tile(product, ds, lod, cx, cy) -> bytes
+render_zarr_manifest(product, ds) -> dict
+```
+
+Per-tile bbox approach — avoids full-grid resample:
+1. Compute tile's geographic extent (lat/lon bbox including padding) from `(lod, cx, cy)`
+2. `ds.sel(lat=..., lon=...)` — spatial selection, fetches only the Zarr chunks in the bbox
+3. `ds.interp()` — resample small region (~tens of source points → tile pixel size)
+4. PNG encode using the same 24-bit scalar or UV 8-bit scheme as the NetCDF renderer
+
+`val_min`/`val_max` are computed from the full date slice (not just the tile bbox) so all tiles share the same normalisation scale — consistent with the manifest's `valueRange`.
+
+No processed grid cache or prewarm needed — each tile read is independently fast.
 
 ---
 
@@ -255,4 +315,4 @@ Batch scripts are still the fastest serving approach (pre-generated PNGs, no ser
 
 - `data.json` endpoint
 - Authentication / rate limiting
-- Zarr migration
+- Multiscale Zarr (pre-built multi-resolution Zarr store eliminating per-tile resample entirely)
