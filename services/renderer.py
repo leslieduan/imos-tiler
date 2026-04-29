@@ -1,3 +1,4 @@
+import logging
 import threading
 import time
 from io import BytesIO
@@ -8,6 +9,8 @@ from cachetools import LRUCache
 from PIL import Image
 
 from constants import Product
+
+logger = logging.getLogger(__name__)
 
 # Processed grid cache: stores final numpy arrays ready for _extract_chunk.
 # Keyed by (id(ds), lod) — safe because ds is held alive by the loader's LRU cache.
@@ -40,7 +43,7 @@ def _resample_to_grid(ds: xr.Dataset, total_w: int, total_h: int) -> xr.Dataset:
     vars_ = list(ds.data_vars)
     t0 = time.time()
     result = ds.interp(lon=target_lons, lat=target_lats, method="linear")
-    print(f"[resample] {vars_} → {total_w}×{total_h}  {time.time() - t0:.2f}s")
+    logger.debug("resample %s → %dx%d  %.2fs", vars_, total_w, total_h, time.time() - t0)
     return result
 
 

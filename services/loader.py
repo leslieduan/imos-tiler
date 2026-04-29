@@ -1,3 +1,4 @@
+import logging
 import threading
 
 import s3fs
@@ -6,6 +7,8 @@ from cachetools import LRUCache, cached
 from cachetools.keys import hashkey
 
 from constants import PRODUCTS, Product
+
+logger = logging.getLogger(__name__)
 
 _cache: LRUCache = LRUCache(maxsize=10)
 _lock = threading.Lock()
@@ -20,6 +23,7 @@ def _fetch(product: Product, date: str) -> xr.Dataset:
     if path is None:
         raise FileNotFoundError(f"No file found for product '{product.id}' on {date}")
 
+    logger.info("S3 fetch: %s", path)
     ds = xr.open_dataset(s3.open(path), engine="h5netcdf")
 
     if product.coord_names:

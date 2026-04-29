@@ -1,3 +1,4 @@
+import logging
 import threading
 
 import xarray as xr
@@ -6,6 +7,8 @@ from cachetools import LRUCache
 # Single Zarr store containing all dates — opened once as a singleton.
 # Time selection is lazy (no I/O); actual data is only fetched when .compute() is called.
 ZARR_STORE_URL = "s3://aodn-cloud-optimised/model_sea_level_anomaly_gridded_realtime.zarr/"
+
+logger = logging.getLogger(__name__)
 
 _store: xr.Dataset | None = None
 _store_lock = threading.Lock()
@@ -20,6 +23,7 @@ def _get_store() -> xr.Dataset:
     global _store
     with _store_lock:
         if _store is None:
+            logger.info("Opening Zarr store: %s", ZARR_STORE_URL)
             _store = xr.open_zarr(ZARR_STORE_URL, storage_options={"anon": True}).sortby("TIME")
     return _store
 
@@ -37,7 +41,7 @@ def load_zarr_slice(date: str) -> xr.Dataset:
 
     store = _get_store()
     try:
-        # Select only the variables used by Zarr products — avoids fetching GSL and filename
+        logger.info("Zarr compute: date=%s", date)
         ds = store[["GSLA", "UCUR", "VCUR"]].sel(TIME=date, method="nearest").compute()
     except KeyError:
         raise FileNotFoundError(f"No Zarr data found near date {date}")
