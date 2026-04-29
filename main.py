@@ -16,7 +16,7 @@ app.add_middleware(
 )
 
 cog = TilerFactory()
-app.include_router(cog.router, tags=["Cloud Optimized GeoTIFF"])
+app.include_router(cog.router, prefix="/cog", tags=["Cloud Optimized GeoTIFF"])
 app.include_router(tiles_router, prefix="/tiles/netcdf", tags=["NetCDF Tiles"])
 app.include_router(zarr_router, prefix="/tiles/zarr", tags=["Zarr Tiles"])
 
