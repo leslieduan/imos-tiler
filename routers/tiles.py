@@ -12,8 +12,14 @@ router = APIRouter()
 
 
 def _prewarm(product: Product, ds: xr.Dataset) -> None:
-    for lod in product.lod_grids:
-        _get_processed(product, ds, lod)
+    threads = [
+        threading.Thread(target=_get_processed, args=(product, ds, lod), daemon=True)
+        for lod in product.lod_grids
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
 
 
 def _get_product_or_404(product_id: str):

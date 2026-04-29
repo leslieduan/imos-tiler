@@ -1,5 +1,71 @@
 # Tile Server Implementation Plan
 
+## Architecture
+
+```
+                        ┌─────────────────────────────────────────┐
+                        │              Frontend (WebGL)            │
+                        └──────────────┬──────────────────────────┘
+                                       │ HTTP
+                        ┌──────────────▼──────────────────────────┐
+                        │               FastAPI app                │
+                        │                 main.py                  │
+                        └──────────────┬──────────────────────────┘
+                                       │
+                        ┌──────────────▼──────────────────────────┐
+                        │           routers/tiles.py               │
+                        │                                          │
+                        │  GET /{product_id}/{date}/{z}/{x}/{y}.png│
+                        │  GET /{product_id}/{date}/manifest.json  │
+                        │            + prewarm trigger             │
+                        └──────┬───────────────────┬──────────────┘
+                               │                   │
+               ┌───────────────▼──────┐  ┌─────────▼──────────────┐
+               │  services/loader.py  │  │  services/renderer.py  │
+               │                      │  │                        │
+               │  load_dataset()       │  │  render_tile()         │
+               │                      │  │  render_manifest()     │
+               │  ┌────────────────┐  │  │                        │
+               │  │  Dataset cache │  │  │  ┌──────────────────┐  │
+               │  │  LRU maxsize=10│  │  │  │ Processed cache  │  │
+               │  │  key:          │  │  │  │ LRU maxsize=20   │  │
+               │  │  (product,date)│  │  │  │ key: (id(ds),lod)│  │
+               │  └───────┬────────┘  │  │  └────────┬─────────┘  │
+               └──────────┼───────────┘  └───────────┼────────────┘
+                          │                           │
+                          │ cache miss                │ cache miss
+                          │                           │
+               ┌──────────▼───────────┐  ┌───────────▼────────────┐
+               │       AWS S3         │  │  resample + normalise  │
+               │  (anonymous, IMOS)   │  │                        │
+               │  NetCDF via s3fs     │  │  ds.interp() (scipy)   │
+               │  + h5netcdf engine   │  │  nan_to_num / clip     │
+               └──────────────────────┘  │  → numpy arrays        │
+                                         └────────────────────────┘
+```
+
+**Request flows**
+
+Manifest request (first time for a date):
+```
+router → loader (S3 download + cache) → render_manifest → respond
+                                      ↘ background thread → _get_processed (all LODs)
+```
+
+Tile request (after prewarm):
+```
+router → loader (cache hit) → render_tile → _get_processed (cache hit)
+       → _extract_chunk → PNG encode → respond
+```
+
+Tile request (cold, no prewarm):
+```
+router → loader (cache hit or S3 download) → render_tile → _get_processed (resample + normalise)
+       → _extract_chunk → PNG encode → respond
+```
+
+---
+
 ## URL contract
 
 ```
