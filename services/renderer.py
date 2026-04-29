@@ -10,7 +10,12 @@ from constants import Product
 
 # Resampled full grids are expensive (scipy interp over the whole LOD resolution).
 # Cache by (dataset object id, lod) — safe because ds objects are held by the loader cache.
+#
+# _resample_inflight maps a key to a threading.Event while a thread is computing it.
+# Any thread that arrives for the same key while it is inflight waits on the event
+# instead of starting a duplicate resample — this is what makes prewarm effective.
 _resample_cache: LRUCache = LRUCache(maxsize=20)
+_resample_inflight: dict = {}
 _resample_lock = threading.Lock()
 
 
@@ -25,6 +30,11 @@ def _get_bounds(ds: xr.Dataset) -> tuple[float, float, float, float]:
 
 
 def _resample_to_grid(ds: xr.Dataset, total_w: int, total_h: int) -> xr.Dataset:
+    # The source NetCDF grid points don't align with the target pixel positions,
+    # so we interpolate: for each of the total_w×total_h output pixels, scipy finds
+    # the surrounding source points and computes a weighted average (bilinear).
+    # This covers the full LOD grid (all chunks combined), not a single tile —
+    # _extract_chunk then slices the relevant chunk out of the result.
     lon_min, lon_max, lat_min, lat_max = _get_bounds(ds)
     target_lons = np.linspace(lon_min, lon_max, total_w)
     target_lats = np.linspace(lat_max, lat_min, total_h)  # north → south
@@ -32,18 +42,37 @@ def _resample_to_grid(ds: xr.Dataset, total_w: int, total_h: int) -> xr.Dataset:
 
 
 def _get_resampled(ds: xr.Dataset, product: Product, lod: int) -> xr.Dataset:
+    # Resampling the full LOD grid is expensive (5.5M pixels for SSTA LOD3).
+    # The result is identical for every tile at the same zoom level, so we cache
+    # it by (dataset, lod). All tiles at that lod then just call _extract_chunk.
     key = (id(ds), lod)
-    with _resample_lock:
-        cached = _resample_cache.get(key)
-    if cached is not None:
-        return cached
-    grid_cols, grid_rows = product.lod_grids[lod]
-    total_w = grid_cols * product.chunk_px[0]
-    total_h = grid_rows * product.chunk_px[1]
-    result = _resample_to_grid(ds, total_w, total_h)
-    with _resample_lock:
-        _resample_cache[key] = result
-    return result
+
+    while True:
+        with _resample_lock:
+            cached = _resample_cache.get(key)
+            if cached is not None:
+                return cached
+            if key not in _resample_inflight:
+                # First thread for this key — claim it
+                event = threading.Event()
+                _resample_inflight[key] = event
+                break
+            event = _resample_inflight[key]
+        # Another thread is already computing this key — wait for it, then re-check cache
+        event.wait()
+
+    try:
+        grid_cols, grid_rows = product.lod_grids[lod]
+        total_w = grid_cols * product.chunk_px[0]
+        total_h = grid_rows * product.chunk_px[1]
+        result = _resample_to_grid(ds, total_w, total_h)
+        with _resample_lock:
+            _resample_cache[key] = result
+        return result
+    finally:
+        with _resample_lock:
+            del _resample_inflight[key]
+        event.set()  # wake up any threads that were waiting on this key
 
 
 def _extract_chunk(

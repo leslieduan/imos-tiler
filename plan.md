@@ -78,6 +78,42 @@ render_manifest(product, ds) -> dict
 
 ---
 
+## Caching strategy
+
+All caches are in-memory (RAM), held in the server process — nothing written to disk. Entries are evicted least-recently-used when the cache is full.
+
+### Dataset cache (`services/loader.py`)
+
+| | |
+|---|---|
+| Key | `(product_id, date)` |
+| Value | Raw `xr.Dataset` from S3 |
+| Size | `maxsize=10` |
+
+Downloading a NetCDF from S3 is the single most expensive operation (~seconds). This cache ensures it happens once per date; every tile request for that date reuses the in-memory dataset.
+
+### Resample cache (`services/renderer.py`)
+
+| | |
+|---|---|
+| Key | `(id(ds), lod)` |
+| Value | Resampled `xr.Dataset` at full LOD grid resolution |
+| Size | `maxsize=20` (~1–2 dates × all products) |
+
+`ds.interp()` over the full LOD grid (e.g. 2880×1920 for SSTA LOD3) via scipy is expensive and produces the same result for all tiles at that zoom level. `id(ds)` is safe as a key because the dataset object is kept alive by the dataset cache above.
+
+Sizing: all 5 products for one date consume ~11 slots (3 LODs × 3 SSTA/MHW products + 1 LOD × 2 GSLA products). `maxsize=20` comfortably holds one active date. Increasing to 30–40 would cover 3–4 dates at the cost of ~450–600 MB RAM.
+
+### Thread safety
+
+Both caches use a `threading.Lock` (FastAPI runs sync endpoints in a thread pool). The resample cache additionally tracks in-flight computations via a `threading.Event` per key: if two threads request the same `(ds, lod)` simultaneously, the second waits for the first to finish rather than computing a duplicate. This is what makes pre-warming effective.
+
+### Pre-warming
+
+The manifest endpoint fires a `daemon=True` background thread that calls `_get_resampled` for every LOD of the product immediately after responding. Since the frontend always fetches the manifest before requesting tiles, all LODs are warm before the first tile arrives. Without this, the first tile at each zoom level would pay the full resample cost.
+
+---
+
 ## Performance profile
 
 | Request | Cost |
