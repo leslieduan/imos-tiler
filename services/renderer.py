@@ -1,4 +1,5 @@
 import threading
+import time
 from io import BytesIO
 
 import numpy as np
@@ -36,7 +37,11 @@ def _resample_to_grid(ds: xr.Dataset, total_w: int, total_h: int) -> xr.Dataset:
     lon_min, lon_max, lat_min, lat_max = _get_bounds(ds)
     target_lons = np.linspace(lon_min, lon_max, total_w)
     target_lats = np.linspace(lat_max, lat_min, total_h)  # north → south
-    return ds.interp(lon=target_lons, lat=target_lats, method="linear")
+    vars_ = list(ds.data_vars)
+    t0 = time.time()
+    result = ds.interp(lon=target_lons, lat=target_lats, method="linear")
+    print(f"[resample] {vars_} → {total_w}×{total_h}  {time.time() - t0:.2f}s")
+    return result
 
 
 def _compute_scalar_arrays(
@@ -52,7 +57,7 @@ def _compute_scalar_arrays(
     if val_max == val_min:
         val_max = val_min + 1.0
 
-    raw = _resample_to_grid(ds, total_w, total_h)[product.variable].values.squeeze()
+    raw = _resample_to_grid(ds[[product.variable]], total_w, total_h)[product.variable].values.squeeze()
     ocean = (~np.isnan(raw)).astype(np.uint8)
     val_24 = np.clip(
         (np.nan_to_num(raw, nan=0.0) - val_min) / (val_max - val_min) * 16777215,
@@ -77,7 +82,7 @@ def _compute_uv_arrays(
     if u_max == u_min: u_max = u_min + 1.0
     if v_max == v_min: v_max = v_min + 1.0
 
-    ds_r = _resample_to_grid(ds, total_w, total_h)
+    ds_r = _resample_to_grid(ds[[u_var, v_var]], total_w, total_h)
     u_raw = ds_r[u_var].values.squeeze()
     v_raw = ds_r[v_var].values.squeeze()
 

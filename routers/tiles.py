@@ -56,5 +56,7 @@ def get_tile(product_id: str, date: str, z: int, x: int, y: int):
 def get_manifest(product_id: str, date: str):
     product = _get_product_or_404(product_id)
     ds = _load_or_404(product_id, date)
-    threading.Thread(target=_prewarm, args=(product, ds), daemon=True).start()
+    # threading.Thread(target=_prewarm, args=(product, ds), daemon=True).start()
+    threading.Thread(args=(product, ds), daemon=True).start()
+
     return JSONResponse(content=render_manifest(product, ds))

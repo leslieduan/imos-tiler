@@ -1,9 +1,11 @@
+import threading
+
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse, Response
 
-from constants import ZARR_PRODUCTS
+from constants import ZARR_PRODUCTS, Product
 from services.zarr_loader import load_zarr_slice
-from services.zarr_renderer import render_zarr_manifest, render_zarr_tile
+from services.zarr_renderer import _get_zarr_processed, render_zarr_manifest, render_zarr_tile
 
 router = APIRouter()
 
@@ -38,8 +40,20 @@ def get_tile(product_id: str, date: str, z: int, x: int, y: int):
     return Response(content=png_bytes, media_type="image/png")
 
 
+def _prewarm(product: Product, ds) -> None:
+    threads = [
+        threading.Thread(target=_get_zarr_processed, args=(product, ds, lod), daemon=True)
+        for lod in product.lod_grids
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+
 @router.get("/{product_id}/{date}/manifest.json")
 def get_manifest(product_id: str, date: str):
     product = _get_product_or_404(product_id)
     ds = _load_or_404(date)
+    threading.Thread(target=_prewarm, args=(product, ds), daemon=True).start()
     return JSONResponse(content=render_zarr_manifest(product, ds))

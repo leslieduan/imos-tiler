@@ -16,7 +16,7 @@ Two parallel stacks — NetCDF on-demand (`/tiles`) and Zarr (`/zarr`) — shari
                    ┌─────────────────▼──┐       ┌────▼──────────────────┐
                    │  routers/tiles.py  │       │  routers/zarr_tiles.py│
                    │  /tiles prefix     │       │  /zarr prefix         │
-                   │  + prewarm trigger │       │  no prewarm needed    │
+                   │  + prewarm trigger │       │  + prewarm trigger    │
                    └────┬──────────┬───┘       └────┬──────────┬────────┘
                         │          │                 │          │
           ┌─────────────▼───┐  ┌───▼──────────┐  ┌──▼──────────────┐  ┌────────────────────┐
@@ -27,9 +27,9 @@ Two parallel stacks — NetCDF on-demand (`/tiles`) and Zarr (`/zarr`) — shari
           │                 │  │ render_      │  │ slice()         │  │ render_zarr_       │
           │ ┌─────────────┐ │  │ manifest()   │  │                 │  │ manifest()         │
           │ │Dataset cache│ │  │              │  │ ┌─────────────┐ │  │                    │
-          │ │LRU maxsize=10│ │  │ ┌──────────┐│  │ │Store single-│ │  │ per-tile bbox read │
-          │ │(product,date)│ │  │ │Processed ││  │ │ton (open    │ │  │ ds.sel() + interp()│
-          │ └──────┬──────┘ │  │ │cache     ││  │ │once)        │ │  │ on small region    │
+          │ │LRU maxsize=10│ │  │ ┌──────────┐│  │ │Store single-│ │  │ Processed cache  │
+          │ │(product,date)│ │  │ │Processed ││  │ │ton (open    │ │  │ LRU max=20       │
+          │ └──────┬──────┘ │  │ │cache     ││  │ │once)        │ │  │ (id(ds), lod)     │
           └────────┼────────┘  │ │LRU max=20││  │ ├─────────────┤ │  └────────────────────┘
                    │           │ │(id(ds),  ││  │ │Slice cache  │ │
                    │ cache miss│ │lod)      ││  │ │LRU maxsize=20│ │
@@ -60,8 +60,11 @@ tile (cold) → loader (S3 download) → _get_processed (full resample + normali
 
 ```
 manifest → zarr_loader (store open once, slice cache) → render_zarr_manifest → respond
+                                                      ↘ background threads → _get_zarr_processed (all LODs in parallel)
 
-tile → zarr_loader (slice cache hit) → bbox select → interp small region → PNG encode
+tile (warm) → zarr_loader (slice cache hit) → _get_zarr_processed (cache hit) → _extract_chunk → PNG encode
+
+tile (cold) → zarr_loader (slice cache hit) → _get_zarr_processed (full resample + normalise) → _extract_chunk → PNG encode
 ```
 
 ---
@@ -111,7 +114,7 @@ titiler-project/
     loader.py                  ← NetCDF: S3 open → xr.Dataset → LRU cache
     renderer.py                ← NetCDF: processed grid cache + chunk extract + PNG encode
     zarr_loader.py             ← Zarr: singleton store + per-date slice cache
-    zarr_renderer.py           ← Zarr: per-tile bbox read + small resample + PNG encode
+    zarr_renderer.py           ← Zarr: processed grid cache + chunk extract + PNG encode (mirrors renderer.py)
 ```
 
 ---
@@ -192,15 +195,15 @@ render_zarr_tile(product, ds, lod, cx, cy) -> bytes
 render_zarr_manifest(product, ds) -> dict
 ```
 
-Per-tile bbox approach — avoids full-grid resample:
-1. Compute tile's geographic extent (lat/lon bbox including padding) from `(lod, cx, cy)`
-2. `ds.sel(lat=..., lon=...)` — spatial selection, fetches only the Zarr chunks in the bbox
-3. `ds.interp()` — resample small region (~tens of source points → tile pixel size)
-4. PNG encode using the same 24-bit scalar or UV 8-bit scheme as the NetCDF renderer
+Uses the same processed grid cache pattern as `renderer.py`:
+- `_zarr_processed_cache` (LRUCache maxsize=20) with inflight event tracking
+- `_get_zarr_processed(product, ds, lod)` — resamples full LOD grid + normalises → cached numpy arrays
+- `render_zarr_tile` calls `_get_zarr_processed` + `_extract_chunk` + PNG encode (no per-tile resample)
+- Imports `_extract_chunk`, `_resample_to_grid`, `_to_png_bytes` from `renderer.py` to avoid duplication
 
-`val_min`/`val_max` are computed from the full date slice (not just the tile bbox) so all tiles share the same normalisation scale — consistent with the manifest's `valueRange`.
+The Zarr slice is already fully in RAM (computed by `zarr_loader`), so the resample is pure CPU with no S3 I/O. The processed cache key uses `id(ds)` which is stable because the slice is held alive by the slice LRU cache.
 
-No processed grid cache or prewarm needed — each tile read is independently fast.
+**Why not per-tile bbox?** The Zarr store is chunked `(5, 351, 641)` — the full spatial grid is in each chunk, so a bbox `ds.sel()` still fetches the whole chunk. There is no I/O benefit from a per-tile approach, and it would recompute `val_min`/`val_max` and resample on every tile request.
 
 ---
 
@@ -246,16 +249,28 @@ The manifest endpoint fires a `daemon=True` background thread that calls `_get_p
 
 | Request | Cost |
 |---|---|
-| First request for a date (any product) | Slow — S3 download + resample for that LOD |
+| First request for a date (any product) | Slow — S3 download + variable data read |
 | Subsequent tiles, same date + same z | Fast — both caches hit, only chunk extract + PNG encode |
-| First tile at a new z (same date) | Medium — resample cache miss for that LOD, dataset cache hit |
+| First tile at a new z (same date) | Fast if manifest fetched first (prewarm complete); slow otherwise |
 | After manifest fetch (prewarm complete) | All LODs warm — every tile fast |
+
+### What actually takes the time
+
+**S3 data download dominates, not the resample.** Measured with the timing print in `_resample_to_grid`:
+
+- The first `manifest.json` for a date takes ~7s for `austemp_sst_anomaly_sst_anom_mosaic`. Almost all of that is `render_manifest` calling `ds["sst_anom_mosaic"].min().values` — this is the first `.values` access on the lazy h5netcdf dataset, which triggers s3fs to download the actual variable data blocks from S3.
+
+- The prewarm fires immediately after `manifest.json` returns. By then the variable bytes are already in the s3fs block cache (placed there by the `min/max` scan above), so `_resample_to_grid` reads from RAM. The resample itself is fast relative to the S3 download.
+
+- After `manifest.json` returns and the client requests tiles, the prewarm has already finished (or finishes quickly). All subsequent tile requests for that date hit `_processed_cache` and return near-instantly — only `_extract_chunk` + PNG encode runs per tile.
+
+**Why `_cache` (dataset cache) alone is not enough**: `load_dataset` caches a lazy `xr.Dataset` with an open s3fs file handle. The actual variable data arrays are NOT in `_cache` — they live in s3fs's internal block cache. A `_cache` hit saves the file-open + HDF5 metadata cost but not the variable data download. The `_processed_cache` is what makes tiles truly fast, because it stores the final resampled numpy arrays fully in RAM.
 
 ---
 
 ## Resampling bottleneck: how production tilers solve it
 
-`_resample_to_grid` is the core performance bottleneck. It runs `ds.interp()` (scipy bilinear interpolation) over the full LOD grid — e.g. 5.5M pixels for SSTA LOD3 — because the source NetCDF grid points don't align with tile pixel positions. This is unavoidable given the current data format.
+`_resample_to_grid` runs `ds.interp()` (scipy bilinear interpolation) over the full LOD grid — e.g. 5.5M pixels for SSTA LOD3 — because the source NetCDF grid points don't align with tile pixel positions. In practice the resample is fast once variable data is in RAM; the bottleneck is the S3 download that precedes it on cold start.
 
 ### How production titiler avoids it: COG
 

@@ -37,7 +37,8 @@ def load_zarr_slice(date: str) -> xr.Dataset:
 
     store = _get_store()
     try:
-        ds = store.sel(TIME=date, method="nearest").compute()
+        # Select only the variables used by Zarr products — avoids fetching GSL and filename
+        ds = store[["GSLA", "UCUR", "VCUR"]].sel(TIME=date, method="nearest").compute()
     except KeyError:
         raise FileNotFoundError(f"No Zarr data found near date {date}")
 
