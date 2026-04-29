@@ -60,21 +60,21 @@ render_manifest(product, ds) -> dict
 ```
 
 `render_tile` pipeline:
-1. `_get_resampled(ds, product, lod)` — resample full LOD grid via `ds.interp()` (scipy linear)
+1. `_get_processed(product, ds, lod)` — resample full LOD grid + normalise to final numpy arrays
 2. `_extract_chunk` — slice the requested cx/cy with 1-pixel padding + edge replication
 3. PNG encode — 24-bit scalar (SSTA/MHW/SLA) or UV 8-bit (ocean current), `optimize=False`
 
-**Resample cache** (`maxsize=20`, thread-safe) keyed on `(id(ds), lod)`:
-- `ds.interp()` over the full LOD grid (e.g. 2880×1920 for SSTA LOD3) is expensive
-- Result is identical for all tiles sharing the same product+date+lod
+**Processed grid cache** (`maxsize=20`, thread-safe) keyed on `(id(ds), lod)`:
+- Combines the resample (`ds.interp()` via scipy) and all numpy ops (nan_to_num, clip, bit shift) into one cached step
+- Stores final numpy arrays: `(val_24, ocean)` for scalar products, `(u_norm, v_norm, ocean)` for ocean current
+- After a cache hit, per-tile work is only `_extract_chunk` + PNG encode — no full-grid operations
 - `id(ds)` is stable because `ds` is held alive by the loader's LRU cache
-- First tile per (date, lod) is slow; all subsequent tiles at that lod are fast
 
 ### `routers/tiles.py`
 
 **Tile endpoint** — validates product, lod, and cx/cy bounds, loads dataset, renders and returns PNG.
 
-**Manifest endpoint** — returns manifest JSON, then fires a `daemon=True` background thread that calls `_get_resampled` for every LOD of the product. The frontend always fetches the manifest first, so by the time the user starts requesting tiles all LODs are pre-warmed.
+**Manifest endpoint** — returns manifest JSON, then fires a `daemon=True` background thread that calls `_get_processed` for every LOD of the product. The frontend always fetches the manifest first, so by the time the user starts requesting tiles all LODs are pre-warmed.
 
 ---
 
@@ -92,25 +92,27 @@ All caches are in-memory (RAM), held in the server process — nothing written t
 
 Downloading a NetCDF from S3 is the single most expensive operation (~seconds). This cache ensures it happens once per date; every tile request for that date reuses the in-memory dataset.
 
-### Resample cache (`services/renderer.py`)
+### Processed grid cache (`services/renderer.py`)
 
 | | |
 |---|---|
 | Key | `(id(ds), lod)` |
-| Value | Resampled `xr.Dataset` at full LOD grid resolution |
+| Value | `(val_24, ocean)` for scalar products; `(u_norm, v_norm, ocean)` for ocean current |
 | Size | `maxsize=20` (~1–2 dates × all products) |
 
-`ds.interp()` over the full LOD grid (e.g. 2880×1920 for SSTA LOD3) via scipy is expensive and produces the same result for all tiles at that zoom level. `id(ds)` is safe as a key because the dataset object is kept alive by the dataset cache above.
+Combines the resample and all numpy normalisation ops into one cached step. On a cache hit, per-tile work is only `_extract_chunk` + PNG encode — no full-grid operations at all. Storing final uint8/uint32 arrays is also more memory-efficient than storing the intermediate float64 resampled dataset (~27 MB vs ~44 MB for SSTA LOD3).
 
-Sizing: all 5 products for one date consume ~11 slots (3 LODs × 3 SSTA/MHW products + 1 LOD × 2 GSLA products). `maxsize=20` comfortably holds one active date. Increasing to 30–40 would cover 3–4 dates at the cost of ~450–600 MB RAM.
+`id(ds)` is safe as a key because the dataset object is kept alive by the dataset cache above.
+
+Sizing: all 5 products for one date consume ~11 slots (3 LODs × 3 SSTA/MHW products + 1 LOD × 2 GSLA products). `maxsize=20` comfortably holds one active date. Increasing to 30–40 would cover 3–4 dates at the cost of ~300–400 MB RAM.
 
 ### Thread safety
 
-Both caches use a `threading.Lock` (FastAPI runs sync endpoints in a thread pool). The resample cache additionally tracks in-flight computations via a `threading.Event` per key: if two threads request the same `(ds, lod)` simultaneously, the second waits for the first to finish rather than computing a duplicate. This is what makes pre-warming effective.
+Both caches use a `threading.Lock` (FastAPI runs sync endpoints in a thread pool). The processed grid cache additionally tracks in-flight computations via a `threading.Event` per key: if two threads request the same `(ds, lod)` simultaneously, the second waits for the first to finish rather than computing a duplicate. This is what makes pre-warming effective.
 
 ### Pre-warming
 
-The manifest endpoint fires a `daemon=True` background thread that calls `_get_resampled` for every LOD of the product immediately after responding. Since the frontend always fetches the manifest before requesting tiles, all LODs are warm before the first tile arrives. Without this, the first tile at each zoom level would pay the full resample cost.
+The manifest endpoint fires a `daemon=True` background thread that calls `_get_processed` for every LOD of the product immediately after responding. Since the frontend always fetches the manifest before requesting tiles, all LODs are warm before the first tile arrives. Without this, the first tile at each zoom level would pay the full resample + normalisation cost.
 
 ---
 
@@ -137,9 +139,9 @@ With Zarr, a different rendering architecture becomes viable: read only the geog
 | | NetCDF (current) | Zarr (future) |
 |---|---|---|
 | Dataset LRU cache | Critical | Not needed (`open_dataset` is near-instant) |
-| Resample cache | Critical | Not needed if per-tile bbox read |
+| Processed grid cache | Critical | Not needed if per-tile bbox read |
 | Prewarm | Very useful | Not needed |
-| Architecture | Load full dataset → resample full grid → extract chunk | Read tile bbox → resample small slice → encode |
+| Architecture | Load full dataset → resample + normalise full grid → extract chunk | Read tile bbox → resample small slice → encode |
 
 Blocked on whether IMOS data is available in Zarr on S3, or requires conversion.
 

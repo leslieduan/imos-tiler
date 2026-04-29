@@ -6,14 +6,14 @@ from fastapi.responses import JSONResponse, Response
 
 from constants import Product, PRODUCTS
 from services.loader import load_dataset
-from services.renderer import _get_resampled, render_manifest, render_tile
+from services.renderer import _get_processed, render_manifest, render_tile
 
 router = APIRouter()
 
 
 def _prewarm(product: Product, ds: xr.Dataset) -> None:
     for lod in product.lod_grids:
-        _get_resampled(ds, product, lod)
+        _get_processed(product, ds, lod)
 
 
 def _get_product_or_404(product_id: str):

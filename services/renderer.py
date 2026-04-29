@@ -8,15 +8,13 @@ from PIL import Image
 
 from constants import Product
 
-# Resampled full grids are expensive (scipy interp over the whole LOD resolution).
-# Cache by (dataset object id, lod) — safe because ds objects are held by the loader cache.
-#
-# _resample_inflight maps a key to a threading.Event while a thread is computing it.
-# Any thread that arrives for the same key while it is inflight waits on the event
-# instead of starting a duplicate resample — this is what makes prewarm effective.
-_resample_cache: LRUCache = LRUCache(maxsize=20)
-_resample_inflight: dict = {}
-_resample_lock = threading.Lock()
+# Processed grid cache: stores final numpy arrays ready for _extract_chunk.
+# Keyed by (id(ds), lod) — safe because ds is held alive by the loader's LRU cache.
+# Merges the old resample + numpy ops into one step: resample happens here but
+# only once per (date, lod); all tiles at that lod just call _extract_chunk.
+_processed_cache: LRUCache = LRUCache(maxsize=20)
+_processed_inflight: dict = {}
+_processed_lock = threading.Lock()
 
 
 def _get_bounds(ds: xr.Dataset) -> tuple[float, float, float, float]:
@@ -41,38 +39,89 @@ def _resample_to_grid(ds: xr.Dataset, total_w: int, total_h: int) -> xr.Dataset:
     return ds.interp(lon=target_lons, lat=target_lats, method="linear")
 
 
-def _get_resampled(ds: xr.Dataset, product: Product, lod: int) -> xr.Dataset:
-    # Resampling the full LOD grid is expensive (5.5M pixels for SSTA LOD3).
+def _compute_scalar_arrays(
+    product: Product, ds: xr.Dataset, lod: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Resample + normalise → (val_24, ocean) over the full LOD grid."""
+    grid_cols, grid_rows = product.lod_grids[lod]
+    total_w = grid_cols * product.chunk_px[0]
+    total_h = grid_rows * product.chunk_px[1]
+
+    val_min = float(ds[product.variable].min(skipna=True).values)
+    val_max = float(ds[product.variable].max(skipna=True).values)
+    if val_max == val_min:
+        val_max = val_min + 1.0
+
+    raw = _resample_to_grid(ds, total_w, total_h)[product.variable].values.squeeze()
+    ocean = (~np.isnan(raw)).astype(np.uint8)
+    val_24 = np.clip(
+        (np.nan_to_num(raw, nan=0.0) - val_min) / (val_max - val_min) * 16777215,
+        0, 16777215,
+    ).astype(np.uint32)
+    return val_24, ocean
+
+
+def _compute_uv_arrays(
+    product: Product, ds: xr.Dataset, lod: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Resample + normalise → (u_norm, v_norm, ocean) over the full LOD grid."""
+    u_var, v_var = product.variable
+    grid_cols, grid_rows = product.lod_grids[lod]
+    total_w = grid_cols * product.chunk_px[0]
+    total_h = grid_rows * product.chunk_px[1]
+
+    u_min = float(ds[u_var].min(skipna=True).values)
+    u_max = float(ds[u_var].max(skipna=True).values)
+    v_min = float(ds[v_var].min(skipna=True).values)
+    v_max = float(ds[v_var].max(skipna=True).values)
+    if u_max == u_min: u_max = u_min + 1.0
+    if v_max == v_min: v_max = v_min + 1.0
+
+    ds_r = _resample_to_grid(ds, total_w, total_h)
+    u_raw = ds_r[u_var].values.squeeze()
+    v_raw = ds_r[v_var].values.squeeze()
+
+    ocean = (~np.isnan(u_raw)).astype(np.uint8)
+    u_norm = np.clip(
+        (np.nan_to_num(u_raw, nan=0.0) - u_min) / (u_max - u_min) * 255, 0, 255
+    ).astype(np.uint8)
+    v_norm = np.clip(
+        (np.nan_to_num(v_raw, nan=0.0) - v_min) / (v_max - v_min) * 255, 0, 255
+    ).astype(np.uint8)
+    return u_norm, v_norm, ocean
+
+
+def _get_processed(product: Product, ds: xr.Dataset, lod: int) -> tuple:
+    # Resampling the full LOD grid is expensive (e.g. 5.5M pixels for SSTA LOD3).
     # The result is identical for every tile at the same zoom level, so we cache
-    # it by (dataset, lod). All tiles at that lod then just call _extract_chunk.
+    # the final numpy arrays here. All tiles at that lod then just call _extract_chunk.
     key = (id(ds), lod)
 
     while True:
-        with _resample_lock:
-            cached = _resample_cache.get(key)
+        with _processed_lock:
+            cached = _processed_cache.get(key)
             if cached is not None:
                 return cached
-            if key not in _resample_inflight:
-                # First thread for this key — claim it
+            if key not in _processed_inflight:
                 event = threading.Event()
-                _resample_inflight[key] = event
+                _processed_inflight[key] = event
                 break
-            event = _resample_inflight[key]
-        # Another thread is already computing this key — wait for it, then re-check cache
+            event = _processed_inflight[key]
+        # Another thread is computing this key — wait then re-check cache
         event.wait()
 
     try:
-        grid_cols, grid_rows = product.lod_grids[lod]
-        total_w = grid_cols * product.chunk_px[0]
-        total_h = grid_rows * product.chunk_px[1]
-        result = _resample_to_grid(ds, total_w, total_h)
-        with _resample_lock:
-            _resample_cache[key] = result
+        if isinstance(product.variable, list):
+            result = _compute_uv_arrays(product, ds, lod)
+        else:
+            result = _compute_scalar_arrays(product, ds, lod)
+        with _processed_lock:
+            _processed_cache[key] = result
         return result
     finally:
-        with _resample_lock:
-            del _resample_inflight[key]
-        event.set()  # wake up any threads that were waiting on this key
+        with _processed_lock:
+            del _processed_inflight[key]
+        event.set()
 
 
 def _extract_chunk(
@@ -118,19 +167,7 @@ def _render_scalar_tile(product: Product, ds: xr.Dataset, lod: int, cx: int, cy:
     total_w = grid_cols * product.chunk_px[0]
     total_h = grid_rows * product.chunk_px[1]
 
-    val_min = float(ds[product.variable].min(skipna=True).values)
-    val_max = float(ds[product.variable].max(skipna=True).values)
-    if val_max == val_min:
-        val_max = val_min + 1.0
-
-    ds_r = _get_resampled(ds, product, lod)
-    raw = ds_r[product.variable].values.squeeze()
-
-    ocean = (~np.isnan(raw)).astype(np.uint8)
-    filled = np.nan_to_num(raw, nan=0.0)
-    val_24 = np.clip(
-        (filled - val_min) / (val_max - val_min) * 16777215, 0, 16777215
-    ).astype(np.uint32)
+    val_24, ocean = _get_processed(product, ds, lod)
 
     chunk_24 = _extract_chunk(val_24, cx, cy, total_w, total_h, product.chunk_px, product.padding)
     chunk_m  = _extract_chunk(ocean,  cx, cy, total_w, total_h, product.chunk_px, product.padding)
@@ -147,29 +184,11 @@ def _render_scalar_tile(product: Product, ds: xr.Dataset, lod: int, cx: int, cy:
 
 
 def _render_ocean_current_tile(product: Product, ds: xr.Dataset, lod: int, cx: int, cy: int) -> bytes:
-    u_var, v_var = product.variable
     grid_cols, grid_rows = product.lod_grids[lod]
     total_w = grid_cols * product.chunk_px[0]
     total_h = grid_rows * product.chunk_px[1]
 
-    u_min = float(ds[u_var].min(skipna=True).values)
-    u_max = float(ds[u_var].max(skipna=True).values)
-    v_min = float(ds[v_var].min(skipna=True).values)
-    v_max = float(ds[v_var].max(skipna=True).values)
-    if u_max == u_min: u_max = u_min + 1.0
-    if v_max == v_min: v_max = v_min + 1.0
-
-    ds_r = _get_resampled(ds, product, lod)
-    u_raw = ds_r[u_var].values.squeeze()
-    v_raw = ds_r[v_var].values.squeeze()
-
-    ocean = (~np.isnan(u_raw)).astype(np.uint8)
-    u_norm = np.clip(
-        (np.nan_to_num(u_raw, nan=0.0) - u_min) / (u_max - u_min) * 255, 0, 255
-    ).astype(np.uint8)
-    v_norm = np.clip(
-        (np.nan_to_num(v_raw, nan=0.0) - v_min) / (v_max - v_min) * 255, 0, 255
-    ).astype(np.uint8)
+    u_norm, v_norm, ocean = _get_processed(product, ds, lod)
 
     chunk_u = _extract_chunk(u_norm, cx, cy, total_w, total_h, product.chunk_px, product.padding)
     chunk_v = _extract_chunk(v_norm, cx, cy, total_w, total_h, product.chunk_px, product.padding)
