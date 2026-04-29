@@ -193,23 +193,61 @@ The manifest endpoint fires a `daemon=True` background thread that calls `_get_p
 
 ---
 
-## Future: Zarr
+## Resampling bottleneck: how production tilers solve it
 
-Switching the source data from NetCDF to Zarr would improve S3 read performance significantly:
+`_resample_to_grid` is the core performance bottleneck. It runs `ds.interp()` (scipy bilinear interpolation) over the full LOD grid — e.g. 5.5M pixels for SSTA LOD3 — because the source NetCDF grid points don't align with tile pixel positions. This is unavoidable given the current data format.
 
-- **NetCDF (HDF5)**: single monolithic file, sequential HTTP range requests, whole file must be read before data is usable
-- **Zarr**: each chunk is a separate S3 object, reads are parallel and lazy — only the chunks overlapping the requested region are fetched
+### How production titiler avoids it: COG
 
-With Zarr, a different rendering architecture becomes viable: read only the geographic bbox for each tile from S3 (instead of the full dataset), resample just that small region, and skip the resample cache entirely. Every tile request would be independently fast without prewarm.
+Production titiler is fast because it uses **Cloud-Optimized GeoTIFF (COG)**, a format with a pre-built multi-resolution overview pyramid:
 
-| | NetCDF (current) | Zarr (future) |
-|---|---|---|
-| Dataset LRU cache | Critical | Not needed (`open_dataset` is near-instant) |
-| Processed grid cache | Critical | Not needed if per-tile bbox read |
-| Prewarm | Very useful | Not needed |
-| Architecture | Load full dataset → resample + normalise full grid → extract chunk | Read tile bbox → resample small slice → encode |
+```
+COG file (S3)
+  zoom 10  →  pre-tiled 256×256 blocks at full resolution
+  zoom 9   →  pre-tiled at 1/2 resolution
+  zoom 8   →  pre-tiled at 1/4 resolution  (pre-resampled at write time)
+  ...
+```
 
-Blocked on whether IMOS data is available in Zarr on S3, or requires conversion.
+At request time, GDAL/rasterio picks the matching overview level, issues a single HTTP range request for just those bytes, and returns — **no resampling, no full file download**. The resampling happened once at data preparation time, not at request time.
+
+### Our current approach
+
+NetCDF has no overview pyramid. We must download the whole file and resample at request time via scipy. We mitigate this with:
+- **Dataset cache** — download once per date
+- **Processed grid cache** — resample once per (date, lod), reuse for all tiles at that zoom
+- **Parallel prewarm** — all LODs resample concurrently in background after manifest fetch
+
+This keeps the server usable but the first resample per LOD is still slow (~seconds for large grids).
+
+### Future: multiscale Zarr
+
+Zarr can achieve the same result as COG overviews by storing **multiple resolution levels explicitly** at conversion time:
+
+```
+ssta_2026-01-15.zarr/
+  0/   ← full resolution  (LOD3: 2880×1920)
+  1/   ← 1/2 resolution   (LOD2: 1440×960)
+  2/   ← 1/4 resolution   (LOD1: 720×576)
+```
+
+At request time: open the Zarr store (near-instant, metadata only), select the right resolution level, read only the spatial chunks for the tile bbox — no full-dataset load, no resample.
+
+The conversion step is essentially the existing batch scripts rewritten to output multiscale Zarr to S3 instead of PNG chunks to disk.
+
+### Comparison across all approaches
+
+| | Batch scripts (current) | NetCDF on-demand (current) | Multiscale Zarr (future) |
+|---|---|---|---|
+| Pre-computation | All tiles pre-generated as PNG | None | Multiscale Zarr per date written to S3 |
+| Server work per tile | Static file serve | S3 download + resample + encode | Spatial bbox read + encode |
+| Resampling | At preparation time | At request time (cached) | At preparation time |
+| Storage | NetCDF + all PNG tiles | NetCDF only | NetCDF + Zarr stores |
+| Flexibility | Only pre-generated dates | Any date on-demand | Any date after conversion |
+| Caches needed | None (nginx) | Dataset + processed grid + prewarm | None needed |
+| Tooling | xarray/PIL | xarray/scipy/PIL | xarray/zarr/PIL |
+
+Batch scripts are still the fastest serving approach (pre-generated PNGs, no server computation). The on-demand tile server trades serving speed for storage efficiency and flexibility. Multiscale Zarr sits in between: pre-compute the resampling, defer only PNG encoding to request time.
 
 ---
 
