@@ -15,7 +15,7 @@ Two parallel stacks — NetCDF on-demand (`/tiles`) and Zarr (`/zarr`) — shari
                                     │           │
                ┌────────────────────▼─┐   ┌─────▼────────────────┐
                │   routers/tiles.py   │   │ routers/zarr_tiles.py │
-               │   /tiles + prewarm   │   │ /zarr  + prewarm      │
+               │   /tiles             │   │ /zarr                 │
                └──────┬──────────┬────┘   └─────┬──────────┬──────┘
                       │          │               │          │
           ┌───────────▼──┐  ┌────▼──────────┐  ┌▼──────────────┐  ┌──────────────────┐
@@ -36,22 +36,20 @@ Two parallel stacks — NetCDF on-demand (`/tiles`) and Zarr (`/zarr`) — shari
         └─────────────────┘               └────────────────────┘
 ```
 
-**Request flows — NetCDF `/tiles`**
+**Request flows — NetCDF `/tiles/netcdf`**
 
 ```
 manifest → load_dataset (S3 open + metadata) → render_manifest (reads variable data → S3 download) → respond
-                                             ↘ background threads → _get_processed all LODs in parallel (fast, data in RAM)
 
 tile (warm) → load_dataset (cache hit) → _get_processed (cache hit) → _extract_chunk → PNG encode
 
 tile (cold) → load_dataset → _get_processed (resample + normalise) → _extract_chunk → PNG encode
 ```
 
-**Request flows — Zarr `/zarr`**
+**Request flows — Zarr `/tiles/zarr`**
 
 ```
 manifest → load_zarr_slice (store open once; .compute() downloads TIME chunk from S3) → render_zarr_manifest → respond
-                                                                                       ↘ background threads → _get_zarr_processed all LODs in parallel
 
 tile (warm) → load_zarr_slice (cache hit) → _get_zarr_processed (cache hit) → _extract_chunk → PNG encode
 
@@ -63,11 +61,11 @@ tile (cold) → load_zarr_slice (.compute() → S3) → _get_zarr_processed (res
 ## URL contract
 
 ```
-GET /tiles/{product_id}/{date}/{z}/{x}/{y}.png   → RGBA PNG tile
-GET /tiles/{product_id}/{date}/manifest.json     → bounds + value ranges + LOD grid config
+GET /tiles/netcdf/{product_id}/{date}/{z}/{x}/{y}.png   → RGBA PNG tile
+GET /tiles/netcdf/{product_id}/{date}/manifest.json     → bounds + value ranges + LOD grid config
 
-GET /zarr/{product_id}/{date}/{z}/{x}/{y}.png    → RGBA PNG tile
-GET /zarr/{product_id}/{date}/manifest.json      → bounds + value ranges + LOD grid config
+GET /tiles/zarr/{product_id}/{date}/{z}/{x}/{y}.png     → RGBA PNG tile
+GET /tiles/zarr/{product_id}/{date}/manifest.json       → bounds + value ranges + LOD grid config
 ```
 
 `z` = LOD level, `x` = chunk column (0 = westernmost), `y` = chunk row (0 = northernmost). Not Web Mercator — custom atlas grid in geographic (lat/lon) space.
@@ -76,13 +74,13 @@ GET /zarr/{product_id}/{date}/manifest.json      → bounds + value ranges + LOD
 
 | stack | product_id | variable | LODs |
 |---|---|---|---|
-| `/tiles` | `ocean_current_gsla_ucur_vcur` | UCUR/VCUR | 1 |
-| `/tiles` | `ocean_current_gsla_gsla` | GSLA | 1 |
-| `/tiles` | `austemp_sst_anomaly_sst_anom_mosaic` | SST anomaly | 1/2/3 |
-| `/tiles` | `ausTemp_marine_heatwave_aus_dhd_mosaic` | DHD | 1/2/3 |
-| `/tiles` | `ausTemp_marine_heatwave_aus_ssta_mosaic` | SSTA | 1/2/3 |
-| `/zarr` | `zarr_sea_level_anomaly` | GSLA | 1 |
-| `/zarr` | `zarr_ocean_current` | UCUR/VCUR | 1 |
+| `/tiles/netcdf` | `ocean_current_gsla_ucur_vcur` | UCUR/VCUR | 1 |
+| `/tiles/netcdf` | `ocean_current_gsla_gsla` | GSLA | 1 |
+| `/tiles/netcdf` | `austemp_sst_anomaly_sst_anom_mosaic` | SST anomaly | 1/2/3 |
+| `/tiles/netcdf` | `ausTemp_marine_heatwave_aus_dhd_mosaic` | DHD | 1/2/3 |
+| `/tiles/netcdf` | `ausTemp_marine_heatwave_aus_ssta_mosaic` | SSTA | 1/2/3 |
+| `/tiles/zarr` | `zarr_sea_level_anomaly` | GSLA | 1 |
+| `/tiles/zarr` | `zarr_ocean_current` | UCUR/VCUR | 1 |
 
 ---
 
@@ -93,8 +91,8 @@ titiler-project/
   main.py                      ← both routers wired up, CORS middleware, titiler COG router
   constants.py                 ← Product dataclass + 5 NetCDF products + 2 Zarr products
   routers/
-    tiles.py                   ← /tiles endpoints + parallel prewarm on manifest
-    zarr_tiles.py              ← /zarr endpoints + parallel prewarm on manifest
+    netcdf_tiles.py            ← /tiles/netcdf endpoints
+    zarr_tiles.py              ← /tiles/zarr endpoints
   services/
     loader.py                  ← NetCDF: S3 open → lazy xr.Dataset → LRU dataset cache
     renderer.py                ← NetCDF: processed grid cache + chunk extract + PNG encode
@@ -124,11 +122,7 @@ Stores the final resampled + normalised numpy arrays: `(val_24, ocean)` for scal
 
 ### Thread safety
 
-All caches use `threading.Lock` (FastAPI runs sync endpoints in a thread pool). The processed grid caches additionally track in-flight computations with a `threading.Event` per key: if two threads request the same `(ds, lod)` simultaneously, the second waits for the first rather than computing a duplicate.
-
-### Prewarm
-
-Both manifest endpoints fire `daemon=True` background threads (one per LOD) that call `_get_processed` / `_get_zarr_processed` for every LOD in parallel immediately after responding. Since the frontend fetches the manifest before requesting tiles, all LODs are warm before the first tile arrives.
+All caches use `threading.Lock` (FastAPI runs sync endpoints in a thread pool). The processed grid caches additionally track in-flight computations with a `threading.Event` per key: if two threads request the same `(ds, lod)` simultaneously, the second waits for the first rather than computing a duplicate. This ensures the resample runs only once per `(date, lod)` even under concurrent requests.
 
 ---
 
@@ -142,8 +136,8 @@ For `austemp_sst_anomaly_sst_anom_mosaic`, the first `manifest.json` takes ~7s. 
 
 1. `load_dataset` opens the S3 file and reads HDF5 metadata — fast, no variable data yet.
 2. `render_manifest` calls `ds["sst_anom_mosaic"].min().values` — this is the first `.values` access on the lazy h5netcdf dataset, triggering s3fs to download the actual variable data from S3. **This is the ~7s.**
-3. Prewarm fires after manifest returns. The variable bytes are now in the s3fs block cache, so `_resample_to_grid` reads from RAM. The resample is fast relative to the S3 download.
-4. By the time the client receives the manifest and requests the first tile, the prewarm is done. All tiles return near-instantly.
+3. The first tile request triggers `_get_processed` → `_resample_to_grid`. The variable bytes are now in the s3fs block cache, so the resample reads from RAM and is fast.
+4. All subsequent tiles at the same LOD hit `_processed_cache` and return near-instantly.
 
 **Why `_cache` (dataset cache) alone is not enough**: it stores a lazy dataset with an open file handle, not the variable data. If the s3fs block cache is warm, repeated reads are fast. If evicted, the variable data is re-fetched from S3 even on a dataset cache hit. Only `_processed_cache` guarantees fully in-RAM numpy arrays.
 

@@ -1,25 +1,11 @@
-import threading
-
-import xarray as xr
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse, Response
 
-from constants import Product, PRODUCTS
+from constants import PRODUCTS
 from services.loader import load_dataset
-from services.renderer import _get_processed, render_manifest, render_tile
+from services.renderer import render_manifest, render_tile
 
 router = APIRouter()
-
-
-def _prewarm(product: Product, ds: xr.Dataset) -> None:
-    threads = [
-        threading.Thread(target=_get_processed, args=(product, ds, lod), daemon=True)
-        for lod in product.lod_grids
-    ]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
 
 
 def _get_product_or_404(product_id: str):
@@ -56,7 +42,4 @@ def get_tile(product_id: str, date: str, z: int, x: int, y: int):
 def get_manifest(product_id: str, date: str):
     product = _get_product_or_404(product_id)
     ds = _load_or_404(product_id, date)
-    # threading.Thread(target=_prewarm, args=(product, ds), daemon=True).start()
-    threading.Thread(args=(product, ds), daemon=True).start()
-
     return JSONResponse(content=render_manifest(product, ds))
