@@ -4,6 +4,8 @@ import threading
 import xarray as xr
 from cachetools import LRUCache
 
+from constants import COORD_NAMES
+
 # Single Zarr store containing all dates — opened once as a singleton.
 # Time selection is lazy (no I/O); actual data is only fetched when .compute() is called.
 ZARR_STORE_URL = "s3://aodn-cloud-optimised/model_sea_level_anomaly_gridded_realtime.zarr/"
@@ -46,7 +48,9 @@ def load_zarr_slice(date: str) -> xr.Dataset:
     except KeyError:
         raise FileNotFoundError(f"No Zarr data found near date {date}")
 
-    ds = ds.rename({"LATITUDE": "lat", "LONGITUDE": "lon"})
+    rename = {k: v for k, v in COORD_NAMES.items() if k in ds.dims or k in ds.coords}
+    if rename:
+        ds = ds.rename(rename)
 
     with _slice_lock:
         _slice_cache[date] = ds

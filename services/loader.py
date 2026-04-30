@@ -1,12 +1,14 @@
 import logging
 import threading
+from datetime import datetime, timezone
 
+import numpy as np
 import s3fs
 import xarray as xr
 from cachetools import LRUCache, cached
 from cachetools.keys import hashkey
 
-from constants import PRODUCTS, Product
+from constants import COORD_NAMES, PRODUCTS, Product
 
 logger = logging.getLogger(__name__)
 
@@ -26,11 +28,13 @@ def _fetch(product: Product, date: str) -> xr.Dataset:
     logger.info("S3 fetch: %s", path)
     ds = xr.open_dataset(s3.open(path), engine="h5netcdf")
 
-    if product.coord_names:
-        ds = ds.rename(product.coord_names)
+    rename = {k: v for k, v in COORD_NAMES.items() if k in ds.dims or k in ds.coords}
+    if rename:
+        ds = ds.rename(rename)
 
-    if product.use_isel_time:
-        ds = ds.isel(time=0)
+    if np.issubdtype(ds.time.dtype, np.integer):
+        ts = int(datetime.strptime(date, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp())
+        ds = ds.sel(time=ts, method="nearest")
     else:
         ds = ds.sel(time=date)
 
