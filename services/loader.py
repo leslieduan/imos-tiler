@@ -26,6 +26,7 @@ def _fetch(product: Product, date: str) -> xr.Dataset:
         raise FileNotFoundError(f"No file found for product '{product.id}' on {date}")
 
     logger.info("S3 fetch: %s", path)
+    # xr.open_dataset() only reads metadata (dimensions, coordinates, variable schema). The actual array data is pulled lazily when the renderer accesses variables.
     ds = xr.open_dataset(s3.open(path), engine="h5netcdf")
 
     rename = {k: v for k, v in COORD_NAMES.items() if k in ds.dims or k in ds.coords}
@@ -41,6 +42,7 @@ def _fetch(product: Product, date: str) -> xr.Dataset:
     return ds
 
 
+# This lock ensure only one thread can read and write cache at the same time. When cache is writing, reading disallowed.
 @cached(cache=_cache, key=lambda product_id, date: hashkey(product_id, date), lock=_lock)
 def load_dataset(product_id: str, date: str) -> xr.Dataset:
     product = PRODUCTS[product_id]

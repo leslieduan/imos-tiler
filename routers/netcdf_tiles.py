@@ -1,4 +1,6 @@
-from fastapi import APIRouter, HTTPException
+import math
+
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import JSONResponse, Response
 
 from constants import PRODUCTS
@@ -43,3 +45,28 @@ def get_manifest(product_id: str, date: str):
     product = _get_product_or_404(product_id)
     ds = _load_or_404(product_id, date)
     return JSONResponse(content=render_manifest(product, ds))
+
+
+@router.get("/{product_id}/{date}/point")
+def get_point(product_id: str, date: str, lat: float = Query(...), lon: float = Query(...)):
+    # This is expected to be called after get_manifest and get_tile. Since variable value will be cached by either one, the response in this will be quick.
+    product = _get_product_or_404(product_id)
+    ds = _load_or_404(product_id, date)
+
+    # Lazy load only read this point.
+    point = ds.sel(lat=lat, lon=lon, method="nearest")
+
+    variables = product.variable if isinstance(product.variable, list) else [product.variable]
+    values = {}
+    for var in variables:
+        v = float(point[var].squeeze())
+        values[var] = {
+            "value": None if math.isnan(v) else v,
+            "units": point[var].attrs.get("units"),
+        }
+
+    return JSONResponse(content={
+        "lat": float(point.lat.values),
+        "lon": float(point.lon.values),
+        "variables": values,
+    })
