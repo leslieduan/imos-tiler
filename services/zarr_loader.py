@@ -4,7 +4,8 @@ import threading
 import xarray as xr
 from cachetools import LRUCache
 
-from constants import COORD_NAMES
+from constants import COORD_NAMES, DEFAULT_ZARR_LOD_GRIDS, Product
+from services.utils import compute_lod_grids
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +24,33 @@ def _get_store(store_url: str) -> xr.Dataset:
         if store_url not in _stores:
             _stores[store_url] = xr.open_zarr(store_url, storage_options={"anon": True}).sortby("TIME")
     return _stores[store_url]
+
+
+def get_lod_grids(product: Product) -> dict[int, tuple[int, int]]:
+    """
+    Ensure product.lod_grids is populated from actual store dimensions, then return it.
+    Writes back to product on first call so subsequent callers find it already set.
+    """
+    if product.lod_grids:
+        return product.lod_grids
+
+    store = _get_store(product.source_path)
+    lat_dim = next((d for d in ("lat", "LATITUDE") if d in store.dims), None)
+    lon_dim = next((d for d in ("lon", "LONGITUDE") if d in store.dims), None)
+
+    if lat_dim is None or lon_dim is None:
+        object.__setattr__(product, 'lod_grids', DEFAULT_ZARR_LOD_GRIDS)
+        return product.lod_grids
+
+    data_height = store.dims[lat_dim]
+    data_width = store.dims[lon_dim]
+    grids = compute_lod_grids(data_width, data_height, product.chunk_px)
+    logger.info(
+        "Computed LOD grids for %s: data=%dx%d chunk=%s → %s",
+        product.id, data_width, data_height, product.chunk_px, grids,
+    )
+    object.__setattr__(product, 'lod_grids', grids)
+    return product.lod_grids
 
 
 def load_zarr_slice(store_url: str, date: str, variables: list[str]) -> xr.Dataset:

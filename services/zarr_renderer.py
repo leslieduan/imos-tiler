@@ -15,7 +15,7 @@ import numpy as np
 import xarray as xr
 from cachetools import LRUCache
 
-from constants import Product
+from constants import LOD_ZOOM_THRESHOLDS, Product
 from services.netcdf_renderer import _extract_chunk, _resample_to_grid, _to_png_bytes
 
 _zarr_processed_cache: LRUCache = LRUCache(maxsize=20)
@@ -85,7 +85,11 @@ def _get_zarr_processed(product: Product, ds: xr.Dataset, lod: int) -> tuple:
         event.wait()
 
     try:
-        result = _compute_uv(product, ds, lod) if isinstance(product.variable, list) else _compute_scalar(product, ds, lod)
+        result = (
+            _compute_uv(product, ds, lod)
+            if isinstance(product.variable, list)
+            else _compute_scalar(product, ds, lod)
+        )
         with _zarr_processed_lock:
             _zarr_processed_cache[key] = result
         return result
@@ -142,7 +146,7 @@ def render_zarr_manifest(product: Product, ds: xr.Dataset) -> dict:
                 product.chunk_px[1] + 2 * product.padding,
             ],
             "padding": product.padding,
-            **({"zoomThreshold": product.lod_zoom_thresholds[lod]} if lod in product.lod_zoom_thresholds else {}),
+            **({"zoomThreshold": LOD_ZOOM_THRESHOLDS[lod]} if lod in LOD_ZOOM_THRESHOLDS else {}),
         }
         for lod in product.lod_grids
     }

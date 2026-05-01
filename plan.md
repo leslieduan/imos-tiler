@@ -60,8 +60,8 @@ Zarr is the primary stack. The NetCDF stack is retained for products not yet ava
 **Request flows — Zarr `/tiles/zarr` (primary)**
 
 ```
-cold  → load_zarr_slice (.compute() → 1 S3 chunk read) → _get_zarr_processed (resample) → _extract_chunk → PNG encode
-warm  → load_zarr_slice (slice cache hit)               → _get_zarr_processed (cache hit) → _extract_chunk → PNG encode
+cold  → get_lod_grids (opens store, computes, writes product.lod_grids) → load_zarr_slice (.compute()) → _get_zarr_processed (resample) → _extract_chunk → PNG encode
+warm  → get_lod_grids (product.lod_grids already set)                   → load_zarr_slice (cache hit)  → _get_zarr_processed (cache hit) → _extract_chunk → PNG encode
 ```
 
 **Request flows — NetCDF `/tiles/netcdf` (legacy)**
@@ -95,6 +95,7 @@ GET /tiles/netcdf/{product_id}/{date}/point?lat=&lon=   → (legacy)
 titiler-project/
   main.py                        ← both routers wired up, CORS middleware, titiler COG router
   constants.py                   ← Product dataclass; NetCDF products (5) + Zarr products (2)
+                                    LOD_ZOOM_THRESHOLDS, DEFAULT_ZARR_LOD_GRIDS, MAX_LODS, MAX_VIRTUAL_CHUNKS
   plan.md                        ← this file
   docs/
     netcdf-vs-zarr.md            ← format comparison, IMOS product file analysis, performance data
@@ -104,9 +105,42 @@ titiler-project/
   services/
     netcdf_loader.py             ← S3 open → lazy xr.Dataset, LRU dataset cache
     netcdf_renderer.py           ← processed grid cache + chunk extract + PNG encode
-    zarr_loader.py               ← Zarr store singleton + per-(date, variables) slice cache
+    zarr_loader.py               ← Zarr store singleton + per-(date, variables) slice cache + get_lod_grids
     zarr_renderer.py             ← processed grid cache + chunk extract + PNG encode
+    utils.py                     ← compute_lod_grids
 ```
+
+---
+
+## LOD grid system
+
+### Constants (`constants.py`)
+
+- `MAX_LODS = 4` — frontend WebGL atlas limit: at most 4 LOD levels per product
+- `MAX_VIRTUAL_CHUNKS = 256` — frontend WebGL atlas limit: `grid_cols × grid_rows ≤ 256` at any LOD
+- `LOD_ZOOM_THRESHOLDS: dict[int, int]` — universal map zoom thresholds applied to all products (e.g. `{2: 4, 3: 5, 4: 7}`)
+- `DEFAULT_ZARR_LOD_GRIDS` — fallback used when lat/lon dims cannot be resolved from the store
+
+### Algorithm (`services/utils.py` — `compute_lod_grids`)
+
+Derives LOD grids from actual data dimensions and chunk size:
+
+1. Finest level: `ceil(data_width / chunk_w) × ceil(data_height / chunk_h)`, clamped so `cols × rows ≤ MAX_VIRTUAL_CHUNKS`
+2. Each coarser level halves the grid (floor divide, minimum 1)
+3. Stop when halving produces no change (1×1 floor)
+4. Take the finest `MAX_LODS` levels; assign LOD indices starting at 1 (coarsest)
+
+### Lazy population for Zarr products (`zarr_loader.py` — `get_lod_grids`)
+
+Zarr products are defined in `constants.py` with `lod_grids={}`. On the first request:
+
+1. `get_lod_grids(product)` checks `product.lod_grids` — empty, so proceeds
+2. Opens the Zarr store (singleton — reused across all calls to the same URL)
+3. Reads lat/lon dimension sizes from store metadata (`.zmetadata`, no data fetch)
+4. Calls `compute_lod_grids` and writes the result back via `object.__setattr__` (bypasses `frozen=True` for this one field only)
+5. All subsequent calls return immediately from the `if product.lod_grids` guard
+
+NetCDF products have `lod_grids` hardcoded in `constants.py` — `get_lod_grids` is not used for them.
 
 ---
 
@@ -122,7 +156,7 @@ Caches the open Zarr store handle (lazy, metadata only). One HTTP request per st
 
 **Layer 2 — Slice cache** (`zarr_loader.py`, keyed `(store_url, date, variables)`, maxsize=20)
 
-Stores a fully-computed (`.compute()`) 2D lat×lon numpy slice. This is the only S3 data read in the Zarr path — one chunk fetch per cold (date, variable) pair. With `(5, full_grid)` chunking, 5 dates worth of data is fetched (~9 MB for GSLA, ~18 MB for UCUR+VCUR). After this, the slice is entirely in RAM. Keyed by `variables` so different products using the same store cache independently and only fetch their own variables.
+Stores a fully-computed (`.compute()`) 2D lat×lon numpy slice. This is the only S3 data read in the Zarr path — one chunk fetch per cold (date, variable) pair. Keyed by `variables` so different products using the same store cache independently.
 
 **Layer 3 — Processed grid cache** (`zarr_renderer.py`, keyed `(id(ds), lod)`, maxsize=20)
 
@@ -132,15 +166,15 @@ Stores the resampled + normalised numpy arrays for the full LOD grid. A hit redu
 
 **Layer 1 — Dataset cache** (`netcdf_loader.py`, keyed `(source_path, date)`, maxsize=10)
 
-Caches the lazy `xr.Dataset` (HDF5 metadata only, no variable data). Keyed by `source_path` (not `product_id`) so products sharing the same S3 file (e.g. `dhd_mosaic` and `ssta_mosaic` from the same Marine Heatwave file) share one `ds` object and pay HDF5 traversal only once.
+Caches the lazy `xr.Dataset`. Keyed by `source_path` so products sharing the same S3 file share one `ds` object and pay HDF5 traversal only once.
 
 **Layer 2 — xarray internal numpy cache** (implicit)
 
-xarray caches numpy arrays on the `DataArray` object after the first `.values` access. Because Layer 1 returns the same `ds` Python object to every caller, whichever endpoint runs first (manifest or tile) loads the variable data into memory and warms it for the other.
+xarray caches numpy arrays on the `DataArray` object after the first `.values` access. Because Layer 1 returns the same `ds` Python object, whichever endpoint runs first warms it for the other.
 
 **Layer 3 — Processed grid cache** (`netcdf_renderer.py`, keyed `(id(ds), var_key, lod)`, maxsize=20)
 
-Same role as Zarr Layer 3. `var_key` is included because multiple products can share the same `ds` (same file, different variables).
+Same role as Zarr Layer 3. `var_key` is included because multiple products can share the same `ds` (same source file, different variables).
 
 ### Thread safety
 
@@ -157,8 +191,6 @@ The only bottleneck is **reading the source file on a cold start**. Everything e
 | Store/file open       | ~6ms (1 req)                                                 | ~200ms (1 req)       | ~70ms–2s (70+ reqs)    | ~16s–60s+ (70+ reqs)   |
 | Variable data read    | ~1 chunk (~10–20 MB)                                         | ~3–7s                | ~1 variable            | ~15s–30s+              |
 | Warm (all caches hit) | `_extract_chunk` + PNG encode only — identical for all cases |
-
-With `(5, full_grid)` Zarr chunking, each cold slice read fetches 5 dates of data instead of 1. On AWS in-region this is still well under 1s and is only paid once per (date, variable) pair per server session. The slice cache means all subsequent requests for that date are served from RAM regardless.
 
 For detailed analysis of why NetCDF cold starts are slow and product-by-product breakdown, see `docs/netcdf-vs-zarr.md`.
 

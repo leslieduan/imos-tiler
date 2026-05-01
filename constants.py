@@ -4,6 +4,16 @@ from dataclasses import dataclass, field
 # Keys that don't exist in a dataset are silently skipped.
 COORD_NAMES = {"TIME": "time", "LATITUDE": "lat", "LONGITUDE": "lon"}
 
+MAX_LODS = 4
+MAX_VIRTUAL_CHUNKS = 256  # grid_cols × grid_rows must not exceed this at any LOD
+
+# LOD level → minimum map zoom to show that level. Applied universally to all products.
+LOD_ZOOM_THRESHOLDS: dict[int, int] = {2: 4, 3: 5,4:7}
+
+# Fallback LOD grids for Zarr products before store dimensions are known.
+DEFAULT_ZARR_LOD_GRIDS: dict[int, tuple[int, int]] = {1: (2, 2)}
+
+
 
 @dataclass(frozen=True)
 class Product:
@@ -11,7 +21,6 @@ class Product:
     source_path: str
     variable: str | list[str] = ""
     lod_grids: dict[int, tuple[int, int]] = field(default_factory=dict)
-    lod_zoom_thresholds: dict[int, int] = field(default_factory=dict)
     chunk_px: tuple[int, int] = (240, 192)
     padding: int = 1
 
@@ -33,21 +42,18 @@ SST_ANOM_MOSAIC = Product(
     source_path="imos-data/IMOS/SRS/AusTemp/ssta",
     variable="sst_anom_mosaic",
     lod_grids={1: (3, 3), 2: (6, 5), 3: (12, 10)},
-    lod_zoom_thresholds={2: 5, 3: 6},
 )
 MARINE_HEATWAVE_DHD_MOSAIC = Product(
     id="ausTemp_marine_heatwave_aus_dhd_mosaic",
     source_path="imos-data/IMOS/SRS/AusTemp/Marine-Heatwave",
     variable="dhd_mosaic",
     lod_grids={1: (3, 3), 2: (6, 5), 3: (12, 10)},
-    lod_zoom_thresholds={2: 5, 3: 6},
 )
 MARINE_HEATWAVE_SSTA_MOSAIC = Product(
     id="ausTemp_marine_heatwave_aus_ssta_mosaic",
     source_path="imos-data/IMOS/SRS/AusTemp/Marine-Heatwave",
     variable="ssta_mosaic",
     lod_grids={1: (3, 3), 2: (6, 5), 3: (12, 10)},
-    lod_zoom_thresholds={2: 5, 3: 6},
 )
 
 PRODUCTS: dict[str, Product] = {
@@ -67,13 +73,11 @@ ZARR_SEA_LEVEL_ANOMALY = Product(
     id="zarr_sea_level_anomaly",
     source_path=_GSLA_ZARR_URL,
     variable="GSLA",
-    lod_grids={1: (2, 2)},
 )
 ZARR_OCEAN_CURRENT = Product(
     id="zarr_ocean_current",
     source_path=_GSLA_ZARR_URL,
     variable=["UCUR", "VCUR"],
-    lod_grids={1: (2, 2)},
 )
 
 ZARR_PRODUCTS: dict[str, Product] = {

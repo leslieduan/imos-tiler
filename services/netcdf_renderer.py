@@ -8,7 +8,7 @@ import xarray as xr
 from cachetools import LRUCache
 from PIL import Image
 
-from constants import Product
+from constants import LOD_ZOOM_THRESHOLDS, Product
 
 logger = logging.getLogger(__name__)
 
@@ -229,7 +229,7 @@ def render_manifest(product: Product, ds: xr.Dataset) -> dict:
                 product.chunk_px[1] + 2 * product.padding,
             ],
             "padding": product.padding,
-            **({"zoomThreshold": product.lod_zoom_thresholds[lod]} if lod in product.lod_zoom_thresholds else {}),
+            **({"zoomThreshold": LOD_ZOOM_THRESHOLDS[lod]} if lod in LOD_ZOOM_THRESHOLDS else {}),
         }
         for lod in product.lod_grids
     }
