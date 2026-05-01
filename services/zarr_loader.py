@@ -13,6 +13,9 @@ logger = logging.getLogger(__name__)
 _stores: dict[str, xr.Dataset] = {}
 _store_lock = threading.Lock()
 
+# Separate lock for product.lod_grids lazy initialization.
+_lod_grids_lock = threading.Lock()
+
 # Cache of fully-computed 2D (lat × lon) slices keyed by (store_url, date, variables).
 # Each slice is ~7 MB (4 variables × 351 × 641 × float64); maxsize=20 ≈ 140 MB.
 _slice_cache: LRUCache = LRUCache(maxsize=20)
@@ -35,7 +38,7 @@ def get_lod_grids(product: Product) -> dict[int, tuple[int, int]]:
     if product.lod_grids:
         return product.lod_grids
 
-    with _store_lock:
+    with _lod_grids_lock:
         if product.lod_grids:
             return product.lod_grids
 
