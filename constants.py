@@ -61,16 +61,17 @@ PRODUCTS: dict[str, Product] = {
 }
 
 # ── Zarr products ─────────────────────────────────────────────────────────────
-# Single Zarr store containing all dates; source_path unused.
+_GSLA_ZARR_URL = "s3://aodn-cloud-optimised/model_sea_level_anomaly_gridded_realtime.zarr/"
+
 ZARR_SEA_LEVEL_ANOMALY = Product(
     id="zarr_sea_level_anomaly",
-    source_path="",
+    source_path=_GSLA_ZARR_URL,
     variable="GSLA",
     lod_grids={1: (2, 2)},
 )
 ZARR_OCEAN_CURRENT = Product(
     id="zarr_ocean_current",
-    source_path="",
+    source_path=_GSLA_ZARR_URL,
     variable=["UCUR", "VCUR"],
     lod_grids={1: (2, 2)},
 )

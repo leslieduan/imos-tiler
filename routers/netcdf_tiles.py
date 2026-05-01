@@ -4,8 +4,8 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import JSONResponse, Response
 
 from constants import PRODUCTS
-from services.loader import load_dataset
-from services.renderer import render_manifest, render_tile
+from services.netcdf_loader import load_dataset
+from services.netcdf_renderer import render_manifest, render_tile
 
 router = APIRouter()
 

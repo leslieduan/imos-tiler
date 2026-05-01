@@ -26,7 +26,7 @@ Two parallel stacks — NetCDF on-demand (`/tiles`) and Zarr (`/zarr`) — shari
           │ dataset cache│  │ manifest      │  │               │  │ manifest         │
           │ LRU(10)      │  │               │  │ slice cache   │  │                  │
           │ (product,date│  │ processed     │  │ LRU(20)       │  │ processed cache  │
-          │              │  │ cache LRU(20) │  │ (date)        │  │ LRU(20)          │
+          │              │  │ cache LRU(20) │  │(url,date,vars)│  │ LRU(20)          │
           └──────┬───────┘  └───────────────┘  └──────┬────────┘  └──────────────────┘
                  │ miss                               │ miss
         ┌────────▼────────┐               ┌───────────▼────────┐
@@ -106,19 +106,47 @@ titiler-project/
 
 All caches are in-memory LRU (cachetools), evicted least-recently-used. Nothing written to disk.
 
-### Three cache layers
+### NetCDF cache layers
 
-**1. Dataset cache** — `services/loader.py`, keyed `(product_id, date)`, maxsize=10
+**Layer 1 — Dataset cache** (`services/netcdf_loader.py`, keyed `(product_id, date)`, maxsize=10)
 
-Stores the lazy `xr.Dataset` returned by `xr.open_dataset(..., engine="h5netcdf")`. This is lightweight — it holds HDF5 metadata, coordinate arrays, and an open s3fs file handle. The actual variable data arrays are **not** in this cache; they live in s3fs's internal block cache once first read. A cache hit saves the S3 file-open + HDF5 metadata cost.
+Stores the lazy `xr.Dataset` from `xr.open_dataset(..., engine="h5netcdf")`. Holds HDF5 metadata and an open s3fs file handle — no variable data yet. A hit saves the S3 file-open cost and, critically, ensures every request for the same `(product, date)` receives the **same Python object**. This is the foundation the two layers below depend on.
 
-**2. Zarr slice cache** — `services/zarr_loader.py`, keyed `date`, maxsize=20
+**Layer 2 — xarray internal numpy cache** (implicit, no explicit code)
 
-Stores a fully-computed (`xr.Dataset.compute()`) 2D lat×lon slice for one date. Unlike the dataset cache, this holds real numpy arrays in RAM — the `.compute()` call downloads the entire TIME chunk from S3 (~27 MB for 3 variables × 5 time steps at 351×641 points). Subsequent requests for the same date read purely from RAM.
+xarray stores numpy arrays on the `DataArray` object after the first `.values` access. Because Layer 1 returns the same `ds` object to every request, the first endpoint to touch a variable (whether `render_manifest`'s `.min().values` or `_get_processed`'s `ds.interp(...)`) loads the data from S3 and stores it on `ds`. All subsequent accesses — by any endpoint — read from that in-memory numpy array with no S3 I/O.
 
-**3. Processed grid cache** — `services/renderer.py` and `zarr_renderer.py`, keyed `(id(ds), lod)`, maxsize=20 each
+This is why hitting either endpoint first warms the other:
+- `manifest → tile`: manifest's min/max calls load the variable into memory; tile's resample is pure CPU.
+- `tile → manifest`: tile's resample loads the variable; manifest's min/max is instant numpy.
 
-Stores the final resampled + normalised numpy arrays: `(val_24, ocean)` for scalar products, `(u_norm, v_norm, ocean)` for ocean current. This is the cache that makes tiles fast — after a hit, per-tile work is only `_extract_chunk` + PNG encode with no S3 I/O or resampling. `id(ds)` is safe as a key because `ds` is held alive by its respective upstream cache.
+**Layer 3 — Processed grid cache** (`services/netcdf_renderer.py`, keyed `(id(ds), lod)`, maxsize=20)
+
+Stores the resampled + normalised numpy arrays after `_resample_to_grid` and normalisation: `(val_24, ocean)` for scalar products, `(u_norm, v_norm, ocean)` for ocean current. A hit reduces per-tile work to `_extract_chunk` + PNG encode only. `id(ds)` is a stable key because `ds` is held alive by Layer 1.
+
+### Zarr cache layers
+
+Zarr has no Layer 2 equivalent because `.compute()` is called upfront — the slice is already fully materialised numpy when it leaves the loader.
+
+**Layer 1 — Store singleton** (`services/zarr_loader.py`, `_stores` dict keyed by URL)
+
+Caches the open `xr.Dataset` Zarr store (lazy metadata only). Avoids re-reading Zarr metadata from S3 on every request. Shared across all products that use the same store URL.
+
+**Layer 2 — Slice cache** (`services/zarr_loader.py`, keyed `(store_url, date, variables)`, maxsize=20)
+
+Stores a fully-computed (`xr.Dataset.compute()`) 2D lat×lon slice for one date and variable set. The `.compute()` call reads the full Zarr TIME chunk from S3 (~9 MB for GSLA, ~18 MB for UCUR+VCUR, due to chunk size of 5 time steps). The result is entirely in-memory numpy — no lazy loading remains. Keyed by `variables` so `ZARR_SEA_LEVEL_ANOMALY` and `ZARR_OCEAN_CURRENT` cache independently and only fetch their own variables.
+
+**Layer 3 — Processed grid cache** (`services/zarr_renderer.py`, keyed `(id(ds), lod)`, maxsize=20)
+
+Same role as NetCDF Layer 3. `id(ds)` is stable because `ds` is held alive by Layer 2.
+
+### Cost eliminated by each layer
+
+| Layer | NetCDF | Zarr |
+|---|---|---|
+| L1 | S3 file open + HDF5 metadata read; stable `ds` object for L2/L3 | Zarr metadata re-read from S3 |
+| L2 | S3 variable data download (lazy→numpy on first access, shared via same `ds`) | S3 Zarr chunk reads (`.compute()` result held in RAM) |
+| L3 | CPU bilinear resample over full LOD grid | CPU bilinear resample over full LOD grid |
 
 ### Thread safety
 
@@ -139,7 +167,7 @@ For `austemp_sst_anomaly_sst_anom_mosaic`, the first `manifest.json` takes ~7s. 
 3. The first tile request triggers `_get_processed` → `_resample_to_grid`. The variable bytes are now in the s3fs block cache, so the resample reads from RAM and is fast.
 4. All subsequent tiles at the same LOD hit `_processed_cache` and return near-instantly.
 
-**Why `_cache` (dataset cache) alone is not enough**: it stores a lazy dataset with an open file handle, not the variable data. If the s3fs block cache is warm, repeated reads are fast. If evicted, the variable data is re-fetched from S3 even on a dataset cache hit. Only `_processed_cache` guarantees fully in-RAM numpy arrays.
+**Why `_cache` (dataset cache) alone is not enough**: it stores a lazy dataset with an open file handle. The variable data is not in the cache itself — it lives on the `ds` object after the first `.values` access (xarray's internal numpy cache, Layer 2). If `ds` is evicted from `_cache` and a new object is created, Layer 2 is cold again and a fresh S3 read is needed. Only `_processed_cache` (Layer 3) guarantees fully in-RAM resampled arrays regardless of xarray's internal state.
 
 ### Cold start comparison: NetCDF vs Zarr
 

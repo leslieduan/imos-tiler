@@ -6,45 +6,42 @@ from cachetools import LRUCache
 
 from constants import COORD_NAMES
 
-# Single Zarr store containing all dates — opened once as a singleton.
-# Time selection is lazy (no I/O); actual data is only fetched when .compute() is called.
-ZARR_STORE_URL = "s3://aodn-cloud-optimised/model_sea_level_anomaly_gridded_realtime.zarr/"
-
 logger = logging.getLogger(__name__)
 
-_store: xr.Dataset | None = None
+# Zarr stores opened once per URL and reused across requests.
+_stores: dict[str, xr.Dataset] = {}
 _store_lock = threading.Lock()
 
-# Cache of fully-computed 2D (lat × lon) slices keyed by date string.
+# Cache of fully-computed 2D (lat × lon) slices keyed by (store_url, date, variables).
 # Each slice is ~7 MB (4 variables × 351 × 641 × float64); maxsize=20 ≈ 140 MB.
 _slice_cache: LRUCache = LRUCache(maxsize=20)
 _slice_lock = threading.Lock()
 
 
-def _get_store() -> xr.Dataset:
-    global _store
+def _get_store(store_url: str) -> xr.Dataset:
     with _store_lock:
-        if _store is None:
-            logger.info("Opening Zarr store: %s", ZARR_STORE_URL)
-            _store = xr.open_zarr(ZARR_STORE_URL, storage_options={"anon": True}).sortby("TIME")
-    return _store
+        if store_url not in _stores:
+            logger.info("Opening Zarr store: %s", store_url)
+            _stores[store_url] = xr.open_zarr(store_url, storage_options={"anon": True}).sortby("TIME")
+    return _stores[store_url]
 
 
-def load_zarr_slice(date: str) -> xr.Dataset:
+def load_zarr_slice(store_url: str, date: str, variables: list[str]) -> xr.Dataset:
     """
-    Return a fully-computed 2D (lat × lon) slice for the given date.
+    Return a fully-computed 2D (lat × lon) slice for the given store, date, and variables.
     Uses nearest-match on TIME so callers don't need to know exact timestamps.
     Coordinate names are normalised to lat/lon (LATITUDE/LONGITUDE in the store).
     """
+    cache_key = (store_url, date, tuple(sorted(variables)))
     with _slice_lock:
-        cached = _slice_cache.get(date)
+        cached = _slice_cache.get(cache_key)
         if cached is not None:
             return cached
 
-    store = _get_store()
+    store = _get_store(store_url)
     try:
-        logger.info("Zarr compute: date=%s", date)
-        ds = store[["GSLA", "UCUR", "VCUR"]].sel(TIME=date, method="nearest").compute()
+        logger.info("Zarr compute: store=%s date=%s variables=%s", store_url, date, variables)
+        ds = store[variables].sel(TIME=date, method="nearest").compute()
     except KeyError:
         raise FileNotFoundError(f"No Zarr data found near date {date}")
 
@@ -53,5 +50,5 @@ def load_zarr_slice(date: str) -> xr.Dataset:
         ds = ds.rename(rename)
 
     with _slice_lock:
-        _slice_cache[date] = ds
+        _slice_cache[cache_key] = ds
     return ds

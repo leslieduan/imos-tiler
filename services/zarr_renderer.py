@@ -16,7 +16,7 @@ import xarray as xr
 from cachetools import LRUCache
 
 from constants import Product
-from services.renderer import _extract_chunk, _resample_to_grid, _to_png_bytes
+from services.netcdf_renderer import _extract_chunk, _resample_to_grid, _to_png_bytes
 
 _zarr_processed_cache: LRUCache = LRUCache(maxsize=20)
 _zarr_processed_inflight: dict = {}
