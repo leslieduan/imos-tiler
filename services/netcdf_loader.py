@@ -20,21 +20,15 @@ def _fetch(source_path: str, date: str) -> xr.Dataset:
     year = date[:4]
     date_compact = date.replace("-", "")
 
-    t0 = time.time()
     file_list = s3.ls(f"{source_path}/{year}/")
-    logger.info("s3.ls  %.2fs  (%d files)  %s/%s/", time.time() - t0, len(file_list), source_path, year)
 
     path = next((f for f in file_list if date_compact in f), None)
     if path is None:
         raise FileNotFoundError(f"No file found at '{source_path}' for {date}")
 
-    file_size_mb = s3.info(path)['size'] / 1024 / 1024
-    logger.info("file  %.1f MB  %s", file_size_mb, path)
 
-    t0 = time.time()
     # xr.open_dataset() only reads metadata (dimensions, coordinates, variable schema). The actual array data is pulled lazily when the renderer accesses variables.
     ds = xr.open_dataset(s3.open(path, timeout=30), engine="h5netcdf")
-    logger.info("open_dataset  %.2fs  dims=%s  vars=%s", time.time() - t0, dict(ds.dims), list(ds.data_vars))
 
     rename = {k: v for k, v in COORD_NAMES.items() if k in ds.dims or k in ds.coords}
     if rename:

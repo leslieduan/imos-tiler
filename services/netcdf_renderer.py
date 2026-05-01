@@ -40,10 +40,7 @@ def _resample_to_grid(ds: xr.Dataset, total_w: int, total_h: int) -> xr.Dataset:
     lon_min, lon_max, lat_min, lat_max = _get_bounds(ds)
     target_lons = np.linspace(lon_min, lon_max, total_w)
     target_lats = np.linspace(lat_max, lat_min, total_h)  # north → south
-    vars_ = list(ds.data_vars)
-    t0 = time.time()
     result = ds.interp(lon=target_lons, lat=target_lats, method="linear")
-    logger.debug("resample %s → %dx%d  %.2fs", vars_, total_w, total_h, time.time() - t0)
     return result
 
 

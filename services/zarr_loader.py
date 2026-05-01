@@ -21,7 +21,6 @@ _slice_lock = threading.Lock()
 def _get_store(store_url: str) -> xr.Dataset:
     with _store_lock:
         if store_url not in _stores:
-            logger.info("Opening Zarr store: %s", store_url)
             _stores[store_url] = xr.open_zarr(store_url, storage_options={"anon": True}).sortby("TIME")
     return _stores[store_url]
 
@@ -40,7 +39,6 @@ def load_zarr_slice(store_url: str, date: str, variables: list[str]) -> xr.Datas
 
     store = _get_store(store_url)
     try:
-        logger.info("Zarr compute: store=%s date=%s variables=%s", store_url, date, variables)
         ds = store[variables].sel(TIME=date, method="nearest").compute()
     except KeyError:
         raise FileNotFoundError(f"No Zarr data found near date {date}")
