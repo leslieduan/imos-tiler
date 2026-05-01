@@ -1,14 +1,13 @@
 import logging
 import threading
-from datetime import datetime, timezone
+import time
 
-import numpy as np
 import s3fs
 import xarray as xr
 from cachetools import LRUCache, cached
 from cachetools.keys import hashkey
 
-from constants import COORD_NAMES, PRODUCTS, Product
+from constants import COORD_NAMES
 
 logger = logging.getLogger(__name__)
 
@@ -16,34 +15,38 @@ _cache: LRUCache = LRUCache(maxsize=10)
 _lock = threading.Lock()
 
 
-def _fetch(product: Product, date: str) -> xr.Dataset:
+def _fetch(source_path: str, date: str) -> xr.Dataset:
     s3 = s3fs.S3FileSystem(anon=True)
     year = date[:4]
     date_compact = date.replace("-", "")
-    file_list = s3.ls(f"{product.source_path}/{year}/")
+
+    t0 = time.time()
+    file_list = s3.ls(f"{source_path}/{year}/")
+    logger.info("s3.ls  %.2fs  (%d files)  %s/%s/", time.time() - t0, len(file_list), source_path, year)
+
     path = next((f for f in file_list if date_compact in f), None)
     if path is None:
-        raise FileNotFoundError(f"No file found for product '{product.id}' on {date}")
+        raise FileNotFoundError(f"No file found at '{source_path}' for {date}")
 
-    logger.info("S3 fetch: %s", path)
+    file_size_mb = s3.info(path)['size'] / 1024 / 1024
+    logger.info("file  %.1f MB  %s", file_size_mb, path)
+
+    t0 = time.time()
     # xr.open_dataset() only reads metadata (dimensions, coordinates, variable schema). The actual array data is pulled lazily when the renderer accesses variables.
-    ds = xr.open_dataset(s3.open(path), engine="h5netcdf")
+    ds = xr.open_dataset(s3.open(path, timeout=30), engine="h5netcdf")
+    logger.info("open_dataset  %.2fs  dims=%s  vars=%s", time.time() - t0, dict(ds.dims), list(ds.data_vars))
 
     rename = {k: v for k, v in COORD_NAMES.items() if k in ds.dims or k in ds.coords}
     if rename:
         ds = ds.rename(rename)
 
-    if np.issubdtype(ds.time.dtype, np.integer):
-        ts = int(datetime.strptime(date, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp())
-        ds = ds.sel(time=ts, method="nearest")
-    else:
-        ds = ds.sel(time=date)
+    ds = ds.sel(time=date, method="nearest")
 
     return ds
 
 
-# This lock ensure only one thread can read and write cache at the same time. When cache is writing, reading disallowed.
-@cached(cache=_cache, key=lambda product_id, date: hashkey(product_id, date), lock=_lock)
-def load_dataset(product_id: str, date: str) -> xr.Dataset:
-    product = PRODUCTS[product_id]
-    return _fetch(product, date)
+# Keyed by (source_path, date) so products sharing the same S3 file share one cached ds object,
+# avoiding duplicate HDF5 traversal and variable data downloads across product_ids.
+@cached(cache=_cache, key=lambda source_path, date: hashkey(source_path, date), lock=_lock)
+def load_dataset(source_path: str, date: str) -> xr.Dataset:
+    return _fetch(source_path, date)

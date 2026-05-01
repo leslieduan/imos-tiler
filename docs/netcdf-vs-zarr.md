@@ -125,3 +125,55 @@ The chunk shape should match the access pattern. Since this tile server always r
 NetCDF4 is not a worse format than NetCDF3 — it added compression and chunking which are essential for large scientific datasets. It simply predates cloud object storage and was not designed for it. Zarr takes the same ideas (compression, chunking) and builds them around cloud-native access patterns.
 
 For this tile server serving IMOS ocean data products, **Zarr with `(1, full_grid)` chunk shape is the correct long-term solution**.
+
+---
+
+## IMOS Product File Analysis
+
+### File structure comparison
+
+| | OceanCurrent GSLA/NRT | AusTemp ssta | AusTemp Marine Heatwave |
+|---|---|---|---|
+| Grid | 351 × 641 | 1,890 × 2,685 | 2,000 × 3,900 |
+| Pixels per variable | ~225K | ~5.1M | ~7.8M |
+| Data variables | 6 | 5 | 15 |
+| Dimension names | `TIME`, `LATITUDE`, `LONGITUDE` (uppercase) | `time`, `lat`, `lon` | `time`, `lat`, `lon` |
+| Time encoding | Float64, days since 1985-01-01 | Int32, seconds since 1981-01-01 | Int32, seconds since 1981-01-01 |
+| Variable storage | Int16 + scale\_factor | Float32 | Float32 |
+| File size (approx) | ~5 MB | ~101 MB | ~95 MB |
+
+### Observed cold-start times (home internet, ~200ms round-trip latency)
+
+| | `open_dataset` | variable read | tile total |
+|---|---|---|---|
+| OceanCurrent | negligible | negligible | ~900ms |
+| ssta | ~16s | ~15s | ~30s |
+| Marine Heatwave | ~60s+ | ~30s+ | 90s+ |
+
+**Why OceanCurrent is fast**: tiny grid (225K pixels) + small file → shallow HDF5 B-tree → few HTTP round-trips.
+
+**Why Marine Heatwave is much slower than ssta despite being a smaller file (~95 MB vs ~101 MB)**: compressed file size is a poor predictor of `open_dataset` time. ssta stores continuous Float32 SST values (high entropy, compresses poorly → large file). Marine Heatwave stores categorical/sparse fields like `MHW_category` (0–4 scale), `dhdc` (count days), and large NaN regions (low entropy, compresses very well → smaller file despite more data).
+
+What drives `open_dataset` time is the **number of HDF5 B-tree nodes**, which scales with variables × grid size, not compressed bytes:
+
+`open_dataset time ∝ num_variables × grid_size × round_trip_latency`
+
+Marine Heatwave: 15 vars × 7.8M pixels = 117M — ssta: 5 vars × 5.1M pixels = 25.5M. Nearly 5× more structural complexity despite the smaller file.
+
+### Dimension and encoding notes
+
+- OceanCurrent uses uppercase dimension names (`TIME`, `LATITUDE`, `LONGITUDE`). The loader renames these to lowercase via `COORD_NAMES` before any downstream processing.
+- All three products encode time as a numeric offset (days or seconds since an epoch). xarray's default `decode_times=True` correctly interprets all variants — no product-specific time handling is needed.
+- OceanCurrent variables are stored as Int16 with a `scale_factor`. xarray auto-applies the scaling on first `.values` access.
+
+### When Zarr is necessary vs. when NetCDF is acceptable
+
+| Deployment | OceanCurrent | ssta | Marine Heatwave |
+|---|---|---|---|
+| Home internet | Fine (fast file) | Slow cold start (~30s), cached after | Very slow cold start (90s+), cached after |
+| AWS ap-southeast-2 (in-region) | Fast | ~1-2s cold start | ~2-4s cold start |
+
+**Conclusion**: For in-region AWS deployment, NetCDF cold-start times are acceptable for all products — the LRU cache means the cost is paid at most once per product per date per server session. Zarr becomes necessary when:
+- The server runs outside AWS (e.g. home internet, other cloud regions)
+- Cold-start latency must be consistently low (e.g. first request per date cannot be slow)
+- The data changes frequently enough that the LRU cache doesn't stay warm

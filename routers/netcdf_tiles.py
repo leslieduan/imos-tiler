@@ -17,9 +17,9 @@ def _get_product_or_404(product_id: str):
     return product
 
 
-def _load_or_404(product_id: str, date: str):
+def _load_or_404(source_path: str, date: str):
     try:
-        return load_dataset(product_id, date)
+        return load_dataset(source_path, date)
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
@@ -35,7 +35,7 @@ def get_tile(product_id: str, date: str, z: int, x: int, y: int):
     if x < 0 or x >= grid_cols or y < 0 or y >= grid_rows:
         raise HTTPException(status_code=404, detail=f"Tile {z}/{x}/{y} out of bounds (grid {grid_cols}×{grid_rows})")
 
-    ds = _load_or_404(product_id, date)
+    ds = _load_or_404(product.source_path, date)
     png_bytes = render_tile(product, ds, z, x, y)
     return Response(content=png_bytes, media_type="image/png")
 
@@ -43,7 +43,7 @@ def get_tile(product_id: str, date: str, z: int, x: int, y: int):
 @router.get("/{product_id}/{date}/manifest.json")
 def get_manifest(product_id: str, date: str):
     product = _get_product_or_404(product_id)
-    ds = _load_or_404(product_id, date)
+    ds = _load_or_404(product.source_path, date)
     return JSONResponse(content=render_manifest(product, ds))
 
 
@@ -51,7 +51,7 @@ def get_manifest(product_id: str, date: str):
 def get_point(product_id: str, date: str, lat: float = Query(...), lon: float = Query(...)):
     # This is expected to be called after get_manifest and get_tile. Since variable value will be cached by either one, the response in this will be quick.
     product = _get_product_or_404(product_id)
-    ds = _load_or_404(product_id, date)
+    ds = _load_or_404(product.source_path, date)
 
     # Lazy load only read this point.
     point = ds.sel(lat=lat, lon=lon, method="nearest")

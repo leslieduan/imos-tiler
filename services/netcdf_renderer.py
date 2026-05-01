@@ -103,7 +103,10 @@ def _get_processed(product: Product, ds: xr.Dataset, lod: int) -> tuple:
     # Resampling the full LOD grid is expensive (e.g. 5.5M pixels for SSTA LOD3).
     # The result is identical for every tile at the same zoom level, so we cache
     # the final numpy arrays here. All tiles at that lod then just call _extract_chunk.
-    key = (id(ds), lod)
+    # variable is included because multiple products can share the same ds (same source
+    # file, different variables) — e.g. dhd_mosaic and ssta_mosaic.
+    var_key = tuple(product.variable) if isinstance(product.variable, list) else product.variable
+    key = (id(ds), var_key, lod)
 
     while True:
         with _processed_lock:
