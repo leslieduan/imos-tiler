@@ -13,6 +13,9 @@ LOD_ZOOM_THRESHOLDS: dict[int, int] = {2: 4, 3: 5,4:7}
 # Fallback LOD grids for Zarr products before store dimensions are known.
 DEFAULT_ZARR_LOD_GRIDS: dict[int, tuple[int, int]] = {1: (2, 2)}
 
+# TODO: NetCDF should be deprecated from this project. auto lod_grids generate on algothrithem 
+# is only enabled for ZARR. Because read Metadata for NetCDF is too heavy.
+
 
 
 @dataclass(frozen=True)
