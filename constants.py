@@ -6,16 +6,16 @@ COORD_NAMES = {"TIME": "time", "LATITUDE": "lat", "LONGITUDE": "lon"}
 
 MAX_LODS = 4
 MAX_VIRTUAL_CHUNKS = 256  # grid_cols × grid_rows must not exceed this at any LOD
+MIN_COARSEST_GRID = (2, 2)  # minimum (cols, rows) for the coarsest LOD level
 
 # LOD level → minimum map zoom to show that level. Applied universally to all products.
-LOD_ZOOM_THRESHOLDS: dict[int, int] = {2: 4, 3: 5,4:7}
+LOD_ZOOM_THRESHOLDS: dict[int, int] = {2: 4, 3: 5,4:6}
 
 # Fallback LOD grids for Zarr products before store dimensions are known.
 DEFAULT_ZARR_LOD_GRIDS: dict[int, tuple[int, int]] = {1: (2, 2)}
 
 # TODO: NetCDF should be deprecated from this project. auto lod_grids generate on algothrithem 
 # is only enabled for ZARR. Because read Metadata for NetCDF is too heavy.
-
 
 
 @dataclass(frozen=True)
@@ -26,7 +26,6 @@ class Product:
     lod_grids: dict[int, tuple[int, int]] = field(default_factory=dict)
     chunk_px: tuple[int, int] = (240, 192)
     padding: int = 1
-
 
 OCEAN_CURRENT = Product(
     id="ocean_current_gsla_ucur_vcur",

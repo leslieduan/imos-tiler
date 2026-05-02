@@ -1,24 +1,30 @@
 import math
 
-from constants import MAX_LODS, MAX_VIRTUAL_CHUNKS
+from constants import MAX_LODS, MAX_VIRTUAL_CHUNKS, MIN_COARSEST_GRID
 
 
 def compute_lod_grids(
     data_width: int,
     data_height: int,
     chunk_px: tuple[int, int],
+    max_lods: int = MAX_LODS,
+    min_coarsest: tuple[int, int] = MIN_COARSEST_GRID,
 ) -> dict[int, tuple[int, int]]:
     """
     Derive LOD grids from data dimensions and chunk size.
 
-    LOD 1 is the coarsest (fewest tiles); the highest LOD is the finest.
-    Each finer level doubles the grid until the finest level covers the full
-    data extent (total_px ≥ data dimensions).
+    LOD 1 is coarsest (fewest tiles); the highest LOD is finest (one chunk per
+    native data chunk). Each level doubles the grid via ceil(finest / 2^k), so
+    coverage is never under-counted at intermediate scales.
 
-    Constraints enforced:
-    - grid_cols × grid_rows ≤ MAX_VIRTUAL_CHUNKS at every level
-    - At most MAX_LODS levels total
-    - Minimum 1×1 grid
+    Constraints:
+    - finest grid is clamped so cols × rows ≤ MAX_VIRTUAL_CHUNKS
+    - levels whose (cols, rows) fall below min_coarsest are dropped
+    - at most max_lods levels are returned (the finest end is kept)
+
+    Example:
+        compute_lod_grids(3000, 1500, (256, 256))
+        # → {1: (3, 2), 2: (6, 3), 3: (12, 6)}
     """
     cw, ch = chunk_px
 
@@ -32,17 +38,17 @@ def compute_lod_grids(
         else:
             finest_rows = max(1, finest_rows - 1)
 
-    # Build levels from finest downward, halving each time
-    levels = [(finest_cols, finest_rows)]
-    while True:
-        cols = max(1, levels[-1][0] // 2)
-        rows = max(1, levels[-1][1] // 2)
-        if (cols, rows) == levels[-1]:
-            break
-        levels.append((cols, rows))
+    # Depth: halvings until both axes reach 1
+    max_depth = math.floor(math.log2(max(finest_cols, finest_rows))) if max(finest_cols, finest_rows) > 1 else 0
 
-    # Reverse so index 0 = coarsest, then cap at MAX_LODS
+    levels = []
+    for k in range(max_depth + 1):
+        scale = 2 ** k
+        levels.append((max(1, math.ceil(finest_cols / scale)), max(1, math.ceil(finest_rows / scale))))
+
+    # Reverse: coarsest → finest; drop levels below min_coarsest; cap at max_lods
     levels.reverse()
-    levels = levels[-MAX_LODS:]
+    min_cols, min_rows = min_coarsest
+    levels = [lvl for lvl in levels if lvl[0] >= min_cols and lvl[1] >= min_rows]
 
-    return {i + 1: level for i, level in enumerate(levels)}
+    return {i + 1: lvl for i, lvl in enumerate(levels[-max_lods:])}
