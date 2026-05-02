@@ -95,7 +95,7 @@ GET /tiles/netcdf/{product_id}/{date}/point?lat=&lon=   → (legacy)
 titiler-project/
   main.py                        ← both routers wired up, CORS middleware, titiler COG router
   constants.py                   ← Product dataclass; NetCDF products (5) + Zarr products (2)
-                                    LOD_ZOOM_THRESHOLDS, DEFAULT_ZARR_LOD_GRIDS, MAX_LODS, MAX_VIRTUAL_CHUNKS, MIN_COARSEST_GRID
+                                    LOD_ZOOM_THRESHOLDS, DEFAULT_ZARR_LOD_GRIDS, MAX_LODS, MIN_COARSEST_GRID
   plan.md                        ← this file
   docs/
     netcdf-vs-zarr.md            ← format comparison, IMOS product file analysis, performance data
@@ -117,7 +117,6 @@ titiler-project/
 ### Constants (`constants.py`)
 
 - `MAX_LODS = 4` — frontend WebGL atlas limit: at most 4 LOD levels per product
-- `MAX_VIRTUAL_CHUNKS = 256` — frontend WebGL atlas limit: `grid_cols × grid_rows ≤ 256` at any LOD
 - `MIN_COARSEST_GRID = (2, 2)` — minimum (cols, rows) for the coarsest LOD level; levels below this are dropped
 - `LOD_ZOOM_THRESHOLDS: dict[int, int]` — universal map zoom thresholds applied to all products (e.g. `{2: 4, 3: 5, 4: 7}`)
 - `DEFAULT_ZARR_LOD_GRIDS` — fallback used when lat/lon dims cannot be resolved from the store
@@ -126,7 +125,7 @@ titiler-project/
 
 Derives LOD grids from actual data dimensions and chunk size. Accepts `max_lods` and `min_coarsest` as parameters (defaulting to the constants above).
 
-1. Finest level: `ceil(data_width / chunk_w) × ceil(data_height / chunk_h)`, clamped so `cols × rows ≤ MAX_VIRTUAL_CHUNKS`
+1. Finest level: `ceil(data_width / chunk_w) × ceil(data_height / chunk_h)`
 2. Depth: `floor(log2(max(finest_cols, finest_rows)))` — number of halvings before both axes reach 1 (uses `max` so elongated grids go as deep as the wider axis allows)
 3. Each level `k`: `(ceil(finest_cols / 2^k), ceil(finest_rows / 2^k))` — `ceil` preserves coverage at intermediate scales (e.g. `finest=5` → `3, 2` not `2, 1`)
 4. Drop levels whose cols or rows fall below `min_coarsest` (avoids degenerate near-1×1 coarse levels)

@@ -5,7 +5,6 @@ from dataclasses import dataclass, field
 COORD_NAMES = {"TIME": "time", "LATITUDE": "lat", "LONGITUDE": "lon"}
 
 MAX_LODS = 4
-MAX_VIRTUAL_CHUNKS = 256  # grid_cols × grid_rows must not exceed this at any LOD
 MIN_COARSEST_GRID = (2, 2)  # minimum (cols, rows) for the coarsest LOD level
 
 # LOD level → minimum map zoom to show that level. Applied universally to all products.

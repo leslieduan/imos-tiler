@@ -1,6 +1,6 @@
 import math
 
-from constants import MAX_LODS, MAX_VIRTUAL_CHUNKS, MIN_COARSEST_GRID
+from constants import MAX_LODS, MIN_COARSEST_GRID
 
 
 def compute_lod_grids(
@@ -18,7 +18,6 @@ def compute_lod_grids(
     coverage is never under-counted at intermediate scales.
 
     Constraints:
-    - finest grid is clamped so cols × rows ≤ MAX_VIRTUAL_CHUNKS
     - levels whose (cols, rows) fall below min_coarsest are dropped
     - at most max_lods levels are returned (the finest end is kept)
 
@@ -30,13 +29,6 @@ def compute_lod_grids(
 
     finest_cols = max(1, math.ceil(data_width / cw))
     finest_rows = max(1, math.ceil(data_height / ch))
-
-    # Clamp finest level to fit within MAX_VIRTUAL_CHUNKS
-    while finest_cols * finest_rows > MAX_VIRTUAL_CHUNKS:
-        if finest_cols >= finest_rows:
-            finest_cols = max(1, finest_cols - 1)
-        else:
-            finest_rows = max(1, finest_rows - 1)
 
     # Depth: halvings until both axes reach 1
     max_depth = math.floor(math.log2(max(finest_cols, finest_rows))) if max(finest_cols, finest_rows) > 1 else 0
