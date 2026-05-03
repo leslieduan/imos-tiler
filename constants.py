@@ -9,12 +9,12 @@ MAX_LODS = 4
 MIN_COARSEST_GRID = (2, 2)  # minimum (cols, rows) for the coarsest LOD level
 
 # LOD level → minimum map zoom to show that level. Applied universally to all products.
-LOD_ZOOM_THRESHOLDS: dict[int, int] = {2: 4, 3: 5,4:6}
+LOD_ZOOM_THRESHOLDS: dict[int, int] = {2: 4, 3: 5, 4: 6}
 
 # Fallback LOD grids for Zarr products before store dimensions are known.
 DEFAULT_ZARR_LOD_GRIDS: dict[int, tuple[int, int]] = {1: (2, 2)}
 
-# TODO: NetCDF should be deprecated from this project. auto lod_grids generate on algothrithem 
+# TODO: NetCDF should be deprecated from this project. auto lod_grids generate on algothrithem
 # is only enabled for ZARR. Because read Metadata for NetCDF is too heavy.
 
 
@@ -38,11 +38,17 @@ class Product:
         cw, ch = chunk_px
         finest_cols = max(1, math.ceil(data_width / cw))
         finest_rows = max(1, math.ceil(data_height / ch))
-        max_depth = math.floor(math.log2(max(finest_cols, finest_rows))) if max(finest_cols, finest_rows) > 1 else 0
+        max_depth = (
+            math.floor(math.log2(max(finest_cols, finest_rows)))
+            if max(finest_cols, finest_rows) > 1
+            else 0
+        )
         levels = []
         for k in range(max_depth + 1):
-            scale = 2 ** k
-            levels.append((max(1, math.ceil(finest_cols / scale)), max(1, math.ceil(finest_rows / scale))))
+            scale = 2**k
+            levels.append(
+                (max(1, math.ceil(finest_cols / scale)), max(1, math.ceil(finest_rows / scale)))
+            )
         levels.reverse()
         min_cols, min_rows = min_coarsest
         levels = [lvl for lvl in levels if lvl[0] >= min_cols and lvl[1] >= min_rows]
@@ -52,7 +58,10 @@ class Product:
         """Compute and cache lod_grids from native data dimensions. No-op if already set."""
         if self.lod_grids:
             return
-        object.__setattr__(self, "lod_grids", self._compute_lod_grids(data_width, data_height, self.chunk_px))
+        object.__setattr__(
+            self, "lod_grids", self._compute_lod_grids(data_width, data_height, self.chunk_px)
+        )
+
 
 OCEAN_CURRENT = Product(
     id="ocean_current_gsla_ucur_vcur",
@@ -86,7 +95,8 @@ MARINE_HEATWAVE_SSTA_MOSAIC = Product(
 )
 
 PRODUCTS: dict[str, Product] = {
-    p.id: p for p in [
+    p.id: p
+    for p in [
         OCEAN_CURRENT,
         SEA_LEVEL_ANOMALY,
         SST_ANOM_MOSAIC,
@@ -109,6 +119,4 @@ ZARR_OCEAN_CURRENT = Product(
     variable=["UCUR", "VCUR"],
 )
 
-ZARR_PRODUCTS: dict[str, Product] = {
-    p.id: p for p in [ZARR_SEA_LEVEL_ANOMALY, ZARR_OCEAN_CURRENT]
-}
+ZARR_PRODUCTS: dict[str, Product] = {p.id: p for p in [ZARR_SEA_LEVEL_ANOMALY, ZARR_OCEAN_CURRENT]}

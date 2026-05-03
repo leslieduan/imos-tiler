@@ -1,6 +1,5 @@
 import logging
 import threading
-import time
 
 import s3fs
 import xarray as xr
@@ -25,7 +24,6 @@ def _fetch(source_path: str, date: str) -> xr.Dataset:
     path = next((f for f in file_list if date_compact in f), None)
     if path is None:
         raise FileNotFoundError(f"No file found at '{source_path}' for {date}")
-
 
     # xr.open_dataset() only reads metadata (dimensions, coordinates, variable schema). The actual array data is pulled lazily when the renderer accesses variables.
     ds = xr.open_dataset(s3.open(path, timeout=30), engine="h5netcdf")
