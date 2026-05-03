@@ -48,7 +48,7 @@ class Product:
         levels = [lvl for lvl in levels if lvl[0] >= min_cols and lvl[1] >= min_rows]
         return {i + 1: lvl for i, lvl in enumerate(levels[-max_lods:])}
 
-    def update_lod_grids(self, data_width: int, data_height: int) -> None:
+    def apply_computed_lod_grids(self, data_width: int, data_height: int) -> None:
         """Compute and cache lod_grids from native data dimensions. No-op if already set."""
         if self.lod_grids:
             return

@@ -51,7 +51,7 @@ def get_lod_grids(product: Product) -> dict[int, tuple[int, int]]:
 
         data_height = store.dims[lat_dim]
         data_width = store.dims[lon_dim]
-        product.update_lod_grids(data_width, data_height)
+        product.apply_computed_lod_grids(data_width, data_height)
         logger.info(
             "Computed LOD grids for %s: data=%dx%d chunk=%s → %s",
             product.id, data_width, data_height, product.chunk_px, product.lod_grids,
