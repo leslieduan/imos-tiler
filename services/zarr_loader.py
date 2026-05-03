@@ -5,7 +5,6 @@ import xarray as xr
 from cachetools import LRUCache
 
 from constants import COORD_NAMES, DEFAULT_ZARR_LOD_GRIDS, Product
-from services.utils import compute_lod_grids
 
 logger = logging.getLogger(__name__)
 
@@ -52,12 +51,11 @@ def get_lod_grids(product: Product) -> dict[int, tuple[int, int]]:
 
         data_height = store.dims[lat_dim]
         data_width = store.dims[lon_dim]
-        grids = compute_lod_grids(data_width, data_height, product.chunk_px)
+        product.update_lod_grids(data_width, data_height)
         logger.info(
             "Computed LOD grids for %s: data=%dx%d chunk=%s → %s",
-            product.id, data_width, data_height, product.chunk_px, grids,
+            product.id, data_width, data_height, product.chunk_px, product.lod_grids,
         )
-        object.__setattr__(product, 'lod_grids', grids)
 
     return product.lod_grids
 
