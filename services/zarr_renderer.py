@@ -18,6 +18,11 @@ from cachetools import LRUCache
 from constants import LOD_ZOOM_THRESHOLDS, Product
 from services.netcdf_renderer import _extract_chunk, _resample_to_grid, _to_png_bytes
 
+# Caches the full resampled grid arrays for a (ds, lod) pair so that all tile
+# requests for the same date+LOD share one resample instead of each repeating it.
+# Key is (id(ds), lod): each product's ds is a distinct object from _slice_cache, so
+# id(ds) implicitly encodes the product. id reuse is impossible because _slice_cache
+# holds a strong reference to every ds, preventing GC for the cache's lifetime.
 _zarr_processed_cache: LRUCache = LRUCache(maxsize=20)
 _zarr_processed_inflight: dict = {}
 _zarr_processed_lock = threading.Lock()
