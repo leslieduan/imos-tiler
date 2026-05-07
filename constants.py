@@ -35,6 +35,11 @@ class Product:
         max_lods: int = MAX_LODS,
         min_coarsest: tuple[int, int] = MIN_COARSEST_GRID,
     ) -> dict[int, tuple[int, int]]:
+        # Compute how many chunks fit across the data at native resolution (finest level).
+        # Then build a pyramid by halving the grid at each coarser level (doubling the scale).
+        # Levels that don't meet min_coarsest are dropped; if none survive (data smaller than
+        # one chunk), fall back to the native finest grid so there is always at least one LOD.
+        # The finest max_lods levels are returned keyed 1..N (1 = coarsest kept).
         cw, ch = chunk_px
         finest_cols = max(1, math.ceil(data_width / cw))
         finest_rows = max(1, math.ceil(data_height / ch))
@@ -52,6 +57,8 @@ class Product:
         levels.reverse()
         min_cols, min_rows = min_coarsest
         levels = [lvl for lvl in levels if lvl[0] >= min_cols and lvl[1] >= min_rows]
+        if not levels:
+            levels = [(finest_cols, finest_rows)]
         return {i + 1: lvl for i, lvl in enumerate(levels[-max_lods:])}
 
     def apply_computed_lod_grids(self, data_width: int, data_height: int) -> None:
@@ -107,8 +114,12 @@ PRODUCTS: dict[str, Product] = {
 
 # ── Zarr products ─────────────────────────────────────────────────────────────
 _GSLA_ZARR_URL = "s3://aodn-cloud-optimised/model_sea_level_anomaly_gridded_realtime.zarr/"
+# satellite_ghrsst_l3s_1day_nighttime_multi_sensor_australia has data quality issue, the time dimension size is different for variables.
 _SATELLITE_GHRSST_ZARR_URL = (
     "s3://aodn-cloud-optimised/satellite_ghrsst_l3s_1day_nighttime_multi_sensor_australia.zarr"
+)
+_RADAR_ASG_WIND_DELAYED_QC = (
+    "s3://aodn-cloud-optimised/radar_SouthAustraliaGulfs_wind_delayed_qc.zarr"
 )
 
 ZARR_SEA_LEVEL_ANOMALY = Product(
@@ -121,13 +132,19 @@ ZARR_OCEAN_CURRENT = Product(
     source_path=_GSLA_ZARR_URL,
     variable=["UCUR", "VCUR"],
 )
-
-ZARR_SEA_SURFACE_TEMPERATURE = Product(
-    id="zarr_sea_surface_temperature",
-    source_path=_SATELLITE_GHRSST_ZARR_URL,
-    variable="sea_surface_temperature",
+# ZARR_SEA_SURFACE_TEMPERATURE = Product(
+#     id="zarr_sea_surface_temperature",
+#     source_path=_SATELLITE_GHRSST_ZARR_URL,
+#     variable="sea_surface_temperature",
+# )
+# Small regional dataset: 102 lon × 74 lat — fits in a single tile (lod_grids auto-computes to {1: (1, 1)}).
+ZARR_RADAR_ASG_WIND_DELAYED_QC_WDIR = Product(
+    id="zarr_radar_SouthAustraliaGulfs_wind_delayed_qc_wdir",
+    source_path=_RADAR_ASG_WIND_DELAYED_QC,
+    variable="WDIR",
 )
 
 ZARR_PRODUCTS: dict[str, Product] = {
-    p.id: p for p in [ZARR_SEA_LEVEL_ANOMALY, ZARR_OCEAN_CURRENT, ZARR_SEA_SURFACE_TEMPERATURE]
+    p.id: p
+    for p in [ZARR_SEA_LEVEL_ANOMALY, ZARR_OCEAN_CURRENT, ZARR_RADAR_ASG_WIND_DELAYED_QC_WDIR]
 }

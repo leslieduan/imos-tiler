@@ -1,4 +1,4 @@
-# Tile Server Implementation Plan
+# Technical Reference
 
 ## Decision: Migrate All Products to Zarr
 
@@ -10,13 +10,15 @@ Zarr eliminates this entirely: metadata is one `.zmetadata` HTTP request, and va
 
 ### Migration status
 
-| Product              | Variable(s)     | NetCDF source                 | Zarr store                                      | Status            |
-| -------------------- | --------------- | ----------------------------- | ----------------------------------------------- | ----------------- |
-| Sea level anomaly    | GSLA            | `OceanCurrent/GSLA/NRT`       | `model_sea_level_anomaly_gridded_realtime.zarr` | ✓ Zarr ready      |
-| Ocean current        | UCUR, VCUR      | `OceanCurrent/GSLA/NRT`       | `model_sea_level_anomaly_gridded_realtime.zarr` | ✓ Zarr ready      |
-| SST anomaly          | sst_anom_mosaic | `SRS/AusTemp/ssta`            | —                                               | Zarr store needed |
-| Marine Heatwave DHD  | dhd_mosaic      | `SRS/AusTemp/Marine-Heatwave` | —                                               | Zarr store needed |
-| Marine Heatwave SSTA | ssta_mosaic     | `SRS/AusTemp/Marine-Heatwave` | —                                               | Zarr store needed |
+| Product               | Variable(s)             | NetCDF source                 | Zarr store                                                            | Status                                                              |
+|-----------------------|-------------------------|-------------------------------|-----------------------------------------------------------------------|---------------------------------------------------------------------|
+| Sea level anomaly     | GSLA                    | `OceanCurrent/GSLA/NRT`       | `model_sea_level_anomaly_gridded_realtime.zarr`                       | ✓ Zarr ready                                                        |
+| Ocean current         | UCUR, VCUR              | `OceanCurrent/GSLA/NRT`       | `model_sea_level_anomaly_gridded_realtime.zarr`                       | ✓ Zarr ready                                                        |
+| Radar wind (SA Gulfs) | WDIR                    | —                             | `radar_SouthAustraliaGulfs_wind_delayed_qc.zarr`                      | ✓ Zarr ready                                                        |
+| SST anomaly           | sst_anom_mosaic         | `SRS/AusTemp/ssta`            | —                                                                     | Zarr store needed                                                   |
+| Marine Heatwave DHD   | dhd_mosaic              | `SRS/AusTemp/Marine-Heatwave` | —                                                                     | Zarr store needed                                                   |
+| Marine Heatwave SSTA  | ssta_mosaic             | `SRS/AusTemp/Marine-Heatwave` | —                                                                     | Zarr store needed                                                   |
+| SST (GHRSST)          | sea_surface_temperature | —                             | `satellite_ghrsst_l3s_1day_nighttime_multi_sensor_australia.zarr`     | ✗ Excluded — inconsistent TIME dimension sizes across variables     |
 
 ---
 
@@ -94,10 +96,11 @@ GET /tiles/netcdf/{product_id}/{date}/point?lat=&lon=   → (legacy)
 ```
 titiler-project/
   main.py                        ← both routers wired up, CORS middleware, titiler COG router
-  constants.py                   ← Product dataclass; NetCDF products (5) + Zarr products (2)
+  constants.py                   ← Product dataclass + LOD algorithm; NetCDF products (5) + Zarr products (3)
                                     LOD_ZOOM_THRESHOLDS, DEFAULT_ZARR_LOD_GRIDS, MAX_LODS, MIN_COARSEST_GRID
-  plan.md                        ← this file
   docs/
+    technical.md                 ← this file
+    dataset.md                   ← per-store variable/dimension/chunking reference
     netcdf-vs-zarr.md            ← format comparison, IMOS product file analysis, performance data
   routers/
     netcdf_tiles.py              ← /tiles/netcdf  (legacy)
@@ -107,7 +110,6 @@ titiler-project/
     netcdf_renderer.py           ← processed grid cache + chunk extract + PNG encode
     zarr_loader.py               ← Zarr store singleton + per-(date, variables) slice cache + get_lod_grids
     zarr_renderer.py             ← processed grid cache + chunk extract + PNG encode
-    utils.py                     ← compute_lod_grids
 ```
 
 ---
@@ -117,21 +119,23 @@ titiler-project/
 ### Constants (`constants.py`)
 
 - `MAX_LODS = 4` — frontend WebGL atlas limit: at most 4 LOD levels per product
-- `MIN_COARSEST_GRID = (2, 2)` — minimum (cols, rows) for the coarsest LOD level; levels below this are dropped
-- `LOD_ZOOM_THRESHOLDS: dict[int, int]` — universal map zoom thresholds applied to all products (e.g. `{2: 4, 3: 5, 4: 7}`)
+- `MIN_COARSEST_GRID = (2, 2)` — minimum (cols, rows) for the coarsest LOD level; levels below this are dropped. If all levels are filtered out (data smaller than one chunk), falls back to the native finest grid so there is always at least one LOD.
+- `LOD_ZOOM_THRESHOLDS: dict[int, int]` — universal map zoom thresholds applied to all products (e.g. `{2: 4, 3: 5, 4: 6}`)
 - `DEFAULT_ZARR_LOD_GRIDS` — fallback used when lat/lon dims cannot be resolved from the store
 
-### Algorithm (`services/utils.py` — `compute_lod_grids`)
+### Algorithm (`Product._compute_lod_grids` in `constants.py`)
 
 Derives LOD grids from actual data dimensions and chunk size. Accepts `max_lods` and `min_coarsest` as parameters (defaulting to the constants above).
 
 1. Finest level: `ceil(data_width / chunk_w) × ceil(data_height / chunk_h)`
 2. Depth: `floor(log2(max(finest_cols, finest_rows)))` — number of halvings before both axes reach 1 (uses `max` so elongated grids go as deep as the wider axis allows)
 3. Each level `k`: `(ceil(finest_cols / 2^k), ceil(finest_rows / 2^k))` — `ceil` preserves coverage at intermediate scales (e.g. `finest=5` → `3, 2` not `2, 1`)
-4. Drop levels whose cols or rows fall below `min_coarsest` (avoids degenerate near-1×1 coarse levels)
+4. Drop levels whose cols or rows fall below `min_coarsest`. If nothing remains (data fits within a single chunk), fall back to `(finest_cols, finest_rows)` directly.
 5. Take the finest `max_lods` levels; assign LOD indices starting at 1 (coarsest)
 
-Example: `compute_lod_grids(3000, 1500, (256, 256))` → `{1: (3, 2), 2: (6, 3), 3: (12, 6)}`
+Example: `Product._compute_lod_grids(3000, 1500, (256, 256))` → `{1: (3, 2), 2: (6, 3), 3: (12, 6)}`
+
+Small dataset example (radar SA Gulfs, 102×74, chunk 240×192): finest=(1,1), filtered to nothing, fallback → `{1: (1, 1)}`
 
 ### Lazy population for Zarr products (`zarr_loader.py` — `get_lod_grids`)
 
@@ -140,10 +144,16 @@ Zarr products are defined in `constants.py` with `lod_grids={}`. On the first re
 1. `get_lod_grids(product)` checks `product.lod_grids` — empty, so proceeds
 2. Opens the Zarr store (singleton — reused across all calls to the same URL)
 3. Reads lat/lon dimension sizes from store metadata (`.zmetadata`, no data fetch)
-4. Calls `compute_lod_grids` and writes the result back via `object.__setattr__` (bypasses `frozen=True` for this one field only)
+4. Calls `Product._compute_lod_grids` and writes the result back via `object.__setattr__` (bypasses `frozen=True` for this one field only)
 5. All subsequent calls return immediately from the `if product.lod_grids` guard
 
 NetCDF products have `lod_grids` hardcoded in `constants.py` — `get_lod_grids` is not used for them.
+
+---
+
+## Coordinate normalisation
+
+On store open, `_get_store` applies `COORD_NAMES = {"TIME": "time", "LATITUDE": "lat", "LONGITUDE": "lon"}` to rename any uppercase coordinate names to lowercase. This happens once per store URL and is stored in the singleton. All downstream code (renderer, manifest, point endpoint) can always assume `lat`/`lon`/`time` regardless of what the store uses natively.
 
 ---
 
@@ -190,7 +200,7 @@ All caches use `threading.Lock`. The processed grid caches additionally use a `t
 The only bottleneck is **reading the source file on a cold start**. Everything else — resampling, normalisation, PNG encoding — is fast CPU work.
 
 |                       | Zarr (in-region AWS)                                         | Zarr (home internet) | NetCDF (in-region AWS) | NetCDF (home internet) |
-| --------------------- | ------------------------------------------------------------ | -------------------- | ---------------------- | ---------------------- |
+|-----------------------|--------------------------------------------------------------|----------------------|------------------------|------------------------|
 | Store/file open       | ~6ms (1 req)                                                 | ~200ms (1 req)       | ~70ms–2s (70+ reqs)    | ~16s–60s+ (70+ reqs)   |
 | Variable data read    | ~1 chunk (~10–20 MB)                                         | ~3–7s                | ~1 variable            | ~15s–30s+              |
 | Warm (all caches hit) | `_extract_chunk` + PNG encode only — identical for all cases |
@@ -203,7 +213,7 @@ For detailed analysis of why NetCDF cold starts are slow and product-by-product 
 
 Tiles are RGBA PNGs (`optimize=False`). The byte layout is fixed and consumed by a WebGL shader:
 
-- **24-bit scalar** (GSLA, SSTA, DHD, SLA): R=high byte, G=mid byte, B=low byte of normalised uint24; A=ocean mask (255=ocean, 0=land, premultiplied).
+- **24-bit scalar** (GSLA, SSTA, DHD, SLA, WDIR): R=high byte, G=mid byte, B=low byte of normalised uint24; A=ocean mask (255=ocean, 0=land, premultiplied).
 - **Ocean current** (UV): R=U normalised to 8-bit, G=V normalised to 8-bit, B=ocean mask×255, A=255.
 
 Normalisation ranges (`val_min`/`val_max`, `u_min`/`u_max`, etc.) are computed from the full pre-resampled dataset and returned in `manifest.json`. All tiles for a date share the same ranges.

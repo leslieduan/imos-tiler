@@ -29,7 +29,7 @@ Interactive API docs available at `http://localhost:8000/docs`.
 | GET | `/tiles/zarr/{product_id}/{date}/manifest.json` | Bounds, value ranges, LOD grid config |
 | GET | `/tiles/zarr/{product_id}/{date}/point?lat=&lon=` | Point value lookup |
 
-**Zarr product IDs:** `zarr_sea_level_anomaly`, `zarr_ocean_current`
+**Zarr product IDs:** `zarr_sea_level_anomaly`, `zarr_ocean_current`, `zarr_radar_SouthAustraliaGulfs_wind_delayed_qc_wdir`
 
 ### NetCDF (`/tiles/netcdf`)
 
@@ -47,10 +47,16 @@ Tiles are RGBA PNGs with `optimize=False`.
 
 | Product type | R | G | B | A |
 |---|---|---|---|---|
-| Scalar (SSTA, MHW, SLA) | high byte of uint24 | mid byte | low byte | ocean mask (255 = ocean, 0 = land) |
+| Scalar (SSTA, MHW, SLA, WDIR) | high byte of uint24 | mid byte | low byte | ocean mask (255 = ocean, 0 = land) |
 | Ocean current (UV) | U normalised 0–255 | V normalised 0–255 | ocean mask × 255 | 255 |
 
 Normalisation ranges (`valueRange`, `uRange`, `vRange`) are in `manifest.json`.
+
+## Docs
+
+- [`docs/technical.md`](docs/technical.md) — architecture, LOD algorithm, caching strategy, PNG encoding contract
+- [`docs/dataset.md`](docs/dataset.md) — per-store variable/dimension/chunking reference
+- [`docs/netcdf-vs-zarr.md`](docs/netcdf-vs-zarr.md) — format comparison and IMOS product file analysis
 
 ## Development
 
