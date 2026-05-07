@@ -37,11 +37,11 @@ def test_compute_lod_grids_small_data_one_axis():
     assert grids == {1: (2, 1)}
 
 
-@pytest.mark.parametrize("product_id", ["zarr_sea_level_anomaly", "zarr_ocean_current"])
-def test_zarr_products_have_no_lod_grids_by_default(product_id: str):
-    from constants import ZARR_PRODUCTS
+@pytest.mark.parametrize("product_id", ["sea_level_anomaly", "ocean_current"])
+def test_products_have_no_lod_grids_by_default(product_id: str):
+    from constants import PRODUCTS
 
-    product = ZARR_PRODUCTS[product_id]
+    product = PRODUCTS[product_id]
     assert product.lod_grids == {}
 
 

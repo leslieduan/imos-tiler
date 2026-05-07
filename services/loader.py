@@ -4,11 +4,11 @@ import threading
 import xarray as xr
 from cachetools import LRUCache
 
-from constants import COORD_NAMES, DEFAULT_ZARR_LOD_GRIDS, Product
+from constants import COORD_NAMES, DEFAULT_LOD_GRIDS, Product
 
 logger = logging.getLogger(__name__)
 
-# Zarr stores opened once per URL and reused across requests.
+# Dataset stores opened once per URL and reused across requests.
 _stores: dict[str, xr.Dataset] = {}
 _store_lock = threading.Lock()
 
@@ -25,7 +25,7 @@ def _get_store(store_url: str) -> xr.Dataset:
     with _store_lock:
         if store_url not in _stores:
             ds = xr.open_zarr(store_url, storage_options={"anon": True})
-            # The rename itself is also essentially free — xarray's .rename() only touches coordinate metadata, no data is loaded into memory. Same for .sortby() on a Zarr store — it rearranges the index, not the array data
+            # The rename itself is also essentially free — xarray's .rename() only touches coordinate metadata, no data is loaded into memory. Same for .sortby() on a store — it rearranges the index, not the array data
             rename = {k: v for k, v in COORD_NAMES.items() if k in ds.dims or k in ds.coords}
             if rename:
                 ds = ds.rename(rename)
@@ -54,7 +54,7 @@ def get_lod_grids(product: Product) -> dict[int, tuple[int, int]]:
         lon_dim = next((d for d in ("lon", "LONGITUDE") if d in store.dims), None)
 
         if lat_dim is None or lon_dim is None:
-            object.__setattr__(product, "lod_grids", DEFAULT_ZARR_LOD_GRIDS)
+            object.__setattr__(product, "lod_grids", DEFAULT_LOD_GRIDS)
             return product.lod_grids
 
         data_height = store.dims[lat_dim]
@@ -72,7 +72,7 @@ def get_lod_grids(product: Product) -> dict[int, tuple[int, int]]:
     return product.lod_grids
 
 
-def load_zarr_slice(store_url: str, date: str, variables: list[str]) -> xr.Dataset:
+def load_slice(store_url: str, date: str, variables: list[str]) -> xr.Dataset:
     """
     Return a fully-computed 2D (lat × lon) slice for the given store, date, and variables.
     Uses nearest-match on time so callers don't need to know exact timestamps.
@@ -88,7 +88,7 @@ def load_zarr_slice(store_url: str, date: str, variables: list[str]) -> xr.Datas
     try:
         ds = store[variables].sel(time=date, method="nearest").compute()
     except KeyError as e:
-        raise FileNotFoundError(f"No Zarr data found near date {date}") from e
+        raise FileNotFoundError(f"No data found near date {date}") from e
 
     with _slice_lock:
         _slice_cache[cache_key] = ds

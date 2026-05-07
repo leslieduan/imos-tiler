@@ -1,4 +1,14 @@
-import logging
+"""
+Tile renderer.
+
+Uses the same processed grid cache pattern as renderer.py:
+  - _get_processed ressamples the full LOD grid once per (date, lod) and caches the
+    final numpy arrays — identical to the NetCDF processed cache.
+  - The dataset slice is already fully in RAM (computed by loader), so the resample
+    is pure CPU with no S3 I/O.
+  - _extract_chunk and _to_png_bytes are imported from renderer.py to avoid duplication.
+"""
+
 import threading
 from io import BytesIO
 
@@ -9,12 +19,11 @@ from PIL import Image
 
 from constants import LOD_ZOOM_THRESHOLDS, Product
 
-logger = logging.getLogger(__name__)
-
-# Processed grid cache: stores final numpy arrays ready for _extract_chunk.
-# Keyed by (id(ds), lod) — safe because ds is held alive by the loader's LRU cache.
-# Merges the old resample + numpy ops into one step: resample happens here but
-# only once per (date, lod); all tiles at that lod just call _extract_chunk.
+# Caches the full resampled grid arrays for a (ds, lod) pair so that all tile
+# requests for the same date+LOD share one resample instead of each repeating it.
+# Key is (id(ds), lod): each product's ds is a distinct object from _slice_cache, so
+# id(ds) implicitly encodes the product. id reuse is impossible because _slice_cache
+# holds a strong reference to every ds, preventing GC for the cache's lifetime.
 _processed_cache: LRUCache = LRUCache(maxsize=20)
 _processed_inflight: dict = {}
 _processed_lock = threading.Lock()
@@ -43,10 +52,7 @@ def _resample_to_grid(ds: xr.Dataset, total_w: int, total_h: int) -> xr.Dataset:
     return result
 
 
-def _compute_scalar_arrays(
-    product: Product, ds: xr.Dataset, lod: int
-) -> tuple[np.ndarray, np.ndarray]:
-    """Resample + normalise → (val_24, ocean) over the full LOD grid."""
+def _compute_scalar(product: Product, ds: xr.Dataset, lod: int) -> tuple[np.ndarray, np.ndarray]:
     grid_cols, grid_rows = product.lod_grids[lod]
     total_w = grid_cols * product.chunk_px[0]
     total_h = grid_rows * product.chunk_px[1]
@@ -68,10 +74,9 @@ def _compute_scalar_arrays(
     return val_24, ocean
 
 
-def _compute_uv_arrays(
+def _compute_uv(
     product: Product, ds: xr.Dataset, lod: int
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Resample + normalise → (u_norm, v_norm, ocean) over the full LOD grid."""
     u_var, v_var = product.variable
     grid_cols, grid_rows = product.lod_grids[lod]
     total_w = grid_cols * product.chunk_px[0]
@@ -101,13 +106,7 @@ def _compute_uv_arrays(
 
 
 def _get_processed(product: Product, ds: xr.Dataset, lod: int) -> tuple:
-    # Resampling the full LOD grid is expensive (e.g. 5.5M pixels for SSTA LOD3).
-    # The result is identical for every tile at the same zoom level, so we cache
-    # the final numpy arrays here. All tiles at that lod then just call _extract_chunk.
-    # variable is included because multiple products can share the same ds (same source
-    # file, different variables) — e.g. dhd_mosaic and ssta_mosaic.
-    var_key = tuple(product.variable) if isinstance(product.variable, list) else product.variable
-    key = (id(ds), var_key, lod)
+    key = (id(ds), lod)
 
     while True:
         with _processed_lock:
@@ -119,14 +118,14 @@ def _get_processed(product: Product, ds: xr.Dataset, lod: int) -> tuple:
                 _processed_inflight[key] = event
                 break
             event = _processed_inflight[key]
-        # Another thread is computing this key — wait then re-check cache
         event.wait()
 
     try:
-        if isinstance(product.variable, list):
-            result = _compute_uv_arrays(product, ds, lod)
-        else:
-            result = _compute_scalar_arrays(product, ds, lod)
+        result = (
+            _compute_uv(product, ds, lod)
+            if isinstance(product.variable, list)
+            else _compute_scalar(product, ds, lod)
+        )
         with _processed_lock:
             _processed_cache[key] = result
         return result
@@ -174,58 +173,50 @@ def _to_png_bytes(img_array: np.ndarray) -> bytes:
     return buf.getvalue()
 
 
-def _render_scalar_tile(product: Product, ds: xr.Dataset, lod: int, cx: int, cy: int) -> bytes:
-    grid_cols, grid_rows = product.lod_grids[lod]
-    total_w = grid_cols * product.chunk_px[0]
-    total_h = grid_rows * product.chunk_px[1]
-
-    val_24, ocean = _get_processed(product, ds, lod)
-
-    chunk_24 = _extract_chunk(val_24, cx, cy, total_w, total_h, product.chunk_px, product.padding)
-    chunk_m = _extract_chunk(ocean, cx, cy, total_w, total_h, product.chunk_px, product.padding)
-
-    h, w = chunk_24.shape
-    img = np.zeros((h, w, 4), dtype=np.uint8)
-    img[:, :, 0] = (chunk_24 >> 16) & 0xFF
-    img[:, :, 1] = (chunk_24 >> 8) & 0xFF
-    img[:, :, 2] = chunk_24 & 0xFF
-    img[:, :, 3] = chunk_m * 255
-    img[chunk_m == 0, :3] = 0  # premultiplied alpha
-
-    return _to_png_bytes(img)
-
-
-def _render_ocean_current_tile(
-    product: Product, ds: xr.Dataset, lod: int, cx: int, cy: int
-) -> bytes:
-    grid_cols, grid_rows = product.lod_grids[lod]
-    total_w = grid_cols * product.chunk_px[0]
-    total_h = grid_rows * product.chunk_px[1]
-
-    u_norm, v_norm, ocean = _get_processed(product, ds, lod)
-
-    chunk_u = _extract_chunk(u_norm, cx, cy, total_w, total_h, product.chunk_px, product.padding)
-    chunk_v = _extract_chunk(v_norm, cx, cy, total_w, total_h, product.chunk_px, product.padding)
-    chunk_m = _extract_chunk(ocean, cx, cy, total_w, total_h, product.chunk_px, product.padding)
-
-    h, w = chunk_u.shape
-    img = np.zeros((h, w, 4), dtype=np.uint8)
-    img[:, :, 0] = chunk_u  # R = U
-    img[:, :, 1] = chunk_v  # G = V
-    img[:, :, 2] = chunk_m * 255  # B = ocean mask
-    img[:, :, 3] = 255  # A = always opaque
-
-    return _to_png_bytes(img)
-
-
 def render_tile(product: Product, ds: xr.Dataset, lod: int, cx: int, cy: int) -> bytes:
+    grid_cols, grid_rows = product.lod_grids[lod]
+    total_w = grid_cols * product.chunk_px[0]
+    total_h = grid_rows * product.chunk_px[1]
+
     if isinstance(product.variable, list):
-        return _render_ocean_current_tile(product, ds, lod, cx, cy)
-    return _render_scalar_tile(product, ds, lod, cx, cy)
+        u_norm, v_norm, ocean = _get_processed(product, ds, lod)
+        chunk_u = _extract_chunk(
+            u_norm, cx, cy, total_w, total_h, product.chunk_px, product.padding
+        )
+        chunk_v = _extract_chunk(
+            v_norm, cx, cy, total_w, total_h, product.chunk_px, product.padding
+        )
+        chunk_m = _extract_chunk(ocean, cx, cy, total_w, total_h, product.chunk_px, product.padding)
+        h, w = chunk_u.shape
+        img = np.zeros((h, w, 4), dtype=np.uint8)
+        img[:, :, 0] = chunk_u
+        img[:, :, 1] = chunk_v
+        img[:, :, 2] = chunk_m * 255
+        img[:, :, 3] = 255
+    else:
+        val_24, ocean = _get_processed(product, ds, lod)
+        chunk_24 = _extract_chunk(
+            val_24, cx, cy, total_w, total_h, product.chunk_px, product.padding
+        )
+        chunk_m = _extract_chunk(ocean, cx, cy, total_w, total_h, product.chunk_px, product.padding)
+        h, w = chunk_24.shape
+        img = np.zeros((h, w, 4), dtype=np.uint8)
+        img[:, :, 0] = (chunk_24 >> 16) & 0xFF
+        img[:, :, 1] = (chunk_24 >> 8) & 0xFF
+        img[:, :, 2] = chunk_24 & 0xFF
+        img[:, :, 3] = chunk_m * 255
+        img[chunk_m == 0, :3] = 0
+
+    return _to_png_bytes(img)
 
 
 def render_manifest(product: Product, ds: xr.Dataset) -> dict:
-    lon_min, lon_max, lat_min, lat_max = _get_bounds(ds)
+    lon_min_g = float(ds.lon.min())
+    lon_max_g = float(ds.lon.max())
+    lat_min_g = float(ds.lat.min())
+    lat_max_g = float(ds.lat.max())
+
+    bounds = {"lonMin": lon_min_g, "lonMax": lon_max_g, "latMin": lat_min_g, "latMax": lat_max_g}
     lod_meta = {
         str(lod): {
             "grid": list(product.lod_grids[lod]),
@@ -239,7 +230,6 @@ def render_manifest(product: Product, ds: xr.Dataset) -> dict:
         }
         for lod in product.lod_grids
     }
-    bounds = {"lonMin": lon_min, "lonMax": lon_max, "latMin": lat_min, "latMax": lat_max}
 
     if isinstance(product.variable, list):
         u_var, v_var = product.variable
