@@ -2,7 +2,7 @@
 
 FastAPI tile server for IMOS ocean data products, built on [titiler-core](https://github.com/developmentseed/titiler).
 
-Serves on-demand RGBA PNG tiles from Zarr and NetCDF sources on S3 in a custom geographic atlas grid (not Web Mercator). Tiles are consumed by a WebGL shader — see [PNG encoding contract](#png-encoding-contract).
+Serves on-demand RGBA PNG tiles from Zarr stores on S3 in a custom geographic atlas grid (not Web Mercator). Tiles are consumed by a WebGL shader — see [PNG encoding contract](#png-encoding-contract).
 
 ## Setup
 
@@ -21,21 +21,15 @@ Interactive API docs available at `http://localhost:8000/docs`.
 
 ## Endpoints
 
-### Zarr  (`/tiles/zarr`)
+### Tiles (`/tiles`)
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/tiles/zarr/{product_id}/{date}/{z}/{x}/{y}.png` | RGBA tile |
-| GET | `/tiles/zarr/{product_id}/{date}/manifest.json` | Bounds, value ranges, LOD grid config |
-| GET | `/tiles/zarr/{product_id}/{date}/point?lat=&lon=` | Point value lookup |
+| GET | `/tiles/{product_id}/{date}/{z}/{x}/{y}.png` | RGBA tile |
+| GET | `/tiles/{product_id}/{date}/manifest.json` | Bounds, value ranges, LOD grid config |
+| GET | `/tiles/{product_id}/{date}/point?lat=&lon=` | Point value lookup |
 
-**Zarr product IDs:** `zarr_sea_level_anomaly`, `zarr_ocean_current`, `zarr_radar_SouthAustraliaGulfs_wind_delayed_qc_wdir`
-
-### NetCDF (`/tiles/netcdf`)
-
-Same shape as Zarr. **NetCDF product IDs:** `ocean_current_gsla_ucur_vcur`, `ocean_current_gsla_gsla`, `austemp_sst_anomaly_sst_anom_mosaic`, `ausTemp_marine_heatwave_aus_dhd_mosaic`, `ausTemp_marine_heatwave_aus_ssta_mosaic`
-
-> NetCDF support is considered legacy — Zarr is the preferred path.
+**Product IDs:** `sea_level_anomaly`, `ocean_current`, `radar_SouthAustraliaGulfs_wind_delayed_qc_wdir`, `satellite_austemp_heatwave_8day_ssta`
 
 ### Tile coordinates
 

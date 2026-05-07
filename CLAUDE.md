@@ -13,37 +13,62 @@ uv run uvicorn main:app --reload
 
 # Add a dependency
 uv add <package>
-```
 
-No test suite exists yet.
+# Run tests / lint / type check
+uv run pytest
+uv run ruff check .
+uv run mypy .
+```
 
 ## Architecture
 
-This is a **FastAPI** tile server built on top of **titiler-core**. The entry point is `main.py`.
+FastAPI tile server for IMOS ocean data products built on **titiler-core**. Entry point is `main.py`. All tile serving goes through a single Zarr-backed stack — the legacy NetCDF stack has been removed.
 
-### Current state
+### File structure
 
-`main.py` wires up a standard titiler COG (Cloud-Optimized GeoTIFF) router and adds CORS middleware. This is essentially the titiler scaffold.
+```
+main.py                  ← mounts /tiles and /cog routers, CORS middleware
+constants.py             ← Product dataclass, LOD algorithm, all product configs
+routers/tiles.py         ← /tiles endpoints (tile, manifest, point)
+services/loader.py       ← Zarr store singleton, slice cache, get_lod_grids
+services/renderer.py     ← processed grid cache, chunk extract, PNG encode
+docs/technical.md        ← architecture, LOD algorithm, caching strategy
+docs/dataset.md          ← per-store variable/dimension/chunking reference
+```
 
-### Planned tile generation layer
+### Active products (`constants.py` → `PRODUCTS`)
 
-A custom on-demand tile generation system is being added for IMOS ocean data products. The design (see `plan.md`) introduces:
+| Product ID | Variable(s) | Store |
+|---|---|---|
+| `sea_level_anomaly` | GSLA | `model_sea_level_anomaly_gridded_realtime.zarr` |
+| `ocean_current` | UCUR, VCUR | `model_sea_level_anomaly_gridded_realtime.zarr` |
+| `radar_SouthAustraliaGulfs_wind_delayed_qc_wdir` | WDIR | `radar_SouthAustraliaGulfs_wind_delayed_qc.zarr` |
+| `satellite_austemp_heatwave_8day_ssta` | ssta | `satellite_austemp_heatwave_8day.zarr` |
 
-- **`constants.py`** — `Product` dataclass and five product configs (SST anomaly, marine heatwave ×2, ocean current, sea-level anomaly). Each product defines its S3 source path, variable name(s), LOD grids, chunk pixel size, and padding.
-- **`services/loader.py`** — loads `xr.Dataset` from anonymous S3 (`s3fs`), time-selects for a given date, and caches results in an LRU cache keyed by `(product_id, date)`.
-- **`services/renderer.py`** — converts a cached dataset into a raw PNG tile. Encoding varies by product: single-variable products use a 24-bit normalised value split across R/G/B with an ocean-mask alpha; the ocean-current product encodes U in R, V in G, ocean mask in B, A=255.
-- **`routers/tiles.py`** — two endpoints:
-  - `GET /tiles/{product_id}/{date}/{z}/{x}/{y}.png` — on-demand tile
-  - `GET /tiles/{product_id}/{date}/manifest.json` — bounds + valueRange/uRange/vRange + LOD grid config
+### URL contract
 
-### Tile coordinate system
+```
+GET /tiles/{product_id}/{date}/{z}/{x}/{y}.png
+GET /tiles/{product_id}/{date}/manifest.json
+GET /tiles/{product_id}/{date}/point?lat=&lon=
+```
 
-`z` = LOD level (integer, product-specific — e.g. 1/2/3 for SST), `x` = chunk column (`cx`, 0 = westernmost), `y` = chunk row (`cy`, 0 = northernmost). This is **not** Web Mercator slippy-map tiles — it is a custom atlas grid in geographic (lat/lon) space.
+`z` = LOD level, `x` = chunk column (0 = westernmost), `y` = chunk row (0 = northernmost). Not Web Mercator — custom geographic atlas grid.
 
 ### PNG encoding contract
 
-Tiles are RGBA PNGs with `optimize=False` (PIL). The byte layout is fixed and consumed by a WebGL shader:
-- **24-bit scalar** (SSTA, MHW, SLA): R=high byte, G=mid byte, B=low byte of normalised uint24; A=ocean mask (255=ocean, 0=land, premultiplied).
-- **Ocean current** (UV): R=U normalised to 8-bit, G=V normalised to 8-bit, B=ocean mask×255, A=255.
+Tiles are RGBA PNGs (`optimize=False`). Byte layout consumed by a WebGL shader:
+- **24-bit scalar** (GSLA, SSTA, WDIR, etc.): R=high byte, G=mid byte, B=low byte of normalised uint24; A=ocean mask (255=ocean, 0=land).
+- **UV current**: R=U normalised 0–255, G=V normalised 0–255, B=ocean mask×255, A=255.
 
-Normalisation ranges (`val_min`/`val_max`, `u_min`/`u_max`, etc.) are computed from the full pre-resampled dataset and stored in `manifest.json`. All tiles for a date share the same ranges — the manifest must be fetched before tiles can be decoded.
+Normalisation ranges are in `manifest.json` — fetch it before decoding tiles.
+
+### LOD grids
+
+Each product has `lod_grids: dict[int, tuple[int, int]]` mapping LOD level → (cols, rows). For Zarr products this is auto-computed from native store dimensions on first request via `Product._compute_lod_grids`. See `docs/technical.md` for the algorithm.
+
+### Adding a new product
+
+1. Add a URL constant and `Product(...)` entry in `constants.py`
+2. Add it to `PRODUCTS`
+3. Update `docs/dataset.md` with store variable/dimension/chunking info
