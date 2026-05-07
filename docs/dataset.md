@@ -62,6 +62,43 @@ Chunks are `(100, 74, 102)` — each S3 read fetches 100 time steps of the full 
 
 ---
 
+## Satellite AusTemp Heatwave 8-day
+
+**Store:** `s3://aodn-cloud-optimised/satellite_austemp_heatwave_8day.zarr`
+**Products:** `zarr_satellite_austemp_heatwave_8day_ssta`
+
+### Dimensions
+
+| Dimension | Size | Chunk |
+|-----------|------|-------|
+| time      | 5225 | 5     |
+| lat       | 2000 | 1000  |
+| lon       | 3900 | 1300  |
+
+Coordinates already use lowercase (`time`, `lat`, `lon`) — no rename needed on open.
+Chunks are `(5, 1000, 1300)` — spatial chunks cover half the grid per read.
+
+### Variables
+
+| Variable          | Dims              | Dtype   | Units           | Notes                        |
+|-------------------|-------------------|---------|-----------------|------------------------------|
+| ssta              | time × lat × lon  | float64 | °C              | SST anomaly                  |
+| ssta_mosaic       | time × lat × lon  | float64 | °C              | SST anomaly (mosaic)         |
+| sst               | time × lat × lon  | float64 | °C              | Sea surface temperature      |
+| sst_mosaic        | time × lat × lon  | float64 | °C              | SST (mosaic)                 |
+| dhd               | time × lat × lon  | float64 | —               | Degree heating days          |
+| dhd_mosaic        | time × lat × lon  | float64 | —               | Degree heating days (mosaic) |
+| dhdc              | time × lat × lon  | int32   | —               | DHD category                 |
+| dhdc_mosaic       | time × lat × lon  | int32   | —               | DHD category (mosaic)        |
+| MHW_category      | time × lat × lon  | float64 | —               | Marine heatwave category     |
+| MHW_category_mosaic | time × lat × lon | float64 | —              | MHW category (mosaic)        |
+| MCS_category      | time × lat × lon  | float64 | —               | Marine cold spell category   |
+| MCS_category_mosaic | time × lat × lon | float64 | —              | MCS category (mosaic)        |
+| l2p_flags         | time × lat × lon  | float64 | —               |                              |
+| mosaic_age        | time × lat × lon  | int32   | —               |                              |
+
+---
+
 ## GHRSST — Sea Surface Temperature *(data quality issue, not active)*
 
 **Store:** `s3://aodn-cloud-optimised/satellite_ghrsst_l3s_1day_nighttime_multi_sensor_australia.zarr`

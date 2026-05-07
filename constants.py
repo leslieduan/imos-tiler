@@ -113,38 +113,51 @@ PRODUCTS: dict[str, Product] = {
 }
 
 # ── Zarr products ─────────────────────────────────────────────────────────────
-_GSLA_ZARR_URL = "s3://aodn-cloud-optimised/model_sea_level_anomaly_gridded_realtime.zarr/"
+_GSLA_ZARR = "s3://aodn-cloud-optimised/model_sea_level_anomaly_gridded_realtime.zarr/"
 # satellite_ghrsst_l3s_1day_nighttime_multi_sensor_australia has data quality issue, the time dimension size is different for variables.
-_SATELLITE_GHRSST_ZARR_URL = (
+_SATELLITE_GHRSST_ZARR = (
     "s3://aodn-cloud-optimised/satellite_ghrsst_l3s_1day_nighttime_multi_sensor_australia.zarr"
 )
-_RADAR_ASG_WIND_DELAYED_QC = (
+_RADAR_ASG_WIND_DELAYED_QC_ZARR = (
     "s3://aodn-cloud-optimised/radar_SouthAustraliaGulfs_wind_delayed_qc.zarr"
+)
+_SATELLITE_AUSTEMP_HEATWAVE_8DAY_ZARR = (
+    "s3://aodn-cloud-optimised/satellite_austemp_heatwave_8day.zarr"
 )
 
 ZARR_SEA_LEVEL_ANOMALY = Product(
     id="zarr_sea_level_anomaly",
-    source_path=_GSLA_ZARR_URL,
+    source_path=_GSLA_ZARR,
     variable="GSLA",
 )
 ZARR_OCEAN_CURRENT = Product(
     id="zarr_ocean_current",
-    source_path=_GSLA_ZARR_URL,
+    source_path=_GSLA_ZARR,
     variable=["UCUR", "VCUR"],
 )
 # ZARR_SEA_SURFACE_TEMPERATURE = Product(
 #     id="zarr_sea_surface_temperature",
-#     source_path=_SATELLITE_GHRSST_ZARR_URL,
+#     source_path=_SATELLITE_GHRSST_ZARR,
 #     variable="sea_surface_temperature",
 # )
 # Small regional dataset: 102 lon × 74 lat — fits in a single tile (lod_grids auto-computes to {1: (1, 1)}).
 ZARR_RADAR_ASG_WIND_DELAYED_QC_WDIR = Product(
     id="zarr_radar_SouthAustraliaGulfs_wind_delayed_qc_wdir",
-    source_path=_RADAR_ASG_WIND_DELAYED_QC,
+    source_path=_RADAR_ASG_WIND_DELAYED_QC_ZARR,
     variable="WDIR",
+)
+ZARR_SATELLITE_AUSTEMP_HEATWAVE_8DAY_SSTA = Product(
+    id="zarr_satellite_austemp_heatwave_8day_ssta",
+    source_path=_SATELLITE_AUSTEMP_HEATWAVE_8DAY_ZARR,
+    variable="ssta",
 )
 
 ZARR_PRODUCTS: dict[str, Product] = {
     p.id: p
-    for p in [ZARR_SEA_LEVEL_ANOMALY, ZARR_OCEAN_CURRENT, ZARR_RADAR_ASG_WIND_DELAYED_QC_WDIR]
+    for p in [
+        ZARR_SEA_LEVEL_ANOMALY,
+        ZARR_OCEAN_CURRENT,
+        ZARR_RADAR_ASG_WIND_DELAYED_QC_WDIR,
+        ZARR_SATELLITE_AUSTEMP_HEATWAVE_8DAY_SSTA,
+    ]
 }
