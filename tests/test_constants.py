@@ -26,15 +26,15 @@ def test_compute_lod_grids_respects_min_coarsest():
 
 
 def test_compute_lod_grids_small_data():
-    # data smaller than chunk_px → finest grid is (1,1) which is below MIN_COARSEST_GRID=(2,2)
+    # data smaller than chunk_px → all levels filtered by MIN_COARSEST_GRID, falls back to native finest grid
     grids = Product._compute_lod_grids(100, 100, (240, 192))
-    assert grids == {}
-
-
-def test_compute_lod_grids_small_data_relaxed_min():
-    # with min_coarsest=(1,1) the single level should survive
-    grids = Product._compute_lod_grids(100, 100, (240, 192), min_coarsest=(1, 1))
     assert grids == {1: (1, 1)}
+
+
+def test_compute_lod_grids_small_data_one_axis():
+    # one axis too small → fallback grid reflects actual dimensions
+    grids = Product._compute_lod_grids(480, 74, (240, 192))
+    assert grids == {1: (2, 1)}
 
 
 @pytest.mark.parametrize("product_id", ["zarr_sea_level_anomaly", "zarr_ocean_current"])
