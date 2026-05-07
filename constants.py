@@ -107,6 +107,9 @@ PRODUCTS: dict[str, Product] = {
 
 # ── Zarr products ─────────────────────────────────────────────────────────────
 _GSLA_ZARR_URL = "s3://aodn-cloud-optimised/model_sea_level_anomaly_gridded_realtime.zarr/"
+_SATELLITE_GHRSST_ZARR_URL = (
+    "s3://aodn-cloud-optimised/satellite_ghrsst_l3s_1day_nighttime_multi_sensor_australia.zarr"
+)
 
 ZARR_SEA_LEVEL_ANOMALY = Product(
     id="zarr_sea_level_anomaly",
@@ -119,4 +122,12 @@ ZARR_OCEAN_CURRENT = Product(
     variable=["UCUR", "VCUR"],
 )
 
-ZARR_PRODUCTS: dict[str, Product] = {p.id: p for p in [ZARR_SEA_LEVEL_ANOMALY, ZARR_OCEAN_CURRENT]}
+ZARR_SEA_SURFACE_TEMPERATURE = Product(
+    id="zarr_sea_surface_temperature",
+    source_path=_SATELLITE_GHRSST_ZARR_URL,
+    variable="sea_surface_temperature",
+)
+
+ZARR_PRODUCTS: dict[str, Product] = {
+    p.id: p for p in [ZARR_SEA_LEVEL_ANOMALY, ZARR_OCEAN_CURRENT, ZARR_SEA_SURFACE_TEMPERATURE]
+}

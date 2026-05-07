@@ -24,9 +24,15 @@ _slice_lock = threading.Lock()
 def _get_store(store_url: str) -> xr.Dataset:
     with _store_lock:
         if store_url not in _stores:
-            _stores[store_url] = xr.open_zarr(store_url, storage_options={"anon": True}).sortby(
-                "TIME"
-            )
+            ds = xr.open_zarr(store_url, storage_options={"anon": True})
+            # The rename itself is also essentially free — xarray's .rename() only touches coordinate metadata, no data is loaded into memory. Same for .sortby() on a Zarr store — it rearranges the index, not the array data
+            rename = {k: v for k, v in COORD_NAMES.items() if k in ds.dims or k in ds.coords}
+            if rename:
+                ds = ds.rename(rename)
+            time_dim = next((d for d in ("TIME", "time") if d in ds.dims), None)
+            if time_dim:
+                ds = ds.sortby(time_dim)
+            _stores[store_url] = ds
     return _stores[store_url]
 
 
@@ -69,8 +75,8 @@ def get_lod_grids(product: Product) -> dict[int, tuple[int, int]]:
 def load_zarr_slice(store_url: str, date: str, variables: list[str]) -> xr.Dataset:
     """
     Return a fully-computed 2D (lat × lon) slice for the given store, date, and variables.
-    Uses nearest-match on TIME so callers don't need to know exact timestamps.
-    Coordinate names are normalised to lat/lon (LATITUDE/LONGITUDE in the store).
+    Uses nearest-match on time so callers don't need to know exact timestamps.
+    Coordinate names are already normalised by _get_store.
     """
     cache_key = (store_url, date, tuple(sorted(variables)))
     with _slice_lock:
@@ -80,13 +86,9 @@ def load_zarr_slice(store_url: str, date: str, variables: list[str]) -> xr.Datas
 
     store = _get_store(store_url)
     try:
-        ds = store[variables].sel(TIME=date, method="nearest").compute()
+        ds = store[variables].sel(time=date, method="nearest").compute()
     except KeyError as e:
         raise FileNotFoundError(f"No Zarr data found near date {date}") from e
-
-    rename = {k: v for k, v in COORD_NAMES.items() if k in ds.dims or k in ds.coords}
-    if rename:
-        ds = ds.rename(rename)
 
     with _slice_lock:
         _slice_cache[cache_key] = ds
