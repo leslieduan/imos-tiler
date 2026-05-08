@@ -1,6 +1,7 @@
 import logging.config
 from contextlib import asynccontextmanager
 
+from dotenv import load_dotenv
 from fastapi import FastAPI
 from starlette.middleware.cors import CORSMiddleware
 from uvicorn.config import LOGGING_CONFIG
@@ -8,6 +9,8 @@ from uvicorn.config import LOGGING_CONFIG
 from routers.admin import router as admin_router
 from routers.tiles import router as tiles_router
 from services.product_store import load_products
+
+load_dotenv()
 
 LOGGING_CONFIG["formatters"]["default"]["fmt"] = "%(levelprefix)s %(asctime)s %(message)s"
 LOGGING_CONFIG["formatters"]["default"]["datefmt"] = "%H:%M:%S"
