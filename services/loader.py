@@ -54,8 +54,8 @@ def get_lod_grids(product: Product) -> dict[int, tuple[int, int]]:
             return product.lod_grids
 
         store = _get_store(product.source_path)
-        data_height = store.dims["lat"]
-        data_width = store.dims["lon"]
+        data_height = store.sizes["lat"]
+        data_width = store.sizes["lon"]
         product.apply_computed_lod_grids(data_width, data_height)
 
     return product.lod_grids

@@ -47,7 +47,7 @@ def get_tile(product_id: str, date: str, z: int, x: int, y: int):
 @router.get("/{product_id}/{date}/manifest.json")
 def get_manifest(product_id: str, date: str):
     product = _get_product_or_404(product_id)
-    get_lod_grids(product)
+    get_lod_grids(product)  # populates product.lod_grids before render_manifest reads it
     variables = product.variable if isinstance(product.variable, list) else [product.variable]
     ds = _load_or_404(product.source_path, date, variables)
     return JSONResponse(content=render_manifest(product, ds))

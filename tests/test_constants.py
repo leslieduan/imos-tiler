@@ -46,8 +46,6 @@ def test_products_have_no_lod_grids_by_default(product_id: str):
 
 
 def test_apply_computed_lod_grids_is_noop_when_already_set():
-    from constants import SST_ANOM_MOSAIC
-
-    original = dict(SST_ANOM_MOSAIC.lod_grids)
-    SST_ANOM_MOSAIC.apply_computed_lod_grids(9999, 9999)
-    assert SST_ANOM_MOSAIC.lod_grids == original
+    p = Product(id="test", source_path="s3://test", variable="x", lod_grids={1: (2, 2)})
+    p.apply_computed_lod_grids(9999, 9999)
+    assert p.lod_grids == {1: (2, 2)}
