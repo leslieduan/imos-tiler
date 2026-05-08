@@ -4,15 +4,11 @@ from dataclasses import dataclass, field
 # Applied in loaders to normalise coordinate names across all products.
 # Keys that don't exist in a dataset are silently skipped.
 COORD_NAMES = {"TIME": "time", "LATITUDE": "lat", "LONGITUDE": "lon"}
-
 MAX_LODS = 4
 MIN_COARSEST_GRID = (2, 2)  # minimum (cols, rows) for the coarsest LOD level
-
 # LOD level → minimum map zoom to show that level. Applied universally to all products.
 LOD_ZOOM_THRESHOLDS: dict[int, int] = {2: 4, 3: 5, 4: 6}
-
 PADDING = 1
-
 CHUNK_PX = (240, 192)
 
 # dataset
