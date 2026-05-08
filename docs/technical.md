@@ -158,20 +158,6 @@ All caches use `threading.Lock`. The processed grid cache additionally uses a `t
 
 ---
 
-## Performance
-
-The only bottleneck is **reading the source file on a cold start**. Everything else — resampling, normalisation, PNG encoding — is fast CPU work.
-
-|                       | In-region AWS                      | Home internet  |
-| --------------------- | ---------------------------------- | -------------- |
-| Store open            | ~6ms (1 req)                       | ~200ms (1 req) |
-| Variable data read    | ~10–20 MB/chunk                    | ~3–7s          |
-| Warm (all caches hit) | `_extract_chunk` + PNG encode only |
-
-For detailed analysis of why the previous NetCDF approach was slow, see `docs/netcdf-vs-zarr.md`.
-
----
-
 ## Adding a new product
 
 The server is designed so that adding a product requires **only editing `constants.py`** — no changes to routing, loading, or rendering code.
