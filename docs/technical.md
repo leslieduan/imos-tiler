@@ -8,18 +8,14 @@ Zarr eliminates this entirely: metadata is one `.zmetadata` HTTP request, and va
 
 **Full format analysis and IMOS product file details: `docs/netcdf-vs-zarr.md`.**
 
-### Product status
+### Active products
 
-| Product               | Variable(s)             | Zarr store                                                        | Status                                                          |
-| --------------------- | ----------------------- | ----------------------------------------------------------------- | --------------------------------------------------------------- |
-| Sea level anomaly     | GSLA                    | `model_sea_level_anomaly_gridded_realtime.zarr`                   | ✓ Active                                                        |
-| Ocean current         | UCUR, VCUR              | `model_sea_level_anomaly_gridded_realtime.zarr`                   | ✓ Active                                                        |
-| Radar wind (SA Gulfs) | WDIR                    | `radar_SouthAustraliaGulfs_wind_delayed_qc.zarr`                  | ✓ Active                                                        |
-| AusTemp heatwave SSTA | ssta                    | `satellite_austemp_heatwave_8day.zarr`                            | ✓ Active                                                        |
-| SST anomaly           | sst_anom_mosaic         | —                                                                 | Zarr store needed                                               |
-| Marine Heatwave DHD   | dhd_mosaic              | —                                                                 | Zarr store needed                                               |
-| Marine Heatwave SSTA  | ssta_mosaic             | —                                                                 | Zarr store needed                                               |
-| SST (GHRSST)          | sea_surface_temperature | `satellite_ghrsst_l3s_1day_nighttime_multi_sensor_australia.zarr` | ✗ Excluded — inconsistent TIME dimension sizes across variables |
+| Product               | Variable(s) | Zarr store                                              |
+| --------------------- | ----------- | ------------------------------------------------------- |
+| Sea level anomaly     | GSLA        | `model_sea_level_anomaly_gridded_realtime.zarr`         |
+| Ocean current         | UCUR, VCUR  | `model_sea_level_anomaly_gridded_realtime.zarr`         |
+| Radar wind (SA Gulfs) | WDIR        | `radar_SouthAustraliaGulfs_wind_delayed_qc.zarr`        |
+| AusTemp heatwave SSTA | ssta        | `satellite_austemp_heatwave_8day.zarr`                  |
 
 ---
 
