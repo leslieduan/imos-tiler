@@ -15,7 +15,11 @@ LOGGING_CONFIG["loggers"]["services"] = {
 }
 logging.config.dictConfig(LOGGING_CONFIG)
 
-app = FastAPI()
+app = FastAPI(
+    title="IMOS Tile Server",
+    description="On-demand RGBA PNG tiles for IMOS ocean data products, served from Zarr stores on S3.",
+    version="0.1.0",
+)
 
 app.add_middleware(
     CORSMiddleware,

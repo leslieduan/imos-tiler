@@ -1,6 +1,7 @@
 import math
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Path, Query
+from fastapi.openapi.models import Example
 from fastapi.responses import JSONResponse, Response
 
 from constants import PRODUCTS
@@ -8,6 +9,9 @@ from services.loader import get_lod_grids, load_slice
 from services.renderer import render_manifest, render_tile
 
 router = APIRouter()
+
+_PRODUCT_EX: dict[str, Example] = {"default": Example(value="sea_level_anomaly")}
+_DATE_EX: dict[str, Example] = {"default": Example(value="2024-02-24")}
 
 
 def _get_product_or_404(product_id: str):
@@ -25,7 +29,13 @@ def _load_or_404(store_url: str, date: str, variables: list[str]):
 
 
 @router.get("/{product_id}/{date}/{z}/{x}/{y}.png")
-def get_tile(product_id: str, date: str, z: int, x: int, y: int):
+def get_tile(
+    product_id: str = Path(openapi_examples=_PRODUCT_EX),
+    date: str = Path(openapi_examples=_DATE_EX),
+    z: int = Path(openapi_examples={"default": Example(value=1)}),
+    x: int = Path(openapi_examples={"default": Example(value=0)}),
+    y: int = Path(openapi_examples={"default": Example(value=0)}),
+):
     product = _get_product_or_404(product_id)
     lod_grids = get_lod_grids(product)
 
@@ -45,7 +55,10 @@ def get_tile(product_id: str, date: str, z: int, x: int, y: int):
 
 
 @router.get("/{product_id}/{date}/manifest.json")
-def get_manifest(product_id: str, date: str):
+def get_manifest(
+    product_id: str = Path(openapi_examples=_PRODUCT_EX),
+    date: str = Path(openapi_examples=_DATE_EX),
+):
     product = _get_product_or_404(product_id)
     get_lod_grids(product)  # populates product.lod_grids before render_manifest reads it
     variables = product.variable if isinstance(product.variable, list) else [product.variable]
@@ -54,7 +67,12 @@ def get_manifest(product_id: str, date: str):
 
 
 @router.get("/{product_id}/{date}/point")
-def get_point(product_id: str, date: str, lat: float = Query(...), lon: float = Query(...)):
+def get_point(
+    product_id: str = Path(openapi_examples=_PRODUCT_EX),
+    date: str = Path(openapi_examples=_DATE_EX),
+    lat: float = Query(..., openapi_examples={"default": Example(value=-33.8)}),
+    lon: float = Query(..., openapi_examples={"default": Example(value=151.2)}),
+):
     product = _get_product_or_404(product_id)
     variables = product.variable if isinstance(product.variable, list) else [product.variable]
     ds = _load_or_404(product.source_path, date, variables)
