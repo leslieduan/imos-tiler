@@ -6,6 +6,8 @@ Serves on-demand RGBA PNG tiles from Zarr stores on S3 in a custom geographic at
 
 ## Setup
 
+### Local development
+
 ```bash
 # Install dependencies
 uv sync
@@ -18,6 +20,24 @@ uv run uvicorn main:app --reload
 ```
 
 Interactive API docs available at `http://localhost:8000/docs`.
+
+### Docker
+
+```bash
+# Build and start
+docker compose up --build
+
+# Run in background
+docker compose up -d --build
+
+# Stop
+docker compose down
+
+# Tail logs
+docker compose logs -f
+```
+
+Server runs on `http://localhost:8000`.
 
 ## Endpoints
 
