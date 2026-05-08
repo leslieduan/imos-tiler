@@ -55,6 +55,27 @@ Server runs on `http://localhost:8000`.
 
 `z` = LOD level, `x` = chunk column (0 = westernmost), `y` = chunk row (0 = northernmost). Fetch the manifest before tiles — it contains the LOD grid dimensions and the normalisation ranges needed to decode pixel values.
 
+## Adding a new product
+
+Adding a product requires **only editing `constants.py`** — no changes to routing, loading, or rendering code.
+
+```python
+# 1. Add a store URL
+_MY_STORE = "s3://my-bucket/my_product.zarr"
+
+# 2. Define the product (scalar or UV)
+_MY_PRODUCT = Product(id="my_product", source_path=_MY_STORE, variable="VAR_NAME")
+
+# 3. Add it to PRODUCTS
+PRODUCTS: dict[str, Product] = {
+    p.id: p for p in [..., _MY_PRODUCT]
+}
+```
+
+The store must have `lat`/`lon` dimensions (or the uppercase variants `LATITUDE`/`LONGITUDE`, which are renamed automatically). LOD grids, rendering, and manifest generation are all derived automatically from the store's dimensions and the variable name.
+
+See [`docs/technical.md`](docs/technical.md#adding-a-new-product) for full details including optional `Product` field overrides.
+
 ## PNG encoding contract
 
 Tiles are RGBA PNGs with `optimize=False`.
@@ -62,7 +83,7 @@ Tiles are RGBA PNGs with `optimize=False`.
 | Product type | R | G | B | A |
 |---|---|---|---|---|
 | Scalar (SSTA, MHW, SLA, WDIR) | high byte of uint24 | mid byte | low byte | ocean mask (255 = ocean, 0 = land) |
-| Ocean current (UV) | U normalised 0–255 | V normalised 0–255 | ocean mask × 255 | 255 |
+| Particle / vector (UV — e.g. ocean current, wind) | U normalised 0–255 | V normalised 0–255 | ocean mask × 255 | 255 |
 
 Normalisation ranges (`valueRange`, `uRange`, `vRange`) are in `manifest.json`.
 

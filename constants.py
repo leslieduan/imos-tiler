@@ -11,6 +11,21 @@ MIN_COARSEST_GRID = (2, 2)  # minimum (cols, rows) for the coarsest LOD level
 # LOD level → minimum map zoom to show that level. Applied universally to all products.
 LOD_ZOOM_THRESHOLDS: dict[int, int] = {2: 4, 3: 5, 4: 6}
 
+PADDING = 1
+
+CHUNK_PX = (240, 192)
+
+# dataset
+_GSLA = "s3://aodn-cloud-optimised/model_sea_level_anomaly_gridded_realtime.zarr/"
+# satellite_ghrsst_l3s_1day_nighttime_multi_sensor_australia has data quality issue, the time dimension size is different for variables.
+# _SATELLITE_GHRSST = (
+#     "s3://aodn-cloud-optimised/satellite_ghrsst_l3s_1day_nighttime_multi_sensor_australia.zarr"
+# )
+_RADAR_ASG_WIND_DELAYED_QC = (
+    "s3://aodn-cloud-optimised/radar_SouthAustraliaGulfs_wind_delayed_qc.zarr"
+)
+_SATELLITE_AUSTEMP_HEATWAVE_8DAY = "s3://aodn-cloud-optimised/satellite_austemp_heatwave_8day.zarr"
+
 
 @dataclass(frozen=True)
 class Product:
@@ -18,8 +33,8 @@ class Product:
     source_path: str
     variable: str | list[str] = ""
     lod_grids: dict[int, tuple[int, int]] = field(default_factory=dict)
-    chunk_px: tuple[int, int] = (240, 192)
-    padding: int = 1
+    chunk_px: tuple[int, int] = CHUNK_PX
+    padding: int = PADDING
 
     @staticmethod
     def _compute_lod_grids(
@@ -64,18 +79,6 @@ class Product:
         )
 
 
-# dataset links
-_GSLA = "s3://aodn-cloud-optimised/model_sea_level_anomaly_gridded_realtime.zarr/"
-# satellite_ghrsst_l3s_1day_nighttime_multi_sensor_australia has data quality issue, the time dimension size is different for variables.
-# _SATELLITE_GHRSST = (
-#     "s3://aodn-cloud-optimised/satellite_ghrsst_l3s_1day_nighttime_multi_sensor_australia.zarr"
-# )
-_RADAR_ASG_WIND_DELAYED_QC = (
-    "s3://aodn-cloud-optimised/radar_SouthAustraliaGulfs_wind_delayed_qc.zarr"
-)
-_SATELLITE_AUSTEMP_HEATWAVE_8DAY = "s3://aodn-cloud-optimised/satellite_austemp_heatwave_8day.zarr"
-
-
 SEA_LEVEL_ANOMALY = Product(
     id="sea_level_anomaly",
     source_path=_GSLA,
@@ -86,12 +89,6 @@ _OCEAN_CURRENT = Product(
     source_path=_GSLA,
     variable=["UCUR", "VCUR"],
 )
-# _SEA_SURFACE_TEMPERATURE = Product(
-#     id="sea_surface_temperature",
-#     source_path=_SATELLITE_GHRSST,
-#     variable="sea_surface_temperature",
-# )
-
 # Small regional dataset: 102 lon × 74 lat — fits in a single tile (lod_grids auto-computes to {1: (1, 1)}).
 _RADAR_ASG_WIND_DELAYED_QC_WDIR = Product(
     id="radar_SouthAustraliaGulfs_wind_delayed_qc_wdir",

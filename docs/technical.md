@@ -103,7 +103,6 @@ titiler-project/
 - `MAX_LODS = 4` — frontend WebGL atlas limit: at most 4 LOD levels per product
 - `MIN_COARSEST_GRID = (2, 2)` — minimum (cols, rows) for the coarsest LOD level; levels below this are dropped. If all levels are filtered out (data smaller than one chunk), falls back to the native finest grid so there is always at least one LOD.
 - `LOD_ZOOM_THRESHOLDS: dict[int, int]` — universal map zoom thresholds applied to all products (e.g. `{2: 4, 3: 5, 4: 6}`)
-- `DEFAULT_LOD_GRIDS` — fallback used when lat/lon dims cannot be resolved from the store
 
 ### Algorithm (`Product._compute_lod_grids` in `constants.py`)
 
@@ -173,12 +172,64 @@ For detailed analysis of why the previous NetCDF approach was slow, see `docs/ne
 
 ---
 
+## Adding a new product
+
+The server is designed so that adding a product requires **only editing `constants.py`** — no changes to routing, loading, or rendering code.
+
+### Steps
+
+1. Add a store URL constant:
+   ```python
+   _MY_STORE = "s3://my-bucket/my_product.zarr"
+   ```
+
+2. Define the product:
+   ```python
+   # Scalar variable
+   _MY_PRODUCT = Product(id="my_product", source_path=_MY_STORE, variable="VAR_NAME")
+
+   # UV (vector) product — pass variable as a [U, V] list
+   _MY_UV_PRODUCT = Product(id="my_uv_product", source_path=_MY_STORE, variable=["U_VAR", "V_VAR"])
+   ```
+
+3. Add it to `PRODUCTS`:
+   ```python
+   PRODUCTS: dict[str, Product] = {
+       p.id: p for p in [..., _MY_PRODUCT]
+   }
+   ```
+
+That's all. On the first request:
+- The store is opened and coordinates are normalised automatically
+- LOD grids are computed from the store's actual lat/lon dimensions
+- Rendering and manifest generation work generically from `product.variable`
+
+### Requirements for the Zarr store
+
+| Requirement | Detail |
+|---|---|
+| Coordinate names | Must be `lat`/`lon`/`time`, or the uppercase variants `LATITUDE`/`LONGITUDE`/`TIME` (renamed automatically on open). If a store uses different names, add a mapping to `COORD_NAMES` in `constants.py`. |
+| Spatial dimensions | `lat` and `lon` must be present after normalisation — `_get_store` raises `ValueError` with a clear message if not. |
+| Variable | The variable(s) named in `Product.variable` must exist in the store. |
+
+### Optional overrides
+
+`Product` fields can be customised per product if the defaults don't fit:
+
+| Field | Default | When to override |
+|---|---|---|
+| `chunk_px` | `(240, 192)` | Store has very small or very large spatial extent |
+| `padding` | `1` | Tile edge artefacts, or no padding needed |
+| `lod_grids` | `{}` (auto-computed) | Pre-set known grids to skip the first-request computation |
+
+---
+
 ## PNG encoding contract
 
 Tiles are RGBA PNGs (`optimize=False`). The byte layout is fixed and consumed by a WebGL shader:
 
 - **24-bit scalar** (GSLA, SSTA, DHD, SLA, WDIR): R=high byte, G=mid byte, B=low byte of normalised uint24; A=ocean mask (255=ocean, 0=land, premultiplied).
-- **Ocean current** (UV): R=U normalised to 8-bit, G=V normalised to 8-bit, B=ocean mask×255, A=255.
+- **Particle / vector** (UV — e.g. ocean current, wind): R=U normalised to 8-bit, G=V normalised to 8-bit, B=ocean mask×255, A=255.
 
 Normalisation ranges (`val_min`/`val_max`, `u_min`/`u_max`, etc.) are computed from the full pre-resampled dataset and returned in `manifest.json`. All tiles for a date share the same ranges.
 
