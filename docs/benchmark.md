@@ -30,8 +30,14 @@ server processing (S3 fetch → render → encode) + network transfer from serve
 | | |
 |---|---|
 | **Store** | `s3://aodn-cloud-optimised/satellite_austemp_heatwave_8day.zarr` |
-| **Spatial grid** | 3900 × 2000 |
-| **Time-slice size** | ~62 MB — 6 S3 reads (chunks: 5 × 1000 × 1300 × float64) |
+
+| Dimension | Size | Chunk | Spatial chunks needed |
+|---|---|---|---|
+| time | 5225 | 5 | — |
+| lat | 2000 | 1000 | 2 |
+| lon | 3900 | 1300 | 3 |
+
+**Time-slice size:** ~62 MB — 6 S3 reads (2 lat chunks × 3 lon chunks, each 1000 × 1300 × float64)
 
 **Manifest** (cold only)
 
@@ -46,7 +52,7 @@ server processing (S3 fetch → render → encode) + network transfer from serve
 | Cold | 20.42 s | 1.2 s |
 | Hot | 5 ms | 200 ms |
 
-> Largest dataset. A full spatial slice requires 6 S3 reads, dominating cold-start time.
+> Largest dataset. Covering the full 2000 × 3900 grid requires 6 S3 reads (2 lat chunks × 3 lon chunks), dominating cold-start time.
 
 ---
 
@@ -55,8 +61,14 @@ server processing (S3 fetch → render → encode) + network transfer from serve
 | | |
 |---|---|
 | **Store** | `s3://aodn-cloud-optimised/model_sea_level_anomaly_gridded_realtime.zarr/` |
-| **Spatial grid** | 641 × 351 |
-| **Time-slice size** | ~1.7 MB — 1 S3 read (full spatial slab: 5 × 351 × 641 × float64) |
+
+| Dimension | Size | Chunk | Spatial chunks needed |
+|---|---|---|---|
+| time | 2338 | 5 | — |
+| lat | 351 | 351 | 1 |
+| lon | 641 | 641 | 1 |
+
+**Time-slice size:** ~1.7 MB per variable — 1 S3 read (full spatial slab in a single chunk)
 
 **Manifest** (cold only)
 
@@ -77,9 +89,15 @@ server processing (S3 fetch → render → encode) + network transfer from serve
 
 | | |
 |---|---|
-| **Store** | `s3://aodn-cloud-optimised/model_sea_level_anomaly_gridded_realtime.zarr/` |
-| **Spatial grid** | 641 × 351 |
-| **Time-slice size** | ~3.4 MB — 2 S3 reads (UCUR + VCUR, one slab each) |
+| **Store** | `s3://aodn-cloud-optimised/model_sea_level_anomaly_gridded_realtime.zarr/` (shared with `sea_level_anomaly`) |
+
+| Dimension | Size | Chunk | Spatial chunks needed |
+|---|---|---|---|
+| time | 2338 | 5 | — |
+| lat | 351 | 351 | 1 |
+| lon | 641 | 641 | 1 |
+
+**Time-slice size:** ~3.4 MB — 2 S3 reads (UCUR + VCUR, one full spatial slab each)
 
 **Manifest** (cold only)
 
@@ -103,8 +121,14 @@ server processing (S3 fetch → render → encode) + network transfer from serve
 | | |
 |---|---|
 | **Store** | `s3://aodn-cloud-optimised/radar_SouthAustraliaGulfs_wind_delayed_qc.zarr` |
-| **Spatial grid** | 102 × 74 |
-| **Time-slice size** | ~5.9 MB — 1 S3 read (chunk spans 100 time steps × full spatial grid) |
+
+| Dimension | Size | Chunk | Spatial chunks needed |
+|---|---|---|---|
+| time | 38129 | 100 | — |
+| lat | 74 | 74 | 1 |
+| lon | 102 | 102 | 1 |
+
+**Time-slice size:** ~5.9 MB — 1 S3 read (full spatial grid in a single chunk; chunk also spans 100 time steps)
 
 **Manifest** (cold only)
 
