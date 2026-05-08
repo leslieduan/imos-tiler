@@ -49,7 +49,7 @@ docker compose down
 docker compose logs -f
 ```
 
-Public tile server runs on `http://localhost:80`. The app port (8000) is internal only.
+Public tile server runs on `http://localhost:80` via nginx. Port 8000 is also accessible locally (not published to the internet on EC2).
 
 ## Endpoints
 
@@ -65,7 +65,13 @@ Public tile server runs on `http://localhost:80`. The app port (8000) is interna
 
 ### Admin (`/admin`)
 
-Requires `X-Admin-Key` header. Only accessible on port 8000 (not exposed publicly — use an SSH tunnel in production).
+Requires `X-Admin-Key` header. How to reach these endpoints depends on where the server is running:
+
+| Environment | How to call admin endpoints |
+|-------------|----------------------------|
+| Local (`uv run`) | `http://localhost:8000/admin/...` directly |
+| Local (Docker) | `http://localhost:8000/admin/...` directly — port 8000 is accessible on your machine even though nginx blocks it on port 80 |
+| EC2 (Docker) | SSH tunnel first: `ssh -L 8000:localhost:8000 ec2-user@your-ec2-ip`, then `http://localhost:8000/admin/...` |
 
 | Method | Path | Description |
 |--------|------|-------------|
