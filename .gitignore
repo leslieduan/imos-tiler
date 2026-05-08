@@ -11,3 +11,4 @@ wheels/
 
 # Secrets
 .env
+titiler-demo-key.pem
