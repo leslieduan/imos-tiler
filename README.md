@@ -133,6 +133,7 @@ Normalisation ranges (`valueRange`, `uRange`, `vRange`) are in `manifest.json`.
 - [`docs/technical.md`](docs/technical.md) — architecture, LOD algorithm, caching strategy, PNG encoding contract
 - [`docs/dataset.md`](docs/dataset.md) — per-store variable/dimension/chunking reference
 - [`docs/security.md`](docs/security.md) — admin endpoint security, API key setup, nginx, EC2 configuration
+- [`docs/png-vs-webp-vs-bin.md`](docs/png-vs-webp-vs-bin.md) — tile format evaluation: why PNG is used over WebP or raw binary
 - [`docs/benchmark.md`](docs/benchmark.md) — response time benchmarks (local vs EC2, cold vs hot)
 - [`docs/netcdf-vs-zarr.md`](docs/netcdf-vs-zarr.md) — format comparison and IMOS product file analysis
 
