@@ -70,6 +70,7 @@ Normalisation ranges (`valueRange`, `uRange`, `vRange`) are in `manifest.json`.
 
 - [`docs/technical.md`](docs/technical.md) — architecture, LOD algorithm, caching strategy, PNG encoding contract
 - [`docs/dataset.md`](docs/dataset.md) — per-store variable/dimension/chunking reference
+- [`docs/benchmark.md`](docs/benchmark.md) — response time benchmarks (local vs EC2, cold vs hot)
 - [`docs/netcdf-vs-zarr.md`](docs/netcdf-vs-zarr.md) — format comparison and IMOS product file analysis
 
 ## Development
