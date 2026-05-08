@@ -14,14 +14,26 @@ uv sync
 
 # Install dependencies including dev tools
 uv sync --group dev
+```
 
-# Run the development server
+Create a `.env` file in the project root (never commit this):
+```bash
+ADMIN_API_KEY=your-secret-key
+```
+
+```bash
+# Run the development server (.env is loaded automatically)
 uv run uvicorn main:app --reload
 ```
 
 Interactive API docs available at `http://localhost:8000/docs`.
 
 ### Docker
+
+Create a `.env` file in the project root before starting:
+```bash
+ADMIN_API_KEY=your-secret-key
+```
 
 ```bash
 # Build and start
@@ -37,7 +49,7 @@ docker compose down
 docker compose logs -f
 ```
 
-Server runs on `http://localhost:8000`.
+Public tile server runs on `http://localhost:80`. The app port (8000) is internal only.
 
 ## Endpoints
 
@@ -49,32 +61,55 @@ Server runs on `http://localhost:8000`.
 | GET | `/tiles/{product_id}/{date}/manifest.json` | Bounds, value ranges, LOD grid config |
 | GET | `/tiles/{product_id}/{date}/point?lat=&lon=` | Point value lookup |
 
-**Product IDs:** `sea_level_anomaly`, `ocean_current`, `radar_SouthAustraliaGulfs_wind_delayed_qc_wdir`, `satellite_austemp_heatwave_8day_ssta`
-
-### Tile coordinates
-
 `z` = LOD level, `x` = chunk column (0 = westernmost), `y` = chunk row (0 = northernmost). Fetch the manifest before tiles — it contains the LOD grid dimensions and the normalisation ranges needed to decode pixel values.
 
-## Adding a new product
+### Admin (`/admin`)
 
-Adding a product requires **only editing `constants.py`** — no changes to routing, loading, or rendering code.
+Requires `X-Admin-Key` header. Only accessible on port 8000 (not exposed publicly — use an SSH tunnel in production).
 
-```python
-# 1. Add a store URL
-_MY_STORE = "s3://my-bucket/my_product.zarr"
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/admin/products` | List all registered products |
+| POST | `/admin/products` | Register a new product |
+| DELETE | `/admin/products/{id}` | Remove a product |
 
-# 2. Define the product (scalar or UV)
-_MY_PRODUCT = Product(id="my_product", source_path=_MY_STORE, variable="VAR_NAME")
+## Managing products
 
-# 3. Add it to PRODUCTS
-PRODUCTS: dict[str, Product] = {
-    p.id: p for p in [..., _MY_PRODUCT]
-}
+Products are stored in `products.json` (the single source of truth). On startup the server reads this file into memory. Changes via the admin API are written to `products.json` immediately and take effect without a restart.
+
+**Add a product:**
+```bash
+curl -X POST http://localhost:8000/admin/products \
+  -H "X-Admin-Key: your-secret-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "sea_level_anomaly",
+    "source_path": "s3://aodn-cloud-optimised/model_sea_level_anomaly_gridded_realtime.zarr/",
+    "variable": "GSLA"
+  }'
+```
+
+**Add a product with multiple variables (e.g. UV current):**
+```bash
+curl -X POST http://localhost:8000/admin/products \
+  -H "X-Admin-Key: your-secret-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "ocean_current",
+    "source_path": "s3://aodn-cloud-optimised/model_sea_level_anomaly_gridded_realtime.zarr/",
+    "variable": ["UCUR", "VCUR"]
+  }'
+```
+
+**Delete a product:**
+```bash
+curl -X DELETE http://localhost:8000/admin/products/sea_level_anomaly \
+  -H "X-Admin-Key: your-secret-key"
 ```
 
 The store must have `lat`/`lon` dimensions (or the uppercase variants `LATITUDE`/`LONGITUDE`, which are renamed automatically). LOD grids, rendering, and manifest generation are all derived automatically from the store's dimensions and the variable name.
 
-See [`docs/technical.md`](docs/technical.md#adding-a-new-product) for full details including optional `Product` field overrides.
+See [`docs/security.md`](docs/security.md) for how admin endpoints are secured in production.
 
 ## PNG encoding contract
 
@@ -91,6 +126,7 @@ Normalisation ranges (`valueRange`, `uRange`, `vRange`) are in `manifest.json`.
 
 - [`docs/technical.md`](docs/technical.md) — architecture, LOD algorithm, caching strategy, PNG encoding contract
 - [`docs/dataset.md`](docs/dataset.md) — per-store variable/dimension/chunking reference
+- [`docs/security.md`](docs/security.md) — admin endpoint security, API key setup, nginx, EC2 configuration
 - [`docs/benchmark.md`](docs/benchmark.md) — response time benchmarks (local vs EC2, cold vs hot)
 - [`docs/netcdf-vs-zarr.md`](docs/netcdf-vs-zarr.md) — format comparison and IMOS product file analysis
 
