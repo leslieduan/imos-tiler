@@ -1,5 +1,3 @@
-import pytest
-
 from constants import Product
 
 
@@ -37,12 +35,9 @@ def test_compute_lod_grids_small_data_one_axis():
     assert grids == {1: (2, 1)}
 
 
-@pytest.mark.parametrize("product_id", ["sea_level_anomaly", "ocean_current"])
-def test_products_have_no_lod_grids_by_default(product_id: str):
-    from constants import PRODUCTS
-
-    product = PRODUCTS[product_id]
-    assert product.lod_grids == {}
+def test_products_have_no_lod_grids_by_default():
+    p = Product(id="test", source_path="s3://test", variable="VAR")
+    assert p.lod_grids == {}
 
 
 def test_apply_computed_lod_grids_is_noop_when_already_set():

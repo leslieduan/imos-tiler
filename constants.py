@@ -11,16 +11,7 @@ LOD_ZOOM_THRESHOLDS: dict[int, int] = {2: 4, 3: 5, 4: 6}
 PADDING = 1
 CHUNK_PX = (240, 192)
 
-# dataset
-_GSLA = "s3://aodn-cloud-optimised/model_sea_level_anomaly_gridded_realtime.zarr/"
-# satellite_ghrsst_l3s_1day_nighttime_multi_sensor_australia has data quality issue, the time dimension size is different for variables.
-# _SATELLITE_GHRSST = (
-#     "s3://aodn-cloud-optimised/satellite_ghrsst_l3s_1day_nighttime_multi_sensor_australia.zarr"
-# )
-_RADAR_ASG_WIND_DELAYED_QC = (
-    "s3://aodn-cloud-optimised/radar_SouthAustraliaGulfs_wind_delayed_qc.zarr"
-)
-_SATELLITE_AUSTEMP_HEATWAVE_8DAY = "s3://aodn-cloud-optimised/satellite_austemp_heatwave_8day.zarr"
+PRODUCTS_CONFIG_PATH = "products.json"
 
 
 @dataclass(frozen=True)
@@ -75,34 +66,4 @@ class Product:
         )
 
 
-SEA_LEVEL_ANOMALY = Product(
-    id="sea_level_anomaly",
-    source_path=_GSLA,
-    variable="GSLA",
-)
-_OCEAN_CURRENT = Product(
-    id="ocean_current",
-    source_path=_GSLA,
-    variable=["UCUR", "VCUR"],
-)
-# Small regional dataset: 102 lon × 74 lat — fits in a single tile (lod_grids auto-computes to {1: (1, 1)}).
-_RADAR_ASG_WIND_DELAYED_QC_WDIR = Product(
-    id="radar_SouthAustraliaGulfs_wind_delayed_qc_wdir",
-    source_path=_RADAR_ASG_WIND_DELAYED_QC,
-    variable="WDIR",
-)
-_SATELLITE_AUSTEMP_HEATWAVE_8DAY_SSTA = Product(
-    id="satellite_austemp_heatwave_8day_ssta",
-    source_path=_SATELLITE_AUSTEMP_HEATWAVE_8DAY,
-    variable="ssta",
-)
-
-PRODUCTS: dict[str, Product] = {
-    p.id: p
-    for p in [
-        SEA_LEVEL_ANOMALY,
-        _OCEAN_CURRENT,
-        _RADAR_ASG_WIND_DELAYED_QC_WDIR,
-        _SATELLITE_AUSTEMP_HEATWAVE_8DAY_SSTA,
-    ]
-}
+PRODUCTS: dict[str, Product] = {}
