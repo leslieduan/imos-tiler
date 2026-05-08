@@ -4,7 +4,7 @@ import threading
 import xarray as xr
 from cachetools import LRUCache
 
-from constants import COORD_NAMES, DEFAULT_LOD_GRIDS, Product
+from constants import COORD_NAMES, Product
 
 logger = logging.getLogger(__name__)
 
@@ -29,9 +29,13 @@ def _get_store(store_url: str) -> xr.Dataset:
             rename = {k: v for k, v in COORD_NAMES.items() if k in ds.dims or k in ds.coords}
             if rename:
                 ds = ds.rename(rename)
-            time_dim = next((d for d in ("TIME", "time") if d in ds.dims), None)
-            if time_dim:
-                ds = ds.sortby(time_dim)
+            if "lat" not in ds.dims or "lon" not in ds.dims:
+                raise ValueError(
+                    f"Store {store_url!r} missing lat/lon dims after rename "
+                    f"(found: {list(ds.dims)})"
+                )
+            if "time" in ds.dims:
+                ds = ds.sortby("time")
             _stores[store_url] = ds
     return _stores[store_url]
 
@@ -50,24 +54,9 @@ def get_lod_grids(product: Product) -> dict[int, tuple[int, int]]:
             return product.lod_grids
 
         store = _get_store(product.source_path)
-        lat_dim = next((d for d in ("lat", "LATITUDE") if d in store.dims), None)
-        lon_dim = next((d for d in ("lon", "LONGITUDE") if d in store.dims), None)
-
-        if lat_dim is None or lon_dim is None:
-            object.__setattr__(product, "lod_grids", DEFAULT_LOD_GRIDS)
-            return product.lod_grids
-
-        data_height = store.dims[lat_dim]
-        data_width = store.dims[lon_dim]
+        data_height = store.dims["lat"]
+        data_width = store.dims["lon"]
         product.apply_computed_lod_grids(data_width, data_height)
-        logger.info(
-            "Computed LOD grids for %s: data=%dx%d chunk=%s → %s",
-            product.id,
-            data_width,
-            data_height,
-            product.chunk_px,
-            product.lod_grids,
-        )
 
     return product.lod_grids
 

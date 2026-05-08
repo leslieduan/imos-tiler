@@ -11,9 +11,6 @@ MIN_COARSEST_GRID = (2, 2)  # minimum (cols, rows) for the coarsest LOD level
 # LOD level → minimum map zoom to show that level. Applied universally to all products.
 LOD_ZOOM_THRESHOLDS: dict[int, int] = {2: 4, 3: 5, 4: 6}
 
-# Fallback LOD grids for products before store dimensions are known.
-DEFAULT_LOD_GRIDS: dict[int, tuple[int, int]] = {1: (2, 2)}
-
 
 @dataclass(frozen=True)
 class Product:
