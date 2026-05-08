@@ -1,11 +1,25 @@
-from fastapi import APIRouter, HTTPException
+import os
+
+from fastapi import APIRouter, Depends, HTTPException, Security
 from fastapi.responses import JSONResponse
+from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
 
 from constants import CHUNK_PX, PADDING
 from services.product_store import list_products, register_product, remove_product
 
-router = APIRouter()
+_api_key_header = APIKeyHeader(name="X-Admin-Key")
+
+
+def _require_admin_key(key: str = Security(_api_key_header)) -> None:
+    expected = os.environ.get("ADMIN_API_KEY")
+    if not expected:
+        raise HTTPException(status_code=500, detail="ADMIN_API_KEY not configured")
+    if key != expected:
+        raise HTTPException(status_code=403, detail="Invalid admin key")
+
+
+router = APIRouter(dependencies=[Depends(_require_admin_key)])
 
 
 class ProductPayload(BaseModel):
