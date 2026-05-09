@@ -156,32 +156,25 @@ All caches use `threading.Lock`. The processed grid cache additionally uses a `t
 
 ## Adding a new product
 
-The server is designed so that adding a product requires **only editing `constants.py`** — no changes to routing, loading, or rendering code.
+Products are managed at runtime via the admin API — no code changes or redeploy required. All products are persisted in `products.json` (the single source of truth) and loaded into memory on startup.
 
-### Steps
+### Via admin API (runtime)
 
-1. Add a store URL constant:
-   ```python
-   _MY_STORE = "s3://my-bucket/my_product.zarr"
-   ```
+```bash
+# Scalar variable
+curl -X POST http://localhost:8000/admin/products \
+  -H "X-Admin-Key: your-secret-key" \
+  -H "Content-Type: application/json" \
+  -d '{"id": "my_product", "source_path": "s3://my-bucket/my_product.zarr", "variable": "VAR_NAME"}'
 
-2. Define the product:
-   ```python
-   # Scalar variable
-   _MY_PRODUCT = Product(id="my_product", source_path=_MY_STORE, variable="VAR_NAME")
+# UV (vector) product
+curl -X POST http://localhost:8000/admin/products \
+  -H "X-Admin-Key: your-secret-key" \
+  -H "Content-Type: application/json" \
+  -d '{"id": "my_uv_product", "source_path": "s3://my-bucket/my_product.zarr", "variable": ["U_VAR", "V_VAR"]}'
+```
 
-   # UV (vector) product — pass variable as a [U, V] list
-   _MY_UV_PRODUCT = Product(id="my_uv_product", source_path=_MY_STORE, variable=["U_VAR", "V_VAR"])
-   ```
-
-3. Add it to `PRODUCTS`:
-   ```python
-   PRODUCTS: dict[str, Product] = {
-       p.id: p for p in [..., _MY_PRODUCT]
-   }
-   ```
-
-That's all. On the first request:
+On the first request after registration:
 - The store is opened and coordinates are normalised automatically
 - LOD grids are computed from the store's actual lat/lon dimensions
 - Rendering and manifest generation work generically from `product.variable`
@@ -203,6 +196,45 @@ That's all. On the first request:
 | `chunk_px` | `(240, 192)` | Store has very small or very large spatial extent |
 | `padding` | `1` | Tile edge artefacts, or no padding needed |
 | `lod_grids` | `{}` (auto-computed) | Pre-set known grids to skip the first-request computation |
+
+---
+
+## Coordinate system and projection pipeline
+
+### Server — Plate Carrée (EPSG:4326)
+
+Tiles are produced in **Plate Carrée** (equirectangular projection) — longitude maps linearly to pixel X, latitude maps linearly to pixel Y. This is the visual representation of EPSG:4326 / WGS84 geographic coordinates.
+
+The projection is implemented implicitly in `_resample_to_grid` (`services/renderer.py`):
+
+```python
+target_lons = np.linspace(lon_min, lon_max, total_w)  # lon → x (linear)
+target_lats = np.linspace(lat_max, lat_min, total_h)  # lat → y (linear, north→south)
+```
+
+`np.linspace` distributes points evenly in degrees — that linear mapping **is** Plate Carrée. No projection formula is needed. Tiles are essentially slices of the native lat/lon data grid with no reprojection.
+
+The manifest returns bounds in geographic degrees (`lonMin`, `lonMax`, `latMin`, `latMax`), not projected metres.
+
+Plate Carrée is the right choice here because:
+- Source Zarr data is on a regular lat/lon grid — tiles map directly with no reprojection overhead
+- Scientific accuracy is preserved — distances at different latitudes are not distorted
+- Standard for oceanographic datasets (IMOS, ERA5, CMIP6 all use regular lat/lon grids)
+
+### Frontend — Web Mercator base map
+
+The frontend map canvas is in **Web Mercator (EPSG:3857)**. The WebGL shader converts each fragment's Mercator position to lon/lat (inverse Mercator formula), then samples the Plate Carrée tile using a linear lat/lon lookup — matching the server's `np.linspace` mapping. Data value decoding and colour ramp application happen in the same pass.
+
+### Manifest as the contract between server and shader
+
+The manifest is the interface between the server's coordinate system and the shader's uniforms:
+
+| Manifest field | Shader uniform | Purpose |
+|---|---|---|
+| `bounds.lonMin/lonMax/latMin/latMax` | `u_data_bounds` | geographic extent for tile sampling |
+| `lods[n].grid` | `u_lod_grids` | cols×rows per LOD for chunk lookup |
+| `valueRange` | `u_value_range` | decode uint24 back to raw value |
+| `lods[n].chunkPx` / `storedPx` / `padding` | `u_uv_scale`, `u_uv_offset` | skip padding border in atlas UV |
 
 ---
 
