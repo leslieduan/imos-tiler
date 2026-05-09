@@ -12,3 +12,6 @@ wheels/
 # Secrets
 .env
 titiler-demo-key.pem
+
+# Local Docker overrides
+docker-compose.override.yml
