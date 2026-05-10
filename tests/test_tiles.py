@@ -4,9 +4,14 @@ import numpy as np
 import xarray as xr
 from starlette.testclient import TestClient
 
+from constants import Product
 from main import app
 
 client = TestClient(app, raise_server_exceptions=True)
+
+_FAKE_PRODUCTS = {
+    "product_a": Product(id="product_a", source_path="s3://bucket/a.zarr", variable="VAR"),
+}
 
 _LOD_GRIDS = {1: (1, 1)}
 
@@ -119,3 +124,43 @@ def test_point_ok():
     body = response.json()
     assert "lat" in body and "lon" in body and "variables" in body
     assert "GSLA" in body["variables"]
+
+
+# --- /tiles/manifest (products availability) ---
+
+
+def test_availability_ok():
+    with (
+        patch("routers.tiles.PRODUCTS", _FAKE_PRODUCTS),
+        patch("routers.tiles.get_available_dates", return_value=["2024-06-01", "2024-07-01"]),
+        patch("routers.tiles._three_months_ago", return_value="2024-01-01"),
+    ):
+        response = client.get("/tiles/manifest")
+    assert response.status_code == 200
+    body = response.json()
+    assert body == {"products": {"product_a": {"available_dates": ["2024-06-01", "2024-07-01"]}}}
+
+
+def test_availability_date_filters():
+    all_dates = ["2024-01-01", "2024-06-01", "2024-09-01", "2024-12-01"]
+    with (
+        patch("routers.tiles.PRODUCTS", _FAKE_PRODUCTS),
+        patch("routers.tiles.get_available_dates", return_value=all_dates),
+    ):
+        response = client.get("/tiles/manifest?from=2024-06-01&to=2024-09-01")
+    assert response.status_code == 200
+    assert response.json()["products"]["product_a"]["available_dates"] == [
+        "2024-06-01",
+        "2024-09-01",
+    ]
+
+
+def test_availability_no_dates_in_range():
+    with (
+        patch("routers.tiles.PRODUCTS", _FAKE_PRODUCTS),
+        patch("routers.tiles.get_available_dates", return_value=["2020-01-01"]),
+        patch("routers.tiles._three_months_ago", return_value="2024-01-01"),
+    ):
+        response = client.get("/tiles/manifest")
+    assert response.status_code == 200
+    assert response.json()["products"]["product_a"]["available_dates"] == []
