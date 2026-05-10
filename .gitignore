@@ -13,5 +13,8 @@ wheels/
 .env
 titiler-demo-key.pem
 
+# Runtime state
+products.json
+
 # Local Docker overrides
 docker-compose.override.yml

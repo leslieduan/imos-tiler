@@ -27,7 +27,7 @@ curl -X POST http://localhost:8000/admin/products \
 
 ### Layer 2: nginx blocks `/admin` from the public internet
 
-nginx sits in front of the app and is the **only publicly exposed service** (port 80). The app port (8000) is never published outside the Docker network — only the nginx container can reach it.
+nginx sits in front of the app and is the **only publicly exposed service** (port 80). The app port (8000) is bound to `127.0.0.1` on the host — it is not reachable from any external network interface, only from localhost.
 
 nginx handles two cases:
 
@@ -66,7 +66,7 @@ curl http://localhost:8000/admin/products \
 
 ### Local (Docker)
 
-nginx runs on port 80 and blocks `/admin`, but port 8000 is still reachable on your local machine — Docker exposes it within your machine's network even though it is not published to the internet. There is no Security Group or firewall locally, so port 8000 is open.
+nginx runs on port 80 and blocks `/admin`. Port 8000 is bound to `127.0.0.1` on the host, so it is accessible at `localhost:8000` on your local machine but not from any other machine.
 
 ```
 localhost:8000 → FastAPI directly  ✅ bypasses nginx
@@ -82,7 +82,7 @@ curl http://localhost:8000/admin/products \
 
 ### EC2 (Docker)
 
-On EC2 the Security Group blocks port 8000 from the internet entirely — unlike local Docker, there is a real AWS-level firewall in place. nginx also blocks `/admin` on port 80. There is no direct path to the admin endpoints from outside.
+On EC2, port 8000 is protected by two independent layers: it is bound to `127.0.0.1` on the host (so only localhost can reach it, regardless of firewall rules), and the EC2 Security Group has no inbound rule for port 8000. nginx also blocks `/admin` on port 80. There is no direct path to the admin endpoints from outside.
 
 The only way in is an **SSH tunnel**, which forwards a local port on your machine through the SSH connection (port 22) to port 8000 on the EC2 instance — bypassing both the Security Group and nginx:
 
