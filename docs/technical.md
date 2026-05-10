@@ -63,12 +63,33 @@ warm  → get_lod_grids (product.lod_grids already set)                   → lo
 ## URL contract
 
 ```
-GET /tiles/{product_id}/{date}/{z}/{x}/{y}.png     → RGBA PNG tile
-GET /tiles/{product_id}/{date}/manifest.json       → bounds + value ranges + LOD grid config
-GET /tiles/{product_id}/{date}/point?lat=&lon=     → variable value at point
+GET /tiles/manifest?from=YYYY-MM-DD&to=YYYY-MM-DD  → available dates for all products
+GET /tiles/{product_id}/{date}/{z}/{x}/{y}.png      → RGBA PNG tile
+GET /tiles/{product_id}/{date}/manifest.json        → bounds + value ranges + LOD grid config
+GET /tiles/{product_id}/{date}/point?lat=&lon=      → variable value at point
 ```
 
 `z` = LOD level, `x` = chunk column (0 = westernmost), `y` = chunk row (0 = northernmost). Not Web Mercator — custom atlas grid in geographic (lat/lon) space.
+
+### `/tiles/manifest` — products availability
+
+Returns available dates for every registered product, filtered by an optional date range.
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `from` | 3 months before today | Start date inclusive (YYYY-MM-DD) |
+| `to` | unbounded | End date inclusive (YYYY-MM-DD) |
+
+```json
+{
+  "products": {
+    "sea_level_anomaly": { "available_dates": ["2024-02-01", "2024-02-02", ...] },
+    "ocean_current":     { "available_dates": ["2024-02-01", ...] }
+  }
+}
+```
+
+**Performance**: dates are read from the `time` coordinate of each Zarr store — a 1D array loaded once on first store open and held in the store singleton. No spatial data chunks are touched. Filtering is an in-memory string comparison (ISO dates sort lexicographically).
 
 ---
 

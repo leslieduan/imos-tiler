@@ -61,6 +61,13 @@ def get_lod_grids(product: Product) -> dict[int, tuple[int, int]]:
     return product.lod_grids
 
 
+def get_available_dates(store_url: str) -> list[str]:
+    store = _get_store(store_url)
+    if "time" not in store.dims:
+        return []
+    return [str(t)[:10] for t in store.coords["time"].values]
+
+
 def load_slice(store_url: str, date: str, variables: list[str]) -> xr.Dataset:
     """
     Return a fully-computed 2D (lat × lon) slice for the given store, date, and variables.

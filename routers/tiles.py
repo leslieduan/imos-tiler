@@ -1,11 +1,13 @@
+import calendar
 import math
+from datetime import date
 
 from fastapi import APIRouter, HTTPException, Path, Query
 from fastapi.openapi.models import Example
 from fastapi.responses import JSONResponse, Response
 
 from constants import PRODUCTS
-from services.loader import get_lod_grids, load_slice
+from services.loader import get_available_dates, get_lod_grids, load_slice
 from services.renderer import render_manifest, render_tile
 
 router = APIRouter()
@@ -26,6 +28,50 @@ def _load_or_404(store_url: str, date: str, variables: list[str]):
         return load_slice(store_url, date, variables)
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
+
+
+def _three_months_ago() -> str:
+    today = date.today()
+    month = today.month - 3
+    year = today.year
+    if month <= 0:
+        month += 12
+        year -= 1
+    day = min(today.day, calendar.monthrange(year, month)[1])
+    return date(year, month, day).isoformat()
+
+
+@router.get(
+    "/manifest",
+    summary="Products availability",
+    description=(
+        "Returns available dates for every product. "
+        "`from` defaults to 3 months before today; `to` is unbounded by default."
+    ),
+)
+def get_products_availability(
+    from_date: str | None = Query(
+        None,
+        alias="from",
+        description="Start date (inclusive), YYYY-MM-DD. Defaults to 3 months before today.",
+        openapi_examples={"default": Example(value="2024-01-01")},
+    ),
+    to_date: str | None = Query(
+        None,
+        alias="to",
+        description="End date (inclusive), YYYY-MM-DD. Defaults to no upper bound.",
+        openapi_examples={"default": Example(value="2024-12-31")},
+    ),
+):
+    effective_from = from_date or _three_months_ago()
+    products = {}
+    for product_id, product in PRODUCTS.items():
+        dates = get_available_dates(product.source_path)
+        dates = [d for d in dates if d >= effective_from]
+        if to_date:
+            dates = [d for d in dates if d <= to_date]
+        products[product_id] = {"available_dates": dates}
+    return JSONResponse(content={"products": products})
 
 
 @router.get("/{product_id}/{date}/{z}/{x}/{y}.png")
