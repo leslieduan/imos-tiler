@@ -57,8 +57,7 @@ def _get_store(store_url: str) -> xr.Dataset:
             ds = ds.rename(rename)
         if "lat" not in ds.dims or "lon" not in ds.dims:
             raise ValueError(
-                f"Store {store_url!r} missing lat/lon dims after rename "
-                f"(found: {list(ds.dims)})"
+                f"Store {store_url!r} missing lat/lon dims after rename (found: {list(ds.dims)})"
             )
         if "time" in ds.dims:
             ds = ds.sortby("time")
