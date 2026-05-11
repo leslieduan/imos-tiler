@@ -1,5 +1,6 @@
 import concurrent.futures
 import logging
+import os
 import threading
 
 import xarray as xr
@@ -18,8 +19,11 @@ _store_in_flight: dict[str, concurrent.futures.Future] = {}
 _lod_grids_lock = threading.Lock()
 
 # Cache of fully-computed 2D (lat × lon) slices keyed by (store_url, date, variables).
-# Each slice is ~7 MB (4 variables × 351 × 641 × float64); maxsize=20 ≈ 140 MB.
-_slice_cache: LRUCache = LRUCache(maxsize=20)
+# Each slice is ~7 MB (4 variables × 351 × 641 × float64).
+# SLICE_CACHE_SIZE controls how many slices to hold in memory (default 50 ≈ 350 MB).
+# Raise this as you add products/dates; lower it on memory-constrained deployments.
+_SLICE_CACHE_SIZE = int(os.environ.get("SLICE_CACHE_SIZE", 50))
+_slice_cache: LRUCache = LRUCache(maxsize=_SLICE_CACHE_SIZE)
 _slice_lock = threading.Lock()
 _slice_in_flight: dict[tuple, concurrent.futures.Future] = {}
 

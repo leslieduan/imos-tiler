@@ -40,8 +40,8 @@ Zarr eliminates this entirely: metadata is one `.zmetadata` HTTP request, and va
                     │  loader.py        │ │  renderer.py        │
                     │                   │ │                     │
                     │  store singleton  │ │  processed grid     │
-                    │  slice cache      │ │  cache LRU(20)      │
-                    │  LRU(20)          │ │  (id(ds), lod)      │
+                    │  slice cache      │ │  cache LRU          │
+                    │  LRU              │ │  (id(ds), lod)      │
                     │  (url,date,vars)  │ │                     │
                     └────────┬──────────┘ └─────────────────────┘
                              │ miss
@@ -161,13 +161,17 @@ All caches are in-memory LRU (cachetools), evicted least-recently-used. Nothing 
 
 Caches the open Zarr store handle (lazy, metadata only). One HTTP request per store URL ever. Shared across all products using the same store.
 
-**Layer 2 — Slice cache** (`services/loader.py`, keyed `(store_url, date, variables)`, maxsize=20)
+**Layer 2 — Slice cache** (`services/loader.py`, keyed `(store_url, date, variables)`)
 
 Stores a fully-computed (`.compute()`) 2D lat×lon numpy slice. This is the only S3 data read — one chunk fetch per cold (date, variable) pair. Keyed by `variables` so different products using the same store cache independently.
 
-**Layer 3 — Processed grid cache** (`services/renderer.py`, keyed `(id(ds), lod)`, maxsize=20)
+Size is controlled by the `SLICE_CACHE_SIZE` env var (default `50`). Each entry is roughly 2–7 MB depending on grid size and number of variables. Raise this as you add products or need to keep more dates warm simultaneously.
+
+**Layer 3 — Processed grid cache** (`services/renderer.py`, keyed `(id(ds), lod)`)
 
 Stores the resampled + normalised numpy arrays for the full LOD grid. A hit reduces per-tile work to `_extract_chunk` + PNG encode only — no S3 I/O, no resampling. `id(ds)` is stable because `ds` is held alive by Layer 2.
+
+Size is controlled by the `PROCESSED_CACHE_SIZE` env var (default `200`). Should be set to at least `SLICE_CACHE_SIZE × number_of_LOD_levels` so every cached slice can have its processed grids cached too.
 
 ### Thread safety
 

@@ -9,6 +9,7 @@ Uses the same processed grid cache pattern as renderer.py:
   - _extract_chunk and _to_png_bytes are imported from renderer.py to avoid duplication.
 """
 
+import os
 import threading
 from io import BytesIO
 
@@ -24,7 +25,10 @@ from constants import LOD_ZOOM_THRESHOLDS, Product
 # Key is (id(ds), lod): each product's ds is a distinct object from _slice_cache, so
 # id(ds) implicitly encodes the product. id reuse is impossible because _slice_cache
 # holds a strong reference to every ds, preventing GC for the cache's lifetime.
-_processed_cache: LRUCache = LRUCache(maxsize=20)
+# PROCESSED_CACHE_SIZE should be >= SLICE_CACHE_SIZE × number of LOD levels so that
+# every cached slice can have its processed grids cached too.
+_PROCESSED_CACHE_SIZE = int(os.environ.get("PROCESSED_CACHE_SIZE", 200))
+_processed_cache: LRUCache = LRUCache(maxsize=_PROCESSED_CACHE_SIZE)
 _processed_inflight: dict = {}
 _processed_lock = threading.Lock()
 
