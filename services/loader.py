@@ -2,6 +2,7 @@ import concurrent.futures
 import logging
 import os
 import threading
+import time
 
 import pandas as pd
 import xarray as xr
@@ -12,7 +13,10 @@ from constants import COORD_NAMES, Product
 logger = logging.getLogger(__name__)
 
 # Dataset stores opened once per URL and reused across requests.
+# Re-opened after STORE_TTL_SECONDS to pick up newly appended time steps.
+_STORE_TTL = float(os.environ.get("STORE_TTL_SECONDS", 300))
 _stores: dict[str, xr.Dataset] = {}
+_store_opened_at: dict[str, float] = {}
 _store_lock = threading.Lock()
 _store_in_flight: dict[str, concurrent.futures.Future] = {}
 
@@ -36,11 +40,15 @@ _slice_in_flight: dict[tuple, concurrent.futures.Future] = {}
 # thread to request a URL creates the Future and does the open; any other thread requesting the
 # same URL concurrently waits on that same Future instead of blocking all other URLs too.
 def _get_store(store_url: str) -> xr.Dataset:
-    # Fast path: already open.
+    # Fast path: already open and TTL not expired.
     should_open = False
     with _store_lock:
         if store_url in _stores:
-            return _stores[store_url]
+            if time.monotonic() - _store_opened_at[store_url] < _STORE_TTL:
+                return _stores[store_url]
+            # TTL expired — evict so the re-open path runs below.
+            del _stores[store_url]
+            del _store_opened_at[store_url]
         if store_url in _store_in_flight:
             future = _store_in_flight[store_url]
         else:
@@ -64,6 +72,7 @@ def _get_store(store_url: str) -> xr.Dataset:
             ds = ds.sortby("time")
         with _store_lock:
             _stores[store_url] = ds
+            _store_opened_at[store_url] = time.monotonic()
         future.set_result(ds)
     except Exception as e:
         future.set_exception(e)

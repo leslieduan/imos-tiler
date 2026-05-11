@@ -89,7 +89,7 @@ Returns available dates for every registered product, filtered by an optional da
 }
 ```
 
-**Performance**: dates are read from the `time` coordinate of each Zarr store — a 1D array loaded once on first store open and held in the store singleton. No spatial data chunks are touched. Filtering is an in-memory string comparison (ISO dates sort lexicographically).
+**Performance**: dates are read from the `time` coordinate of each Zarr store — a 1D array held in the store singleton. No spatial data chunks are touched. Filtering is an in-memory string comparison (ISO dates sort lexicographically). The store is re-opened at most once per `STORE_TTL_SECONDS` window, so a single slow re-open (~1–2s) may be observed at TTL boundaries; all other requests within the window are sub-millisecond.
 
 ---
 
@@ -173,7 +173,9 @@ All caches are in-memory LRU (cachetools), evicted least-recently-used. Nothing 
 
 **Layer 1 — Store singleton** (`services/loader.py`, `_stores` dict keyed by URL)
 
-Caches the open Zarr store handle (lazy, metadata only). One HTTP request per store URL ever. Shared across all products using the same store.
+Caches the open Zarr store handle (lazy, metadata only). Shared across all products using the same store.
+
+The store is automatically re-opened after `STORE_TTL_SECONDS` (default `300`) to pick up newly appended time steps in the Zarr. On TTL expiry, the entry is evicted and `xr.open_zarr` runs again — refreshing the `time` coordinate array so both `GET /tiles/manifest` and tile requests see new dates. The re-open is cheap (metadata + coordinate arrays only, no data chunks). In-flight `load_slice` calls hold a direct reference to the old dataset object and complete normally; only new calls after eviction use the refreshed store. `_slice_cache` and `_processed_cache` entries for existing dates remain valid and unaffected.
 
 **Layer 2 — Slice cache** (`services/loader.py`, keyed `(store_url, date, variables)`)
 
