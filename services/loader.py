@@ -137,11 +137,16 @@ def load_slice(store_url: str, date: str, variables: list[str]) -> xr.Dataset:
     try:
         store = _get_store(store_url)
         ds = store[variables].sel(time=date, method="nearest").compute()
+        selected_date = str(ds.time.values)[:10]
+        if selected_date != date:
+            raise FileNotFoundError(
+                f"No data for date {date!r} (nearest available: {selected_date!r})"
+            )
         with _slice_lock:
             _slice_cache[cache_key] = ds
         future.set_result(ds)
     except KeyError as e:
-        exc = FileNotFoundError(f"No data found near date {date}")
+        exc = FileNotFoundError(f"No data found for date {date}")
         future.set_exception(exc)
         raise exc from e
     except Exception as e:

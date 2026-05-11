@@ -41,5 +41,15 @@
       192
     ],
     "padding": 1
+  },
+  {
+    "id": "satellite_austemp_sst_8day_sst",
+    "source_path": "s3://aodn-cloud-optimised/satellite_austemp_sst_8day.zarr/",
+    "variable": "sst",
+    "chunk_px": [
+      240,
+      192
+    ],
+    "padding": 1
   }
 ]
