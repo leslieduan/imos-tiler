@@ -153,6 +153,20 @@ On store open, `_get_store` applies `COORD_NAMES = {"TIME": "time", "LATITUDE": 
 
 ---
 
+## Concurrency
+
+See [`docs/concurrency.md`](concurrency.md) for the full concurrency model, capacity evaluation, stampede protection, and scaling notes.
+
+The three sizing env vars form a consistent chain — if you raise `THREAD_POOL_SIZE`, raise the other two proportionally:
+
+```
+THREAD_POOL_SIZE=100  →  SLICE_CACHE_SIZE=100  →  PROCESSED_CACHE_SIZE=400
+(max concurrent cold       (retain everything          (SLICE_CACHE_SIZE × ~4 LOD levels)
+ requests)                  that gets computed)
+```
+
+---
+
 ## Caching strategy
 
 All caches are in-memory LRU (cachetools), evicted least-recently-used. Nothing written to disk.
@@ -165,13 +179,13 @@ Caches the open Zarr store handle (lazy, metadata only). One HTTP request per st
 
 Stores a fully-computed (`.compute()`) 2D lat×lon numpy slice. This is the only S3 data read — one chunk fetch per cold (date, variable) pair. Keyed by `variables` so different products using the same store cache independently.
 
-Size is controlled by the `SLICE_CACHE_SIZE` env var (default `50`). Each entry is roughly 2–7 MB depending on grid size and number of variables. Raise this as you add products or need to keep more dates warm simultaneously.
+Size is controlled by the `SLICE_CACHE_SIZE` env var (default `100`). Each entry is roughly 2–7 MB depending on grid size and number of variables. Should be kept at least equal to `THREAD_POOL_SIZE` so a burst of cold requests does not immediately evict freshly computed slices.
 
 **Layer 3 — Processed grid cache** (`services/renderer.py`, keyed `(id(ds), lod)`)
 
 Stores the resampled + normalised numpy arrays for the full LOD grid. A hit reduces per-tile work to `_extract_chunk` + PNG encode only — no S3 I/O, no resampling. `id(ds)` is stable because `ds` is held alive by Layer 2.
 
-Size is controlled by the `PROCESSED_CACHE_SIZE` env var (default `200`). Should be set to at least `SLICE_CACHE_SIZE × number_of_LOD_levels` so every cached slice can have its processed grids cached too.
+Size is controlled by the `PROCESSED_CACHE_SIZE` env var (default `400`). Should be set to at least `SLICE_CACHE_SIZE × number_of_LOD_levels` so every cached slice can have its processed grids cached too.
 
 ### Thread safety
 

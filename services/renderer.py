@@ -27,7 +27,7 @@ from constants import LOD_ZOOM_THRESHOLDS, Product
 # holds a strong reference to every ds, preventing GC for the cache's lifetime.
 # PROCESSED_CACHE_SIZE should be >= SLICE_CACHE_SIZE × number of LOD levels so that
 # every cached slice can have its processed grids cached too.
-_PROCESSED_CACHE_SIZE = int(os.environ.get("PROCESSED_CACHE_SIZE", 200))
+_PROCESSED_CACHE_SIZE = int(os.environ.get("PROCESSED_CACHE_SIZE", 400))
 _processed_cache: LRUCache = LRUCache(maxsize=_PROCESSED_CACHE_SIZE)
 _processed_inflight: dict = {}
 _processed_lock = threading.Lock()

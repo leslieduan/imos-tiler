@@ -1,6 +1,8 @@
 import logging.config
+import os
 from contextlib import asynccontextmanager
 
+import anyio
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from starlette.middleware.cors import CORSMiddleware
@@ -24,6 +26,8 @@ logging.config.dictConfig(LOGGING_CONFIG)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    limiter = anyio.to_thread.current_default_thread_limiter()
+    limiter.total_tokens = int(os.environ.get("THREAD_POOL_SIZE", 100))
     load_products()
     yield
 
