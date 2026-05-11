@@ -3,6 +3,7 @@ import logging
 import os
 import threading
 
+import pandas as pd
 import xarray as xr
 from cachetools import LRUCache
 
@@ -98,7 +99,7 @@ def get_available_dates(store_url: str) -> list[str]:
     store = _get_store(store_url)
     if "time" not in store.dims:
         return []
-    return [str(t)[:10] for t in store.coords["time"].values]
+    return pd.to_datetime(store.coords["time"].values).strftime("%Y-%m-%d").tolist()
 
 
 # Fix: cache stampede — the old code released _slice_lock immediately after a cache miss, then
@@ -137,7 +138,7 @@ def load_slice(store_url: str, date: str, variables: list[str]) -> xr.Dataset:
     try:
         store = _get_store(store_url)
         ds = store[variables].sel(time=date, method="nearest").compute()
-        selected_date = str(ds.time.values)[:10]
+        selected_date = pd.Timestamp(ds.time.values).strftime("%Y-%m-%d")
         if selected_date != date:
             raise FileNotFoundError(
                 f"No data for date {date!r} (nearest available: {selected_date!r})"

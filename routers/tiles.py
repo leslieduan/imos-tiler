@@ -53,12 +53,14 @@ def get_products_availability(
     from_date: str | None = Query(
         None,
         alias="from",
+        pattern=r"^\d{4}-\d{2}-\d{2}$",
         description="Start date (inclusive), YYYY-MM-DD. Defaults to 3 months before today.",
         openapi_examples={"default": Example(value="2024-01-01")},
     ),
     to_date: str | None = Query(
         None,
         alias="to",
+        pattern=r"^\d{4}-\d{2}-\d{2}$",
         description="End date (inclusive), YYYY-MM-DD. Defaults to no upper bound.",
         openapi_examples={"default": Example(value="2024-12-31")},
     ),
@@ -77,7 +79,7 @@ def get_products_availability(
 @router.get("/{product_id}/{date}/{z}/{x}/{y}.png")
 def get_tile(
     product_id: str = Path(openapi_examples=_PRODUCT_EX),
-    date: str = Path(openapi_examples=_DATE_EX),
+    date: str = Path(pattern=r"^\d{4}-\d{2}-\d{2}$", openapi_examples=_DATE_EX),
     z: int = Path(openapi_examples={"default": Example(value=1)}),
     x: int = Path(openapi_examples={"default": Example(value=0)}),
     y: int = Path(openapi_examples={"default": Example(value=0)}),
@@ -103,7 +105,7 @@ def get_tile(
 @router.get("/{product_id}/{date}/manifest.json")
 def get_manifest(
     product_id: str = Path(openapi_examples=_PRODUCT_EX),
-    date: str = Path(openapi_examples=_DATE_EX),
+    date: str = Path(pattern=r"^\d{4}-\d{2}-\d{2}$", openapi_examples=_DATE_EX),
 ):
     product = _get_product_or_404(product_id)
     get_lod_grids(product)  # populates product.lod_grids before render_manifest reads it
@@ -115,7 +117,7 @@ def get_manifest(
 @router.get("/{product_id}/{date}/point")
 def get_point(
     product_id: str = Path(openapi_examples=_PRODUCT_EX),
-    date: str = Path(openapi_examples=_DATE_EX),
+    date: str = Path(pattern=r"^\d{4}-\d{2}-\d{2}$", openapi_examples=_DATE_EX),
     lat: float = Query(..., openapi_examples={"default": Example(value=-33.8)}),
     lon: float = Query(..., openapi_examples={"default": Example(value=151.2)}),
 ):
