@@ -3,7 +3,7 @@ import os
 from fastapi import APIRouter, Depends, HTTPException, Security
 from fastapi.responses import JSONResponse
 from fastapi.security import APIKeyHeader
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from constants import CHUNK_PX, PADDING
 from services.product_store import list_products, register_product, remove_product
@@ -28,6 +28,27 @@ class ProductPayload(BaseModel):
     variable: str | list[str] = ""
     chunk_px: list[int] = Field(default_factory=lambda: list(CHUNK_PX))
     padding: int = PADDING
+
+    @field_validator("id")
+    @classmethod
+    def id_nonempty(cls, v: str) -> str:
+        if not v or v != v.strip():
+            raise ValueError("must be non-empty with no leading/trailing whitespace")
+        return v
+
+    @field_validator("source_path")
+    @classmethod
+    def source_path_nonempty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("must be non-empty")
+        return v
+
+    @field_validator("chunk_px")
+    @classmethod
+    def chunk_px_length(cls, v: list[int]) -> list[int]:
+        if len(v) != 2 or any(x <= 0 for x in v):
+            raise ValueError("must be exactly 2 positive integers")
+        return v
 
 
 @router.get("/products")
