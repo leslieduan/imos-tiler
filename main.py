@@ -1,16 +1,20 @@
+import logging
 import logging.config
 import os
 from contextlib import asynccontextmanager
 
 import anyio
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from starlette.middleware.cors import CORSMiddleware
 from uvicorn.config import LOGGING_CONFIG
 
 from routers.admin import router as admin_router
 from routers.tiles import router as tiles_router
 from services.product_store import load_products
+
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -48,6 +52,12 @@ app.add_middleware(
 
 app.include_router(tiles_router, prefix="/tiles", tags=["Tiles"])
 app.include_router(admin_router, prefix="/admin", tags=["Admin"])
+
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    logger.exception("Unhandled error on %s %s", request.method, request.url.path)
+    return JSONResponse(status_code=500, content={"detail": "Internal server error"})
 
 
 @app.get("/")
