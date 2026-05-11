@@ -5,12 +5,11 @@
 All times are **end-to-end response times measured at the client**, covering the full round-trip:
 server processing (S3 fetch → render → encode) + network transfer from server to client.
 
-### Environments
+### Environment
 
 | Environment | Machine | S3 connectivity |
 |---|---|---|
-| Local | MacBook (macOS) | Internet — Sydney → S3 ap-southeast-2 |
-| AWS EC2 | t3.micro, ap-southeast-2 | AWS internal network |
+| AWS EC2 | t3.medium, ap-southeast-2 | AWS internal network |
 
 ### Cold vs hot
 
@@ -41,16 +40,23 @@ server processing (S3 fetch → render → encode) + network transfer from serve
 
 **Manifest** (cold only)
 
-| | Local | AWS EC2 |
-|---|---|---|
-| Cold | 26.07 s | 759 ms |
+| | AWS EC2 |
+|---|---|
+| Cold | 759 ms |
 
 **Tiles**
 
-| | Local | AWS EC2 |
-|---|---|---|
-| Cold | 20.42 s | 1.2 s |
-| Hot | 5 ms | 200 ms |
+| | AWS EC2 |
+|---|---|
+| Cold | 1.2 s |
+| Hot | 200 ms |
+
+**Point**
+
+| | AWS EC2 |
+|---|---|
+| Cold | 767 ms |
+| Hot | 74 ms |
 
 > Largest dataset. Covering the full 2000 × 3900 grid requires 6 S3 reads (2 lat chunks × 3 lon chunks), dominating cold-start time.
 
@@ -72,16 +78,23 @@ server processing (S3 fetch → render → encode) + network transfer from serve
 
 **Manifest** (cold only)
 
-| | Local | AWS EC2 |
-|---|---|---|
-| Cold | 4.62 s | 291 ms |
+| | AWS EC2 |
+|---|---|
+| Cold | 291 ms |
 
 **Tiles**
 
-| | Local | AWS EC2 |
-|---|---|---|
-| Cold | 4.74 s | 377 ms |
-| Hot | 5 ms | 195 ms |
+| | AWS EC2 |
+|---|---|
+| Cold | 377 ms |
+| Hot | 195 ms |
+
+**Point**
+
+| | AWS EC2 |
+|---|---|
+| Cold | 314 ms |
+| Hot | 71 ms |
 
 ---
 
@@ -101,16 +114,23 @@ server processing (S3 fetch → render → encode) + network transfer from serve
 
 **Manifest** (cold only)
 
-| | Local | AWS EC2 |
-|---|---|---|
-| Cold | 10.68 s | 547 ms |
+| | AWS EC2 |
+|---|---|
+| Cold | 547 ms |
 
 **Tiles**
 
-| | Local | AWS EC2 |
-|---|---|---|
-| Cold | 9.19 s | 587 ms |
-| Hot | 5 ms | 152 ms |
+| | AWS EC2 |
+|---|---|
+| Cold | 587 ms |
+| Hot | 152 ms |
+
+**Point**
+
+| | AWS EC2 |
+|---|---|
+| Cold | 400 ms |
+| Hot | 73 ms |
 
 > Shares the same Zarr store as `sea_level_anomaly` but reads two variables (UCUR + VCUR), roughly doubling the S3 I/O.
 
@@ -132,16 +152,23 @@ server processing (S3 fetch → render → encode) + network transfer from serve
 
 **Manifest** (cold only)
 
-| | Local | AWS EC2 |
-|---|---|---|
-| Cold | 376 ms | 205 ms |
+| | AWS EC2 |
+|---|---|
+| Cold | 205 ms |
 
 **Tiles**
 
-| | Local | AWS EC2 |
-|---|---|---|
-| Cold | 380 ms | 190 ms |
-| Hot | 5 ms | 83 ms |
+| | AWS EC2 |
+|---|---|
+| Cold | 190 ms |
+| Hot | 83 ms |
+
+**Point**
+
+| | AWS EC2 |
+|---|---|
+| Cold | 200 ms |
+| Hot | 73 ms |
 
 > Smallest spatial grid. The full domain fits in a single tile (`lod_grids = {1: (1, 1)}`), giving the fastest cold-start of all products.
 
@@ -149,7 +176,6 @@ server processing (S3 fetch → render → encode) + network transfer from serve
 
 ## Key observations
 
-- **EC2 cold start is 10–35× faster than local** — S3 and EC2 are on the same AWS internal network. Local cold requests pay internet latency for every S3 chunk read.
-- **Local hot (5 ms)** — client and server are on the same machine. Response time is purely in-memory: cache lookup + PNG encode, no network transfer.
-- **AWS hot (83–200 ms)** — S3 I/O is eliminated by the cache, but the tile PNG still travels from EC2 to the client over the internet. Variation reflects response payload size.
+- **AWS hot tiles (83–200 ms)** — S3 I/O is eliminated by the cache, but the tile PNG still travels from EC2 to the client over the internet. Variation reflects response payload size.
+- **AWS hot point (71–74 ms)** — consistently fast across all products once the slice is cached, since the response is a small JSON value with no PNG encoding or payload size variation.
 - **Chunk design drives cold-start time** — `satellite_austemp` requires 6 S3 reads per slice; `sea_level_anomaly`, `ocean_current`, and `radar` pack the full spatial grid into a single chunk, so one read is enough.

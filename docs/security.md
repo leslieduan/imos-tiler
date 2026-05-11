@@ -42,12 +42,12 @@ Any request to `/admin` arriving through port 80 is rejected by nginx before it 
 
 The EC2 Security Group is the network-level firewall. Port 8000 has no inbound rule, so it is unreachable from the internet even if nginx were misconfigured.
 
-| Port | Source | Purpose |
-|------|--------|---------|
-| 80 | 0.0.0.0/0 | Public tile requests via nginx |
-| 443 | 0.0.0.0/0 | HTTPS (if configured) |
-| 22 | your IP | SSH access and admin tunneling |
-| 8000 | ❌ none | Must not be publicly exposed |
+| Port | Source    | Purpose                                                     |
+| ---- | --------- | ----------------------------------------------------------- |
+| 80   | 0.0.0.0/0 | Public tile requests via nginx                              |
+| 443  | 0.0.0.0/0 | HTTPS (if configured)                                       |
+| 22   | 0.0.0.0/0 | SSH access and admin tunneling (key-based auth protects it) |
+| 8000 | ❌ none   | Must not be publicly exposed                                |
 
 ---
 
@@ -87,7 +87,8 @@ On EC2, port 8000 is protected by two independent layers: it is bound to `127.0.
 The only way in is an **SSH tunnel**, which forwards a local port on your machine through the SSH connection (port 22) to port 8000 on the EC2 instance — bypassing both the Security Group and nginx:
 
 ```bash
-ssh -L 8000:localhost:8000 ec2-user@your-ec2-ip
+# Run this from your local machine, not from inside EC2
+ssh -i titiler-demo-key.pem -L 8000:localhost:8000 ec2-user@your-ec2-ip
 ```
 
 This command has three parts:
