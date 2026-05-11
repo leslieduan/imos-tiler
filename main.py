@@ -10,8 +10,10 @@ from fastapi.responses import JSONResponse
 from starlette.middleware.cors import CORSMiddleware
 from uvicorn.config import LOGGING_CONFIG
 
+from constants import PRODUCTS
 from routers.admin import router as admin_router
 from routers.tiles import router as tiles_router
+from services.loader import prewarm_stores
 from services.product_store import load_products
 
 logger = logging.getLogger(__name__)
@@ -33,6 +35,8 @@ async def lifespan(app: FastAPI):
     limiter = anyio.to_thread.current_default_thread_limiter()
     limiter.total_tokens = int(os.environ.get("THREAD_POOL_SIZE", 100))
     load_products()
+    store_urls = list({p.source_path for p in PRODUCTS.values()})
+    prewarm_stores(store_urls)
     yield
 
 

@@ -89,7 +89,7 @@ Returns available dates for every registered product, filtered by an optional da
 }
 ```
 
-**Performance**: dates are read from the `time` coordinate of each Zarr store — a 1D array held in the store singleton. No spatial data chunks are touched. Filtering is an in-memory string comparison (ISO dates sort lexicographically). The store is re-opened at most once per `STORE_TTL_SECONDS` window, so a single slow re-open (~1–2s) may be observed at TTL boundaries; all other requests within the window are sub-millisecond.
+**Performance**: dates are read from the `time` coordinate of each Zarr store — a 1D array held in the store singleton. No spatial data chunks are touched. Filtering is an in-memory string comparison (ISO dates sort lexicographically). Responses are always sub-millisecond: the store is pre-warmed at startup and refreshed in the background after TTL expiry, so no request ever waits for a re-open.
 
 ---
 
@@ -175,7 +175,14 @@ All caches are in-memory LRU (cachetools), evicted least-recently-used. Nothing 
 
 Caches the open Zarr store handle (lazy, metadata only). Shared across all products using the same store.
 
-The store is automatically re-opened after `STORE_TTL_SECONDS` (default `300`) to pick up newly appended time steps in the Zarr. On TTL expiry, the entry is evicted and `xr.open_zarr` runs again — refreshing the `time` coordinate array so both `GET /tiles/manifest` and tile requests see new dates. The re-open is cheap (metadata + coordinate arrays only, no data chunks). In-flight `load_slice` calls hold a direct reference to the old dataset object and complete normally; only new calls after eviction use the refreshed store. `_slice_cache` and `_processed_cache` entries for existing dates remain valid and unaffected.
+Uses a **stale-while-revalidate** strategy to pick up newly appended time steps without ever blocking a request:
+
+- **Startup** — `prewarm_stores` in `main.py` opens every registered store in background daemon threads so the cache is warm before the first request arrives.
+- **Within TTL** — the cached store is returned immediately (sub-millisecond).
+- **After TTL** (`STORE_TTL_SECONDS`, default `600`) — the stale store is returned immediately for the current request, and a single background daemon thread calls `_refresh_store_background` to re-open the store. `_store_refreshing` prevents duplicate refresh threads for the same URL.
+- **First-ever open** (no cached entry) — the request blocks until `xr.open_zarr` completes; all concurrent requests for the same URL wait on the same `Future` rather than each opening independently.
+
+Re-opening is cheap — `xr.open_zarr` reads only metadata and coordinate arrays (`time`, `lat`, `lon`), no data chunks. In-flight `load_slice` calls hold a direct Python reference to the old dataset object and complete normally. `_slice_cache` and `_processed_cache` entries for existing dates remain valid and unaffected.
 
 **Layer 2 — Slice cache** (`services/loader.py`, keyed `(store_url, date, variables)`)
 

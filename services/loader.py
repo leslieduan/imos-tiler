@@ -13,10 +13,12 @@ from constants import COORD_NAMES, Product
 logger = logging.getLogger(__name__)
 
 # Dataset stores opened once per URL and reused across requests.
-# Re-opened after STORE_TTL_SECONDS to pick up newly appended time steps.
-_STORE_TTL = float(os.environ.get("STORE_TTL_SECONDS", 300))
+# After STORE_TTL_SECONDS the stale store is served immediately while a background thread
+# re-opens it — requests never block waiting for a refresh, only for the initial open.
+_STORE_TTL = float(os.environ.get("STORE_TTL_SECONDS", 600))
 _stores: dict[str, xr.Dataset] = {}
 _store_opened_at: dict[str, float] = {}
+_store_refreshing: set[str] = set()  # URLs with a background re-open in progress
 _store_lock = threading.Lock()
 _store_in_flight: dict[str, concurrent.futures.Future] = {}
 
@@ -33,6 +35,34 @@ _slice_lock = threading.Lock()
 _slice_in_flight: dict[tuple, concurrent.futures.Future] = {}
 
 
+def _open_store(store_url: str) -> xr.Dataset:
+    ds = xr.open_zarr(store_url, storage_options={"anon": True})
+    rename = {k: v for k, v in COORD_NAMES.items() if k in ds.dims or k in ds.coords}
+    if rename:
+        ds = ds.rename(rename)
+    if "lat" not in ds.dims or "lon" not in ds.dims:
+        raise ValueError(
+            f"Store {store_url!r} missing lat/lon dims after rename (found: {list(ds.dims)})"
+        )
+    if "time" in ds.dims:
+        ds = ds.sortby("time")
+    return ds
+
+
+def _refresh_store_background(store_url: str) -> None:
+    try:
+        ds = _open_store(store_url)
+        with _store_lock:
+            _stores[store_url] = ds
+            _store_opened_at[store_url] = time.monotonic()
+        logger.info("Store refreshed: %s", store_url)
+    except Exception:
+        logger.exception("Background refresh failed for %s", store_url)
+    finally:
+        with _store_lock:
+            _store_refreshing.discard(store_url)
+
+
 # Fix: serialised store opens under _store_lock meant two requests for *different* store URLs
 # arriving before either had finished opening would block each other unnecessarily — the second
 # request had to wait for the first store's full xr.open_zarr() even though they were unrelated.
@@ -40,15 +70,18 @@ _slice_in_flight: dict[tuple, concurrent.futures.Future] = {}
 # thread to request a URL creates the Future and does the open; any other thread requesting the
 # same URL concurrently waits on that same Future instead of blocking all other URLs too.
 def _get_store(store_url: str) -> xr.Dataset:
-    # Fast path: already open and TTL not expired.
     should_open = False
     with _store_lock:
         if store_url in _stores:
             if time.monotonic() - _store_opened_at[store_url] < _STORE_TTL:
                 return _stores[store_url]
-            # TTL expired — evict so the re-open path runs below.
-            del _stores[store_url]
-            del _store_opened_at[store_url]
+            # TTL expired — return stale store and trigger a background refresh.
+            if store_url not in _store_refreshing:
+                _store_refreshing.add(store_url)
+                threading.Thread(
+                    target=_refresh_store_background, args=(store_url,), daemon=True
+                ).start()
+            return _stores[store_url]
         if store_url in _store_in_flight:
             future = _store_in_flight[store_url]
         else:
@@ -59,17 +92,9 @@ def _get_store(store_url: str) -> xr.Dataset:
     if not should_open:
         return future.result()
 
+    # First-ever open: block until complete.
     try:
-        ds = xr.open_zarr(store_url, storage_options={"anon": True})
-        rename = {k: v for k, v in COORD_NAMES.items() if k in ds.dims or k in ds.coords}
-        if rename:
-            ds = ds.rename(rename)
-        if "lat" not in ds.dims or "lon" not in ds.dims:
-            raise ValueError(
-                f"Store {store_url!r} missing lat/lon dims after rename (found: {list(ds.dims)})"
-            )
-        if "time" in ds.dims:
-            ds = ds.sortby("time")
+        ds = _open_store(store_url)
         with _store_lock:
             _stores[store_url] = ds
             _store_opened_at[store_url] = time.monotonic()
@@ -81,6 +106,11 @@ def _get_store(store_url: str) -> xr.Dataset:
         with _store_lock:
             _store_in_flight.pop(store_url, None)
     return ds
+
+
+def prewarm_stores(store_urls: list[str]) -> None:
+    for url in store_urls:
+        threading.Thread(target=_get_store, args=(url,), daemon=True).start()
 
 
 def get_lod_grids(product: Product) -> dict[int, tuple[int, int]]:
