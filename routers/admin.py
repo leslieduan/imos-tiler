@@ -1,11 +1,16 @@
 import os
 
-from fastapi import APIRouter, Depends, HTTPException, Security
+from fastapi import APIRouter, Depends, HTTPException, Path, Security
 from fastapi.responses import JSONResponse
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field, field_validator
 
 from constants import CHUNK_PX, PADDING
+from services.colormap_store import (
+    list_colormaps,
+    register_colormap,
+    remove_colormap,
+)
 from services.product_store import list_products, register_product, remove_product
 
 _api_key_header = APIKeyHeader(name="X-Admin-Key")
@@ -77,5 +82,58 @@ def delete_product(product_id: str):
         raise HTTPException(status_code=404, detail=f"Product '{product_id}' not found") from e
     except ValueError as e:
         raise HTTPException(status_code=403, detail=str(e)) from e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to persist removal: {e}") from e
+
+
+class ColormapPayload(BaseModel):
+    name: str
+    entries: list[list[int]] = Field(
+        ..., description="Exactly 256 RGBA entries, each a list of 4 ints in [0, 255]."
+    )
+
+    @field_validator("name")
+    @classmethod
+    def name_nonempty(cls, v: str) -> str:
+        if not v or v != v.strip():
+            raise ValueError("must be non-empty with no leading/trailing whitespace")
+        return v
+
+    @field_validator("entries")
+    @classmethod
+    def entries_valid(cls, v: list[list[int]]) -> list[list[int]]:
+        if len(v) != 256:
+            raise ValueError(f"entries must have exactly 256 items, got {len(v)}")
+        for i, rgba in enumerate(v):
+            if len(rgba) != 4 or not all(0 <= c <= 255 for c in rgba):
+                raise ValueError(f"entry {i} must be [r, g, b, a] with values 0–255")
+        return v
+
+    def to_tuples(self) -> list[tuple[int, int, int, int]]:
+        return [(rgba[0], rgba[1], rgba[2], rgba[3]) for rgba in self.entries]
+
+
+@router.get("/colormaps")
+def get_colormaps():
+    return JSONResponse(content=list_colormaps())
+
+
+@router.post("/colormaps", status_code=201)
+def add_colormap(payload: ColormapPayload):
+    try:
+        register_colormap(payload.name, payload.to_tuples())
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to persist colormap: {e}") from e
+    return JSONResponse(status_code=201, content={"name": payload.name})
+
+
+@router.delete("/colormaps/{name}", status_code=204)
+def delete_colormap(name: str = Path(...)):
+    try:
+        remove_colormap(name)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=f"Colormap '{name}' not found") from e
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to persist removal: {e}") from e

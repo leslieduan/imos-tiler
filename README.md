@@ -54,14 +54,31 @@ Server is available at `http://localhost:80`.
 
 ## Endpoints
 
-### Tiles (`/tiles`)
+### Data tiles (`/data_tiles`)
+
+Raw RGBA tiles for WebGL shader consumption — pixel bytes encode scientific values, not colours.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/tiles/manifest?from=&to=` | Available dates for all products (defaults to last 3 months) |
-| GET | `/tiles/{product_id}/{date}/{z}/{x}/{y}.png` | Tile image |
-| GET | `/tiles/{product_id}/{date}/manifest.json` | Tile config for a product on a given date |
-| GET | `/tiles/{product_id}/{date}/point?lat=&lon=` | Point value lookup |
+| GET | `/data_tiles/manifest?from=&to=` | Available dates for all products (defaults to last 3 months) |
+| GET | `/data_tiles/{product_id}/{date}/{z}/{x}/{y}.png` | Raw value-encoded tile |
+| GET | `/data_tiles/{product_id}/{date}/manifest.json` | Tile config (bounds, value ranges, LOD grid) |
+| GET | `/data_tiles/{product_id}/{date}/point?lat=&lon=` | Point value lookup |
+
+### Visual tiles (`/visual_tiles`)
+
+Colourised Web Mercator (XYZ) tiles — compatible with MapboxGL `raster` sources and any slippy-map library. Single-variable products only.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/visual_tiles/{product_id}/{date}/{z}/{x}/{y}.png` | Colourised PNG tile |
+
+Query parameters:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `colormap` | `viridis` | Colormap name — any matplotlib or rio-tiler built-in, or a custom name registered via the admin API |
+| `rescale` | auto (data min/max for the date) | Value range as `min,max`, e.g. `-0.5,0.5` |
 
 ### Admin (`/admin`)
 
@@ -72,6 +89,9 @@ Requires `X-Admin-Key` header. Admin endpoints are always available at port 8000
 | GET | `/admin/products` | List all registered products |
 | POST | `/admin/products` | Register a new product |
 | DELETE | `/admin/products/{id}` | Remove a product |
+| GET | `/admin/colormaps` | List all custom colormaps |
+| POST | `/admin/colormaps` | Register a new custom colormap |
+| DELETE | `/admin/colormaps/{name}` | Remove a custom colormap |
 
 ## Managing products
 
@@ -106,6 +126,31 @@ curl -X POST http://localhost:8000/admin/products \
 curl -X DELETE http://localhost:8000/admin/products/sea_level_anomaly \
   -H "X-Admin-Key: your-secret-key"
 ```
+
+## Managing colormaps
+
+Custom colormaps are stored in `colormaps.json` and loaded on startup. Changes via the admin API take effect immediately without a restart. Colormap names registered here can then be used via `?colormap=<name>` on any visual tile request.
+
+Each colormap is exactly 256 RGBA entries (one per normalised byte value 0–255).
+
+**Add a colormap:**
+```bash
+curl -X POST http://localhost:8000/admin/colormaps \
+  -H "X-Admin-Key: your-secret-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "imos_sst",
+    "entries": [[0,0,80,255], [0,40,160,255], ..., [220,240,255,255]]
+  }'
+```
+
+**Delete a colormap:**
+```bash
+curl -X DELETE http://localhost:8000/admin/colormaps/imos_sst \
+  -H "X-Admin-Key: your-secret-key"
+```
+
+Compile-time defaults can also be added directly in `CUSTOM_COLORMAPS` in `constants.py` — these are always available regardless of `colormaps.json`.
 
 See [`docs/security.md`](docs/security.md) for how admin endpoints are secured in production.
 
