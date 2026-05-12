@@ -1,6 +1,6 @@
 # titiler-project
 
-Tile server for IMOS ocean data products. Built with FastAPI, it serves map tiles for products like sea level anomaly, ocean current, and sea surface temperature.
+Tile server for IMOS ocean data products. Built with FastAPI, it serves map tiles from Zarr-backed stores. Products are managed at runtime via the admin API — no redeploy required.
 
 ## Setup
 
