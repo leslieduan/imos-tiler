@@ -2,9 +2,9 @@ import numpy as np
 import pytest
 import xarray as xr
 
-import services.renderer as renderer_module
+import services.data_renderer as renderer_module
 from constants import Product
-from services.renderer import render_manifest, render_tile
+from services.data_renderer import render_manifest, render_tile
 
 
 def _make_ds(variables: list[str]) -> xr.Dataset:

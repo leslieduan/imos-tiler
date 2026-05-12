@@ -7,8 +7,8 @@ from fastapi.openapi.models import Example
 from fastapi.responses import JSONResponse, Response
 
 from constants import PRODUCTS
+from services.data_renderer import render_manifest, render_tile
 from services.loader import get_available_dates, get_lod_grids, load_slice
-from services.renderer import render_manifest, render_tile
 
 router = APIRouter()
 

@@ -3,7 +3,7 @@ from fastapi.responses import Response
 
 from constants import PRODUCTS
 from services.loader import load_slice
-from services.raster_renderer import render_raster_tile
+from services.visual_renderer import render_tile
 
 router = APIRouter()
 
@@ -21,10 +21,10 @@ def _get_product_or_404(product_id: str):
     description=(
         "Standard Web Mercator (XYZ) tile rendered as a colourised PNG. "
         "Compatible with MapboxGL `raster` sources and any slippy-map library. "
-        "Tiles outside the product extent return 204 No Content."
+        "Tiles outside the product extent return transparent PNGs."
     ),
 )
-def get_raster_tile(
+def get_tile(
     product_id: str = Path(...),
     date: str = Path(..., pattern=r"^\d{4}-\d{2}-\d{2}$"),
     z: int = Path(...),
@@ -41,10 +41,14 @@ def get_raster_tile(
     ),
 ):
     product = _get_product_or_404(product_id)
-    variables = product.variable if isinstance(product.variable, list) else [product.variable]
+    if isinstance(product.variable, list):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Product '{product_id}' has multiple variables; visual tiles support single-variable products only.",
+        )
 
     try:
-        ds = load_slice(product.source_path, date, variables)
+        ds = load_slice(product.source_path, date, [product.variable])
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
 
@@ -59,7 +63,7 @@ def get_raster_tile(
             ) from e
 
     try:
-        png = render_raster_tile(ds, product.variable, x, y, z, colormap_name, rescale_range)
+        png = render_tile(ds, product.variable, x, y, z, colormap_name, rescale_range)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 

@@ -12,8 +12,8 @@ from uvicorn.config import LOGGING_CONFIG
 
 from constants import PRODUCTS
 from routers.admin import router as admin_router
-from routers.raster import router as raster_router
-from routers.tiles import router as tiles_router
+from routers.data_tiles import router as data_tiles_router
+from routers.visual_tiles import router as visual_tiles_router
 from services.loader import prewarm_stores
 from services.product_store import load_products
 
@@ -65,8 +65,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(tiles_router, prefix="/tiles", tags=["Tiles"])
-app.include_router(raster_router, prefix="/raster", tags=["Raster"])
+app.include_router(data_tiles_router, prefix="/data_tiles", tags=["data_tiles"])
+app.include_router(visual_tiles_router, prefix="/visual_tiles", tags=["visual_tiles"])
 app.include_router(admin_router, prefix="/admin", tags=["Admin"])
 
 

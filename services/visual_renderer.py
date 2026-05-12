@@ -43,18 +43,9 @@ def empty_png() -> bytes:
     return buf.getvalue()
 
 
-def _to_scalar(ds: xr.Dataset, variable: str | list[str]) -> xr.DataArray:
-    """Return a 2-D (lat × lon) float32 DataArray ready for XarrayReader.
-
-    UV products are collapsed to current speed so a single scalar is rendered.
-    """
-    if isinstance(variable, list):
-        u = ds[variable[0]].values.astype(np.float32)
-        v = ds[variable[1]].values.astype(np.float32)
-        speed = np.sqrt(u**2 + v**2)
-        da = xr.DataArray(speed, coords=ds[variable[0]].coords, dims=ds[variable[0]].dims)
-    else:
-        da = ds[variable].astype(np.float32)
+def _to_scalar(ds: xr.Dataset, variable: str) -> xr.DataArray:
+    """Return a 2-D (lat × lon) float32 DataArray ready for XarrayReader."""
+    da = ds[variable].astype(np.float32)
 
     # Some stores use 0–360 longitude convention (values > 180).
     # rioxarray requires -180 to 180, so wrap and re-sort before handing to XarrayReader.
@@ -67,9 +58,9 @@ def _to_scalar(ds: xr.Dataset, variable: str | list[str]) -> xr.DataArray:
     return da
 
 
-def render_raster_tile(
+def render_tile(
     ds: xr.Dataset,
-    variable: str | list[str],
+    variable: str,
     x: int,
     y: int,
     z: int,
