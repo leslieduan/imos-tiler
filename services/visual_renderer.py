@@ -8,6 +8,8 @@ from rio_tiler.colormap import cmap as _rio_cmap
 from rio_tiler.errors import TileOutsideBounds
 from rio_tiler.io.xarray import XarrayReader
 
+from constants import CUSTOM_COLORMAPS
+
 TILE_SIZE = 256
 
 
@@ -15,9 +17,16 @@ TILE_SIZE = 256
 def _colormap(name: str) -> dict[int, tuple[int, int, int, int]]:
     """Return a rio-tiler colormap dict for the given name.
 
-    Tries rio-tiler's built-in colormaps first, then falls back to matplotlib
+    Checks CUSTOM_COLORMAPS first, then rio-tiler's built-ins, then matplotlib
     so that diverging colormaps like RdBu_r are also available.
     """
+    if name in CUSTOM_COLORMAPS:
+        entries = CUSTOM_COLORMAPS[name]
+        if len(entries) != 256:
+            raise ValueError(
+                f"Custom colormap {name!r} must have exactly 256 entries, got {len(entries)}"
+            )
+        return {i: entries[i] for i in range(256)}
     try:
         return _rio_cmap.get(name)
     except Exception:

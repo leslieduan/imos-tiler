@@ -14,6 +14,7 @@ from constants import PRODUCTS
 from routers.admin import router as admin_router
 from routers.data_tiles import router as data_tiles_router
 from routers.visual_tiles import router as visual_tiles_router
+from services.colormap_store import load_colormaps
 from services.loader import prewarm_stores
 from services.product_store import load_products
 
@@ -46,6 +47,7 @@ async def lifespan(app: FastAPI):
     limiter = anyio.to_thread.current_default_thread_limiter()
     limiter.total_tokens = int(os.environ.get("THREAD_POOL_SIZE", 100))
     load_products()
+    load_colormaps()
     store_urls = list({p.source_path for p in PRODUCTS.values()})
     prewarm_stores(store_urls)
     yield
