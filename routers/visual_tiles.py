@@ -1,18 +1,14 @@
 from fastapi import APIRouter, HTTPException, Path, Query
 from fastapi.responses import Response
 
-from constants import PRODUCTS
 from services.loader import load_slice
 from services.visual_renderer import render_tile
 
+from .products import _get_product_or_404
+from .products import router as products_router
+
 router = APIRouter()
-
-
-def _get_product_or_404(product_id: str):
-    product = PRODUCTS.get(product_id)
-    if product is None:
-        raise HTTPException(status_code=404, detail=f"Unknown product: {product_id}")
-    return product
+router.include_router(products_router)
 
 
 @router.get(
