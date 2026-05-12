@@ -41,5 +41,15 @@
       192
     ],
     "padding": 1
+  },
+  {
+    "id": "satellite_ghrsst_l3c_1day_nighttime_snpp_australia",
+    "source_path": "s3://aodn-cloud-optimised/satellite_ghrsst_l3c_1day_nighttime_snpp_australia.zarr/",
+    "variable": "sst_mean",
+    "chunk_px": [
+      240,
+      192
+    ],
+    "padding": 1
   }
 ]

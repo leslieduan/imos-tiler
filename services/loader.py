@@ -3,12 +3,15 @@ import logging
 import os
 import threading
 import time
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import xarray as xr
 from cachetools import LRUCache
 
 from constants import COORD_NAMES, Product
+
+_LOCAL_TZ = ZoneInfo("Australia/Sydney")
 
 logger = logging.getLogger(__name__)
 
@@ -134,11 +137,16 @@ def get_lod_grids(product: Product) -> dict[int, tuple[int, int]]:
     return product.lod_grids
 
 
+def _ts_to_local_date(ts) -> str:
+    """Convert a UTC numpy datetime64 or Timestamp to the local Australian date string."""
+    return pd.Timestamp(ts).tz_localize("UTC").tz_convert(_LOCAL_TZ).strftime("%Y-%m-%d")
+
+
 def get_available_dates(store_url: str) -> list[str]:
     store = _get_store(store_url)
     if "time" not in store.dims:
         return []
-    return pd.to_datetime(store.coords["time"].values).strftime("%Y-%m-%d").tolist()
+    return [_ts_to_local_date(ts) for ts in store.coords["time"].values]
 
 
 # Fix: cache stampede — the old code released _slice_lock immediately after a cache miss, then
@@ -176,8 +184,9 @@ def load_slice(store_url: str, date: str, variables: list[str]) -> xr.Dataset:
 
     try:
         store = _get_store(store_url)
-        ds = store[variables].sel(time=date, method="nearest").compute()
-        selected_date = pd.Timestamp(ds.time.values).strftime("%Y-%m-%d")
+        local_midnight = pd.Timestamp(date, tz=_LOCAL_TZ).tz_convert("UTC").tz_localize(None)
+        ds = store[variables].sel(time=local_midnight, method="nearest").compute()
+        selected_date = _ts_to_local_date(ds.time.values)
         if selected_date != date:
             raise FileNotFoundError(
                 f"No data for date {date!r} (nearest available: {selected_date!r})"

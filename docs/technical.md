@@ -147,6 +147,39 @@ Products are defined in `constants.py` with `lod_grids={}`. On the first request
 
 ---
 
+## Date and timezone convention
+
+**This is a critical invariant.** Getting it wrong causes silent 404s or data served for the wrong day.
+
+### The rule
+
+| Layer | Representation |
+|---|---|
+| Zarr store `time` coordinate | UTC — numpy `datetime64[ns]` is always UTC by convention |
+| API request/response dates | Local Australian time — `Australia/Sydney` (AEST UTC+10 / AEDT UTC+11) |
+
+All satellite passes over Australia occur during Australian daytime. Their UTC timestamps typically fall on the **previous UTC day** (e.g. a pass at `2022-06-01 01:20 AEST` is `2022-05-31 15:20 UTC`). Comparing UTC dates to local request dates directly would return a 404 for every such record.
+
+### How the server handles it
+
+Every point where a UTC timestamp is exposed or compared is converted to local time via `_ts_to_local_date` in `services/loader.py`:
+
+```python
+_LOCAL_TZ = ZoneInfo("Australia/Sydney")  # handles AEST/AEDT automatically
+
+def _ts_to_local_date(ts) -> str:
+    return pd.Timestamp(ts).tz_localize("UTC").tz_convert(_LOCAL_TZ).strftime("%Y-%m-%d")
+```
+
+- **`get_available_dates`** — returns local dates so the frontend always receives values it can round-trip back as request dates.
+- **`load_slice`** — converts the requested local date to local midnight, then to UTC, before calling `sel(time=..., method="nearest")`. After selection, the returned timestamp is converted back to a local date and compared to the requested date to guard against `method="nearest"` reaching too far.
+
+### What to check when adding a new product
+
+If you add a product whose Zarr store timestamps are stored differently (e.g. already in local time, or in a different timezone), you must either adjust `_ts_to_local_date` or override the date handling for that product. Do not change the default without understanding this invariant first.
+
+---
+
 ## Coordinate normalisation
 
 On store open, `_get_store` applies `COORD_NAMES = {"TIME": "time", "LATITUDE": "lat", "LONGITUDE": "lon"}` to rename any uppercase coordinate names to lowercase. This happens once per store URL and is stored in the singleton. All downstream code (renderer, manifest, point endpoint) can always assume `lat`/`lon`/`time` regardless of what the store uses natively.

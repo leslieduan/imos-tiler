@@ -9,6 +9,7 @@ Uses the same processed grid cache pattern as renderer.py:
   - _extract_chunk and _to_png_bytes are imported from renderer.py to avoid duplication.
 """
 
+import math
 import os
 import threading
 from io import BytesIO
@@ -214,6 +215,11 @@ def render_tile(product: Product, ds: xr.Dataset, lod: int, cx: int, cy: int) ->
     return _to_png_bytes(img)
 
 
+def _json_float(v) -> float | None:
+    f = float(v)
+    return None if math.isnan(f) or math.isinf(f) else f
+
+
 def render_manifest(product: Product, ds: xr.Dataset) -> dict:
     lon_min_g = float(ds.lon.min())
     lon_max_g = float(ds.lon.max())
@@ -240,20 +246,20 @@ def render_manifest(product: Product, ds: xr.Dataset) -> dict:
         return {
             "bounds": bounds,
             "uRange": [
-                float(ds[u_var].min(skipna=True).values),
-                float(ds[u_var].max(skipna=True).values),
+                _json_float(ds[u_var].min(skipna=True).values),
+                _json_float(ds[u_var].max(skipna=True).values),
             ],
             "vRange": [
-                float(ds[v_var].min(skipna=True).values),
-                float(ds[v_var].max(skipna=True).values),
+                _json_float(ds[v_var].min(skipna=True).values),
+                _json_float(ds[v_var].max(skipna=True).values),
             ],
             "lods": lod_meta,
         }
     return {
         "bounds": bounds,
         "valueRange": [
-            float(ds[product.variable].min(skipna=True).values),
-            float(ds[product.variable].max(skipna=True).values),
+            _json_float(ds[product.variable].min(skipna=True).values),
+            _json_float(ds[product.variable].max(skipna=True).values),
         ],
         "lods": lod_meta,
     }

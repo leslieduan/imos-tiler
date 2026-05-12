@@ -46,6 +46,12 @@ docker compose logs -f
 
 Server is available at `http://localhost:80`.
 
+## Important: date timezone convention
+
+> **Warning:** All dates in the API (`{date}` path params, `from`/`to` query params, `available_dates` responses) are in **local Australian time** (`Australia/Sydney` — AEST/AEDT). The underlying Zarr store timestamps are UTC. The server converts between them internally — do not bypass this by passing UTC dates directly, or tiles will 404 for any date where the satellite pass crosses midnight UTC (which is the common case for Australian daytime observations).
+>
+> See [`docs/technical.md`](docs/technical.md#date-and-timezone-convention) for the full explanation.
+
 ## Endpoints
 
 ### Tiles (`/tiles`)
