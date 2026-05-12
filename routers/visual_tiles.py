@@ -48,6 +48,13 @@ def get_tile(
             detail=f"Product '{product_id}' has multiple variables; visual tiles support single-variable products only.",
         )
 
+    max_index = (1 << z) - 1
+    if not (0 <= x <= max_index and 0 <= y <= max_index):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Tile ({x},{y}) out of range for z={z}; valid range is 0–{max_index}.",
+        )
+
     try:
         ds = load_slice(product.source_path, date, [product.variable])
     except FileNotFoundError as e:
