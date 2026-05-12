@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException, Path, Query
 from fastapi.responses import Response
 
 from services.loader import load_slice
-from services.visual_renderer import render_tile
+from services.visual_renderer import _colormap, render_tile
 
 from .products import _get_product_or_404
 from .products import router as products_router
@@ -36,6 +36,11 @@ def get_tile(
         description="Value range as 'min,max'. Defaults to the global data range for the date.",
     ),
 ):
+    try:
+        _colormap(colormap_name)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
     product = _get_product_or_404(product_id)
     if isinstance(product.variable, list):
         raise HTTPException(
