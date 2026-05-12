@@ -6,12 +6,8 @@ from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field, field_validator
 
 from constants import CHUNK_PX, PADDING
-from services.colormap_store import (
-    list_colormaps,
-    register_colormap,
-    remove_colormap,
-)
-from services.product_store import list_products, register_product, remove_product
+from services.colormap_store import register_colormap, remove_colormap
+from services.product_store import register_product, remove_product
 
 _api_key_header = APIKeyHeader(name="X-Admin-Key")
 
@@ -25,7 +21,6 @@ def _require_admin_key(key: str = Security(_api_key_header)) -> None:
 
 
 admin_router = APIRouter(dependencies=[Depends(_require_admin_key)])
-metadata_router = APIRouter()
 
 
 class ProductPayload(BaseModel):
@@ -55,11 +50,6 @@ class ProductPayload(BaseModel):
         if len(v) != 2 or any(x <= 0 for x in v):
             raise ValueError("must be exactly 2 positive integers")
         return v
-
-
-@metadata_router.get("/products")
-def get_products():
-    return JSONResponse(content=list_products())
 
 
 @admin_router.post("/products", status_code=201)
@@ -112,11 +102,6 @@ class ColormapPayload(BaseModel):
 
     def to_tuples(self) -> list[tuple[int, int, int, int]]:
         return [(rgba[0], rgba[1], rgba[2], rgba[3]) for rgba in self.entries]
-
-
-@metadata_router.get("/colormaps")
-def get_colormaps():
-    return JSONResponse(content=list_colormaps())
 
 
 @admin_router.post("/colormaps", status_code=201)

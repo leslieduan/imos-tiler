@@ -67,6 +67,7 @@ warm  → get_lod_grids (product.lod_grids already set)                   → lo
 Raw value-encoded RGBA tiles for WebGL shader consumption. Uses a custom geographic atlas grid — **not** Web Mercator.
 
 ```
+GET /data_tiles/products                                 → list all registered products
 GET /data_tiles/manifest?from=YYYY-MM-DD&to=YYYY-MM-DD  → available dates for all products
 GET /data_tiles/{product_id}/{date}/{z}/{x}/{y}.png      → raw RGBA PNG tile
 GET /data_tiles/{product_id}/{date}/manifest.json        → bounds + value ranges + LOD grid config
@@ -80,6 +81,7 @@ GET /data_tiles/{product_id}/{date}/point?lat=&lon=      → variable value at p
 Colourised PNG tiles in standard Web Mercator (XYZ) — compatible with MapboxGL `raster` sources. Single-variable products only.
 
 ```
+GET /visual_tiles/colormaps                                                        → all supported colormap names
 GET /visual_tiles/{product_id}/{date}/{z}/{x}/{y}.png?colormap=viridis&rescale=min,max
 ```
 
@@ -128,7 +130,7 @@ titiler-project/
   routers/
     data_tiles.py                ← /data_tiles — raw value-encoded RGBA tiles for WebGL
     visual_tiles.py              ← /visual_tiles — colourised Web Mercator XYZ tiles
-    products.py                  ← shared manifest + point endpoints included by both tile routers
+    products.py                  ← GET /products, manifest, and point endpoints — included by both tile routers
     admin.py                     ← /admin — product and colormap management (key-protected)
   services/
     loader.py                    ← Zarr store singleton + per-(date, variables) slice cache + get_lod_grids
@@ -271,6 +273,18 @@ Visual tiles support any colormap name that resolves through the following looku
 3. **matplotlib** — any name from `matplotlib.colormaps`, including diverging maps like `RdBu_r`, `coolwarm`.
 
 An unrecognised name returns `400 Bad Request`.
+
+### Listing supported colormaps
+
+`GET /visual_tiles/colormaps` returns all supported names grouped by source, with higher-priority sources excluding duplicate names from lower ones:
+
+```json
+{
+  "custom":    ["blue_red", "imos_sst"],
+  "rio_tiler": ["accent", "algae", "viridis", ...],
+  "matplotlib": ["Blues", "RdBu_r", "coolwarm", ...]
+}
+```
 
 ### Custom colormaps
 

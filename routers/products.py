@@ -8,11 +8,17 @@ from fastapi.responses import JSONResponse
 
 from constants import PRODUCTS
 from services.loader import get_available_dates, load_slice
+from services.product_store import list_products
 
 router = APIRouter()
 
 _PRODUCT_EX: dict[str, Example] = {"default": Example(value="sea_level_anomaly")}
 _DATE_EX: dict[str, Example] = {"default": Example(value="2024-02-24")}
+
+
+@router.get("/products")
+def get_products():
+    return JSONResponse(content=list_products())
 
 
 def _get_product_or_404(product_id: str):
