@@ -4,12 +4,13 @@ services:
     # As only allow ssh tunnel to call port 8000, set only listens to request to port 8000 from local.
     ports:
       - "127.0.0.1:8000:8000"
-    # EC2 first-time setup only: products.json must exist on the host before first run. To create it:
-    #   echo "[]" > products.json
+    # EC2 first-time setup only: both JSON files must exist on the host before first run.
+    #   echo "[]" > products.json && echo "{}" > colormaps.json
     # Or with default products:
     #   echo '[{"id":"sea_level_anomaly","source_path":"s3://aodn-cloud-optimised/model_sea_level_anomaly_gridded_realtime.zarr/","variable":"GSLA","chunk_px":[240,192],"padding":1},{"id":"ocean_current","source_path":"s3://aodn-cloud-optimised/model_sea_level_anomaly_gridded_realtime.zarr/","variable":["UCUR","VCUR"],"chunk_px":[240,192],"padding":1},{"id":"radar_SouthAustraliaGulfs_wind_delayed_qc_wdir","source_path":"s3://aodn-cloud-optimised/radar_SouthAustraliaGulfs_wind_delayed_qc.zarr","variable":"WDIR","chunk_px":[240,192],"padding":1},{"id":"satellite_austemp_heatwave_8day_ssta","source_path":"s3://aodn-cloud-optimised/satellite_austemp_heatwave_8day.zarr","variable":"ssta","chunk_px":[240,192],"padding":1}]' > products.json
     volumes:
       - ./products.json:/app/products.json
+      - ./colormaps.json:/app/colormaps.json
     environment:
       - PYTHONUNBUFFERED=1
       - ADMIN_API_KEY=${ADMIN_API_KEY}

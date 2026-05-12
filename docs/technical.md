@@ -62,14 +62,33 @@ warm  → get_lod_grids (product.lod_grids already set)                   → lo
 
 ## URL contract
 
+### Data tiles (`/data_tiles`)
+
+Raw value-encoded RGBA tiles for WebGL shader consumption. Uses a custom geographic atlas grid — **not** Web Mercator.
+
 ```
-GET /tiles/manifest?from=YYYY-MM-DD&to=YYYY-MM-DD  → available dates for all products
-GET /tiles/{product_id}/{date}/{z}/{x}/{y}.png      → RGBA PNG tile
-GET /tiles/{product_id}/{date}/manifest.json        → bounds + value ranges + LOD grid config
-GET /tiles/{product_id}/{date}/point?lat=&lon=      → variable value at point
+GET /data_tiles/manifest?from=YYYY-MM-DD&to=YYYY-MM-DD  → available dates for all products
+GET /data_tiles/{product_id}/{date}/{z}/{x}/{y}.png      → raw RGBA PNG tile
+GET /data_tiles/{product_id}/{date}/manifest.json        → bounds + value ranges + LOD grid config
+GET /data_tiles/{product_id}/{date}/point?lat=&lon=      → variable value at point
 ```
 
 `z` = LOD level, `x` = chunk column (0 = westernmost), `y` = chunk row (0 = northernmost). Not Web Mercator — custom atlas grid in geographic (lat/lon) space.
+
+### Visual tiles (`/visual_tiles`)
+
+Colourised PNG tiles in standard Web Mercator (XYZ) — compatible with MapboxGL `raster` sources. Single-variable products only.
+
+```
+GET /visual_tiles/{product_id}/{date}/{z}/{x}/{y}.png?colormap=viridis&rescale=min,max
+```
+
+| Query param | Default | Description |
+|---|---|---|
+| `colormap` | `viridis` | Colormap name — rio-tiler built-in, matplotlib name, or custom registered name |
+| `rescale` | data min/max for the date | Value range as `min,max`, e.g. `-0.5,0.5` |
+
+`z`/`x`/`y` here are standard Web Mercator tile coordinates (as used by OpenStreetMap, MapboxGL, Leaflet, etc.).
 
 ### `/tiles/manifest` — products availability
 
@@ -97,18 +116,26 @@ Returns available dates for every registered product, filtered by an optional da
 
 ```
 titiler-project/
-  main.py                        ← single router wired up, CORS middleware, titiler COG router
-  constants.py                   ← Product dataclass + LOD algorithm; 4 active products
-                                    LOD_ZOOM_THRESHOLDS, DEFAULT_LOD_GRIDS, MAX_LODS, MIN_COARSEST_GRID
+  main.py                        ← mounts all routers, CORS middleware, lifespan startup
+  constants.py                   ← Product dataclass + LOD algorithm; CUSTOM_COLORMAPS registry
+                                    LOD_ZOOM_THRESHOLDS, MAX_LODS, MIN_COARSEST_GRID
+  products.json                  ← persisted product registrations (runtime, gitignored)
+  colormaps.json                 ← persisted custom colormap registrations (runtime, gitignored)
   docs/
     technical.md                 ← this file
     dataset.md                   ← per-store variable/dimension/chunking reference
     netcdf-vs-zarr.md            ← format comparison, IMOS product file analysis, performance data
   routers/
-    tiles.py                     ← /tiles
+    data_tiles.py                ← /data_tiles — raw value-encoded RGBA tiles for WebGL
+    visual_tiles.py              ← /visual_tiles — colourised Web Mercator XYZ tiles
+    products.py                  ← shared manifest + point endpoints included by both tile routers
+    admin.py                     ← /admin — product and colormap management (key-protected)
   services/
     loader.py                    ← Zarr store singleton + per-(date, variables) slice cache + get_lod_grids
-    renderer.py                  ← processed grid cache + chunk extract + PNG encode
+    renderer.py                  ← processed grid cache + chunk extract + PNG encode (data tiles)
+    visual_renderer.py           ← Web Mercator tile render + colormap lookup (visual tiles)
+    product_store.py             ← products.json read/write + in-memory PRODUCTS dict management
+    colormap_store.py            ← colormaps.json read/write + in-memory CUSTOM_COLORMAPS management
 ```
 
 ---
@@ -232,6 +259,36 @@ Size is controlled by the `PROCESSED_CACHE_SIZE` env var (default `400`). Should
 ### Thread safety
 
 All caches use `threading.Lock`. The processed grid cache additionally uses a `threading.Event` per in-flight key: concurrent requests for the same `(ds, lod)` wait for the first computation to complete rather than duplicating it.
+
+---
+
+## Colormap system
+
+Visual tiles support any colormap name that resolves through the following lookup chain (first match wins):
+
+1. **Custom registry** (`CUSTOM_COLORMAPS` in `constants.py` / `colormaps.json`) — names registered at compile time or via the admin API.
+2. **rio-tiler built-ins** — e.g. `viridis`, `plasma`, `inferno`.
+3. **matplotlib** — any name from `matplotlib.colormaps`, including diverging maps like `RdBu_r`, `coolwarm`.
+
+An unrecognised name returns `400 Bad Request`.
+
+### Custom colormaps
+
+Each custom colormap is a list of exactly 256 RGBA tuples — one per normalised byte value (0 = data minimum, 255 = data maximum after rescaling).
+
+**Compile-time defaults** live in `CUSTOM_COLORMAPS` in `constants.py` and are always available:
+
+```python
+CUSTOM_COLORMAPS: dict[str, list[tuple[int, int, int, int]]] = {
+    "blue_red": [(i, 0, 255 - i, 255) for i in range(256)],
+}
+```
+
+**Runtime additions** are persisted in `colormaps.json` and managed via the admin API (`POST /admin/colormaps`, `DELETE /admin/colormaps/{name}`). They are loaded on startup by `load_colormaps()` in `services/colormap_store.py` and take effect immediately without a server restart.
+
+### Cache behaviour
+
+`_colormap()` in `services/visual_renderer.py` is `@lru_cache`-d (max 64 entries). The cache is cleared automatically whenever a colormap is added, updated, or deleted via the admin API. Compile-time defaults (from `constants.py`) are never cleared.
 
 ---
 
