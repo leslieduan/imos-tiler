@@ -137,8 +137,8 @@ titiler-project/
     admin.py                     ← /admin — product and colormap management (key-protected)
   services/
     loader.py                    ← Zarr store singleton + per-(date, variables) slice cache + get_lod_grids
-    renderer.py                  ← processed grid cache + chunk extract + PNG encode (data tiles)
-    visual_renderer.py           ← Web Mercator tile render + colormap lookup (visual tiles)
+    data_renderer.py             ← processed grid cache + chunk extract + PNG encode (data tiles)
+    visual_renderer.py           ← Web Mercator tile render + bbox render + colormap lookup (visual tiles)
     product_store.py             ← products.json read/write + in-memory PRODUCTS dict management
     colormap_store.py            ← colormaps.json read/write + in-memory CUSTOM_COLORMAPS management
 ```
@@ -215,6 +215,42 @@ If you add a product whose Zarr store timestamps are stored differently (e.g. al
 ## Coordinate normalisation
 
 On store open, `_get_store` applies `COORD_NAMES = {"TIME": "time", "LATITUDE": "lat", "LONGITUDE": "lon"}` to rename any uppercase coordinate names to lowercase. This happens once per store URL and is stored in the singleton. All downstream code (renderer, manifest, point endpoint) can always assume `lat`/`lon`/`time` regardless of what the store uses natively.
+
+---
+
+## Visual renderer CRS requirements
+
+`services/visual_renderer.py` uses rio-tiler's `XarrayReader`, which requires data in **EPSG:4326** (geographic lat/lon degrees) with bounds strictly within `(−180, −90, 180, 90)`.
+
+### CRS guard
+
+`_to_scalar_parts` validates coordinate ranges before passing data to `XarrayReader`:
+
+- `lat ∈ [−90, 90]`
+- `lon ∈ [−180, 360]` (allows 0–360 convention before normalisation)
+
+A dataset in a projected CRS (e.g. UTM, GDA94/MGA) would have coordinate values in the millions and is rejected immediately with a descriptive `ValueError`. This prevents silent mis-rendering — the hardcoded `write_crs("EPSG:4326")` call would otherwise label projected coordinates as geographic without error.
+
+### Antimeridian handling
+
+Some stores use longitudes that extend past 180° (e.g. GSLA: 57–185°E). `XarrayReader` rejects any bounds outside `±180`, so these must be normalised. The approach depends on the data topology:
+
+**Detection — contiguity check**: normalise all `lon > 180` to negative values (`lon − 360`), then sort. If the maximum gap between adjacent sorted values is ≤ 2× the native resolution, the data is a contiguous global-style grid and wrap-and-sort is safe. A large gap (e.g. 232° for GSLA) means the data is a regional window straddling the antimeridian.
+
+**Global data (contiguous after normalisation)**: standard wrap-and-sort to `[−180, 180)`.
+
+**Regional antimeridian straddle** (e.g. GSLA 57–185°E):
+
+The dataset is split into two segments:
+
+| Segment | Lon range | Notes |
+|---|---|---|
+| Primary | `lon < 180` | Native coords unchanged |
+| Minor | `lon > 180` shifted by −360 | e.g. 180.2–185 → −179.8 to −175 |
+
+`lon == 180` is excluded from both segments to keep each segment's half-pixel rioxarray bounds strictly inside `±180`.
+
+Both segments are rendered independently using `XarrayReader` and the results are alpha-composited (non-transparent overlay pixels replace base pixels). Most tile/bbox requests only intersect one segment; the composite is a no-op for the non-intersecting segment. This ensures data near the antimeridian (e.g. the Tonga/Fiji strip for GSLA) is rendered correctly rather than silently dropped.
 
 ---
 
