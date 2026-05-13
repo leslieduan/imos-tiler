@@ -85,6 +85,7 @@ Colourised PNG tiles in standard Web Mercator (XYZ) — compatible with MapboxGL
 ```
 GET /visual_tiles/colormaps                                                        → all supported colormap names
 GET /visual_tiles/{product_id}/{date}/tiles/{z}/{x}/{y}.png?colormap=viridis&rescale=min,max
+GET /visual_tiles/{product_id}/{date}/bbox?bbox=minx,miny,maxx,maxy&width=256&height=256&colormap=viridis&rescale=min,max
 ```
 
 | Query param | Default | Description |

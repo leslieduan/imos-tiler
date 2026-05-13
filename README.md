@@ -72,7 +72,8 @@ Colourised Web Mercator (XYZ) tiles — compatible with MapboxGL `raster` source
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/visual_tiles/{product_id}/{date}/tiles/{z}/{x}/{y}.png` | Colourised PNG tile |
+| GET | `/visual_tiles/{product_id}/{date}/tiles/{z}/{x}/{y}.png` | Colourised PNG tile (Web Mercator XYZ) |
+| GET | `/visual_tiles/{product_id}/{date}/bbox?bbox=minx,miny,maxx,maxy` | Colourised PNG for a Web Mercator bbox (EPSG:3857) |
 | GET | `/visual_tiles/colormaps` | All supported colormap names grouped by source (custom, rio-tiler, matplotlib) |
 
 Query parameters for tile requests:

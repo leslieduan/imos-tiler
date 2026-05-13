@@ -43,6 +43,14 @@ Tiles that are geographically outside the product's data extent return a **trans
 
 ---
 
+## visual_tiles bbox endpoint
+
+`visual_tiles` also exposes `/{product_id}/{date}/bbox` which is **not** part of the tile pyramid. It renders an arbitrary Web Mercator bounding box (EPSG:3857) as a single PNG — the same rendering logic as the XYZ endpoint but using `rio-tiler`'s `reader.part()` instead of `reader.tile()`. This is for WMS-style consumers such as Mapbox GL's `{bbox-epsg-3857}` raster source placeholder, where the client manages the region directly rather than using a tile grid.
+
+`data_tiles` has no equivalent — it only exposes the LOD pyramid.
+
+---
+
 ## Comparison
 
 | | `data_tiles` | `visual_tiles` |
