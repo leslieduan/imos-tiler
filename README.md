@@ -1,6 +1,6 @@
 # titiler-project
 
-Tile server for IMOS ocean data products. Built with FastAPI, it serves map tiles from Zarr-backed stores. Products are managed at runtime via the admin API — no redeploy required.
+On-demand tile server for IMOS ocean data products. Tiles are generated in real time without pre-rendering — even cold requests are fast, and warm requests served from the in-memory cache are near-instant. Products are managed at runtime via the admin API — no redeploy required.
 
 ## Setup
 
@@ -12,6 +12,7 @@ uv sync --group dev
 ```
 
 Create a `.env` file in the project root (never commit this):
+
 ```bash
 ADMIN_API_KEY=your-secret-key
 ```
@@ -26,6 +27,7 @@ Server available at `http://localhost:8000`. Interactive API docs at `http://loc
 ### Docker
 
 Create a `.env` file in the project root before starting:
+
 ```bash
 ADMIN_API_KEY=your-secret-key
 ```
@@ -58,47 +60,48 @@ Server is available at `http://localhost:80`.
 
 Raw RGBA tiles for WebGL shader consumption — pixel bytes encode scientific values, not colours.
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/data_tiles/products` | List all registered products |
-| GET | `/data_tiles/manifest?from=&to=` | Available dates for all products (defaults to last 3 months) |
-| GET | `/data_tiles/{product_id}/{date}/tiles/{z}/{x}/{y}.png` | Raw value-encoded tile |
-| GET | `/data_tiles/{product_id}/{date}/manifest.json` | Tile config (bounds, value ranges, LOD grid) |
-| GET | `/data_tiles/{product_id}/{date}/point?lat=&lon=` | Point value lookup |
+| Method | Path                                                    | Description                                                  |
+| ------ | ------------------------------------------------------- | ------------------------------------------------------------ |
+| GET    | `/data_tiles/products`                                  | List all registered products                                 |
+| GET    | `/data_tiles/manifest?from=&to=`                        | Available dates for all products (defaults to last 3 months) |
+| GET    | `/data_tiles/{product_id}/{date}/tiles/{z}/{x}/{y}.png` | Raw value-encoded tile                                       |
+| GET    | `/data_tiles/{product_id}/{date}/manifest.json`         | Tile config (bounds, value ranges, LOD grid)                 |
+| GET    | `/data_tiles/{product_id}/{date}/point?lat=&lon=`       | Point value lookup                                           |
 
 ### Visual tiles (`/visual_tiles`)
 
 Colourised Web Mercator (XYZ) tiles — compatible with MapboxGL `raster` sources and any slippy-map library. Single-variable products only.
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/visual_tiles/{product_id}/{date}/tiles/{z}/{x}/{y}.png` | Colourised PNG tile (Web Mercator XYZ) |
-| GET | `/visual_tiles/{product_id}/{date}/bbox?bbox=minx,miny,maxx,maxy` | Colourised PNG for a Web Mercator bbox (EPSG:3857) |
-| GET | `/visual_tiles/colormaps` | All supported colormap names grouped by source (custom, rio-tiler, matplotlib) |
+| Method | Path                                                              | Description                                                                                                       |
+| ------ | ----------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| GET    | `/visual_tiles/{product_id}/{date}/tiles/{z}/{x}/{y}.png`         | Colourised PNG tile (Web Mercator XYZ)                                                                            |
+| GET    | `/visual_tiles/{product_id}/{date}/bbox?bbox=minx,miny,maxx,maxy` | Colourised PNG for an arbitrary bbox (EPSG:4326 degrees by default; pass `crs=EPSG:3857` for Web Mercator meters) |
+| GET    | `/visual_tiles/colormaps`                                         | All supported colormap names grouped by source (custom, rio-tiler, matplotlib)                                    |
 
 Query parameters for tile requests:
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `colormap` | `viridis` | Colormap name — any matplotlib or rio-tiler built-in, or a custom name registered via the admin API |
-| `rescale` | auto (data min/max for the date) | Value range as `min,max`, e.g. `-0.5,0.5` |
+| Parameter  | Default                          | Description                                                                                         |
+| ---------- | -------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `colormap` | `viridis`                        | Colormap name — any matplotlib or rio-tiler built-in, or a custom name registered via the admin API |
+| `rescale`  | auto (data min/max for the date) | Value range as `min,max`, e.g. `-0.5,0.5`                                                           |
 
 ### Admin (`/admin`)
 
 Requires `X-Admin-Key` header. Admin endpoints are blocked at the nginx layer and only reachable at port 8000 — on EC2, use an SSH tunnel (`ssh -L 8000:localhost:8000 ec2-user@your-ec2-ip`) before calling them.
 
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/admin/products` | Register a new product |
-| DELETE | `/admin/products/{id}` | Remove a product |
-| POST | `/admin/colormaps` | Register a new custom colormap |
-| DELETE | `/admin/colormaps/{name}` | Remove a custom colormap |
+| Method | Path                      | Description                    |
+| ------ | ------------------------- | ------------------------------ |
+| POST   | `/admin/products`         | Register a new product         |
+| DELETE | `/admin/products/{id}`    | Remove a product               |
+| POST   | `/admin/colormaps`        | Register a new custom colormap |
+| DELETE | `/admin/colormaps/{name}` | Remove a custom colormap       |
 
 ## Managing products
 
 Products are stored in `products.json` and loaded on startup. Changes via the admin API take effect immediately without a restart.
 
 **Add a product:**
+
 ```bash
 curl -X POST http://localhost:8000/admin/products \
   -H "X-Admin-Key: your-secret-key" \
@@ -111,6 +114,7 @@ curl -X POST http://localhost:8000/admin/products \
 ```
 
 **Add a product with multiple variables (e.g. UV current):**
+
 ```bash
 curl -X POST http://localhost:8000/admin/products \
   -H "X-Admin-Key: your-secret-key" \
@@ -123,6 +127,7 @@ curl -X POST http://localhost:8000/admin/products \
 ```
 
 **Delete a product:**
+
 ```bash
 curl -X DELETE http://localhost:8000/admin/products/sea_level_anomaly \
   -H "X-Admin-Key: your-secret-key"
@@ -135,6 +140,7 @@ Custom colormaps are stored in `colormaps.json` and loaded on startup. Changes v
 Each colormap is exactly 256 RGBA entries (one per normalised byte value 0–255).
 
 **Add a colormap:**
+
 ```bash
 curl -X POST http://localhost:8000/admin/colormaps \
   -H "X-Admin-Key: your-secret-key" \
@@ -146,6 +152,7 @@ curl -X POST http://localhost:8000/admin/colormaps \
 ```
 
 **Delete a colormap:**
+
 ```bash
 curl -X DELETE http://localhost:8000/admin/colormaps/imos_sst \
   -H "X-Admin-Key: your-secret-key"
@@ -183,12 +190,14 @@ uv run pre-commit install --hook-type pre-commit --hook-type commit-msg --hook-t
 ```
 
 **Commit messages** follow [Conventional Commits](https://www.conventionalcommits.org/):
+
 ```
 feat(zarr): add manifest endpoint
 fix: handle missing date in loader
 ```
 
 **Branch names** must be `main` or `type/description`:
+
 ```
 feat/add-sst-renderer
 fix/lod-off-by-one
