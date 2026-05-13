@@ -375,3 +375,128 @@ First user request for a recently prewarmed date arrives after step 3 completes:
 - `_slice_in_flight` stampede prevention is untouched.
 - Redis being unavailable never surfaces to a caller — all Redis calls are wrapped in
   try/except; the system degrades to L1 + S3.
+
+---
+
+## Disk alternative
+
+### When to choose disk over Redis
+
+Redis capacity is bounded by RAM (expensive). For large-grid products like satellite_ssta
+(62 MB/date raw, 18 MB lz4), caching more than ~30 dates per product pushes Redis beyond
+practical limits. Local disk sidesteps this entirely — a 100 GB EBS volume costs ~$8/month
+and holds months of cache for all products with no eviction pressure.
+
+| | Redis (Docker Compose / ElastiCache) | Local disk (EC2 NVMe) |
+|---|---|---|
+| Capacity | 512 MB–4 GB (expensive per GB) | 10s–100s GB (cheap) |
+| Read latency | ~1ms network + ~25ms decompress | ~5ms disk + ~25ms decompress |
+| Satellite 30 days lz4 | 540 MB — hits limit | 540 MB — trivial |
+| 1 month+ all 10 products | ~5 GB — infeasible | ~5 GB — no problem |
+| Shared across instances | Yes (ElastiCache) | No — each instance warms itself |
+| New instance cold window | Instant (shared cache) | ~1–2 min (parallel prewarm) |
+| Survives container restart | Yes | Yes (bind-mounted host path) |
+| Extra infra | Redis container / ElastiCache | Nothing (host EBS) |
+
+### ECS launch types
+
+ECS is a container scheduler — "launch type" decides where containers actually run:
+
+- **Fargate**: AWS manages the underlying servers. You specify CPU/RAM and AWS picks the
+  machine. You never touch the host, so you cannot access its disk. Local disk cache is not
+  available; you must use EFS (shared network filesystem, 5–50ms reads) or ElastiCache Redis.
+
+- **EC2 launch type**: You provision your own EC2 instances and register them with ECS.
+  ECS schedules containers on those instances. You own the machine — bind-mount the host
+  disk into the container exactly like Docker Compose on a plain EC2 instance.
+
+### Disk cache with ECS EC2 launch type
+
+Local disk + EC2 launch type is a strong combination for this workload:
+
+- IMOS ocean data is the same for every instance (not user-session-specific), so each
+  instance independently warms an identical cache — no sharing needed.
+- ECS EC2 instances are long-lived. Once warm, the disk cache stays warm across container
+  restarts as long as the instance is up. Redis in Docker Compose has the same property,
+  but disk is faster and holds far more data.
+- Scaling out a new instance triggers one cold prewarm (~1–2 min with parallel threads),
+  then the instance is fully fast. At demo/small scale, scale-out events are rare enough
+  that this is acceptable.
+
+**ECS task definition bind mount (equivalent to Docker Compose volume):**
+
+```json
+"volumes": [{"name": "slice-cache", "host": {"sourcePath": "/data/slice_cache"}}],
+"mountPoints": [{"sourceVolume": "slice-cache", "containerPath": "/app/slice_cache"}]
+```
+
+The `/data/slice_cache` path lives on the EC2 host's EBS root volume (or a separately
+attached EBS data volume). It persists across task stops and starts on the same host.
+
+### Implementation changes (disk vs Redis)
+
+The cache logic in `loader.py` is the same structure — check disk before S3, write to
+disk from prewarm/cron. Serialisation is identical: `lz4.frame.compress(pickle.dumps(ds))`
+written to a file instead of a Redis key.
+
+```
+Cache path layout:
+  {DISK_CACHE_PATH}/
+    {product_id}/
+      {date}.pkl.lz4
+```
+
+**`load_slice` disk L2 read** (replaces Redis probe):
+
+```python
+cache_file = _disk_cache_path(product_id, date)
+if cache_file.exists():
+    with cache_file.open("rb") as f:
+        ds = pickle.loads(lz4.frame.decompress(f.read()))
+    with _slice_lock:
+        _slice_cache[cache_key] = ds
+    return ds
+```
+
+**Eviction** — sort files by size ascending then date ascending (matches Redis strategy:
+small and old go first). Use `os.path.getsize` instead of `r.memory_usage`:
+
+```python
+entries = []
+for product in products:
+    for f in Path(DISK_CACHE_PATH, product.id).glob("*.pkl.lz4"):
+        date = f.stem.replace(".pkl", "")
+        entries.append((f.stat().st_size, date, product, f))
+
+entries.sort(key=lambda e: (e[0], e[1]))  # small + old first
+
+total = sum(f.stat().st_size for f in Path(DISK_CACHE_PATH).rglob("*.pkl.lz4"))
+limit = int(os.environ.get("DISK_CACHE_LIMIT_GB", 20)) * 1024 ** 3
+for size, date, product, f in entries:
+    if total <= limit * 0.85:
+        break
+    f.unlink()
+    total -= size
+```
+
+`DISK_CACHE_LIMIT_GB` defaults to `20` (20 GB). Set lower on small instances.
+
+**New environment variables for disk mode:**
+
+| Variable | Default | Description |
+|---|---|---|
+| `DISK_CACHE_PATH` | unset | Absolute path for disk cache. If unset, disk cache is disabled. |
+| `DISK_CACHE_LIMIT_GB` | `20` | Max disk usage in GB before eviction runs. |
+
+Both `REDIS_URL` and `DISK_CACHE_PATH` can be checked independently — if neither is set,
+the system runs L1 + S3 only.
+
+### Upgrade path
+
+| Phase | Deployment | L2 cache |
+|---|---|---|
+| Now | EC2 + Docker Compose | Local disk (`DISK_CACHE_PATH`) |
+| ECS EC2 launch type | ECS + EC2 ASG | Local disk (bind mount, same env var) |
+| ECS Fargate (if needed) | ECS + Fargate | ElastiCache Redis (`REDIS_URL`) |
+
+No code changes required between phases — only env vars change.
