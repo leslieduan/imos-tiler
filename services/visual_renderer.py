@@ -8,6 +8,7 @@ from pyproj import Transformer
 from rio_tiler.colormap import cmap as _rio_cmap
 from rio_tiler.errors import TileOutsideBounds
 from rio_tiler.io.xarray import XarrayReader
+from rioxarray.exceptions import NoDataInBounds
 
 from constants import CUSTOM_COLORMAPS
 
@@ -104,18 +105,19 @@ def render_tile(
     return img.render(img_format="PNG", colormap=_colormap(colormap_name))
 
 
-def render_part(
+def render_bbox(
     ds: xr.Dataset,
     variable: str,
-    bbox_3857: tuple[float, float, float, float],
+    bbox: tuple[float, float, float, float],
     width: int,
     height: int,
     colormap_name: str = "viridis",
     rescale: tuple[float, float] | None = None,
+    crs: str = "EPSG:4326",
 ) -> bytes:
-    """Return a PNG image for an arbitrary Web Mercator bbox (EPSG:3857).
+    """Return a PNG image for an arbitrary bbox.
 
-    Used by the Mapbox WMS-style raster source ({bbox-epsg-3857} placeholder).
+    bbox must be (minx, miny, maxx, maxy) in the given crs ('EPSG:4326' degrees or 'EPSG:3857' meters).
     Returns a fully transparent tile when the bbox does not intersect the data.
     """
     da = _to_scalar(ds, variable)
@@ -128,9 +130,12 @@ def render_part(
     else:
         vmin, vmax = rescale
 
-    minx, miny, maxx, maxy = bbox_3857
-    lon_min, lat_min = _mercator_to_wgs84.transform(minx, miny)
-    lon_max, lat_max = _mercator_to_wgs84.transform(maxx, maxy)
+    minx, miny, maxx, maxy = bbox
+    if crs == "EPSG:3857":
+        lon_min, lat_min = _mercator_to_wgs84.transform(minx, miny)
+        lon_max, lat_max = _mercator_to_wgs84.transform(maxx, maxy)
+    else:
+        lon_min, lat_min, lon_max, lat_max = minx, miny, maxx, maxy
 
     try:
         with XarrayReader(da) as reader:
@@ -140,7 +145,7 @@ def render_part(
                 height=height,
                 reproject_method="bilinear",
             )
-    except TileOutsideBounds:
+    except (TileOutsideBounds, NoDataInBounds):
         return empty_png()
 
     span = vmax - vmin or 1.0

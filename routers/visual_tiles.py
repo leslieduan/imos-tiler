@@ -3,7 +3,7 @@ from fastapi.responses import JSONResponse, Response
 
 from services.colormap_store import list_colormaps
 from services.loader import load_slice
-from services.visual_renderer import _colormap, render_part, render_tile
+from services.visual_renderer import _colormap, render_bbox, render_tile
 
 from .products import _get_product_or_404
 from .products import router as products_router
@@ -88,21 +88,26 @@ def get_tile(
     "/{product_id}/{date}/bbox",
     summary="Visualisation tile by bbox",
     description=(
-        "Renders a colourised PNG for an arbitrary Web Mercator bounding box (EPSG:3857). "
-        "Compatible with Mapbox GL raster sources using the {bbox-epsg-3857} placeholder."
+        "Renders a colourised PNG for an arbitrary bounding box. "
+        "Accepts EPSG:4326 geographic coordinates (degrees, default) or EPSG:3857 Web Mercator (meters) via the crs parameter. "
+        "Compatible with Mapbox GL raster sources using the {bbox-epsg-3857} placeholder (pass crs=EPSG:3857)."
     ),
 )
-def get_tile_by_bbox(
+def get_bbox(
     product_id: str = Path(...),
     date: str = Path(..., pattern=r"^\d{4}-\d{2}-\d{2}$"),
     bbox: str = Query(
         ...,
-        description="Bounding box in EPSG:3857 as 'minx,miny,maxx,maxy'.",
+        description="Bounding box as 'minx,miny,maxx,maxy' in the CRS specified by the crs parameter.",
     ),
     width: int = Query(256, ge=1, le=2048),
     height: int = Query(256, ge=1, le=2048),
     colormap_name: str = Query("viridis", alias="colormap"),
     rescale: str | None = Query(None, description="Value range as 'min,max'."),
+    crs: str = Query(
+        "EPSG:4326",
+        description="Coordinate reference system of the bbox. 'EPSG:4326' (default) for geographic degrees; 'EPSG:3857' for Web Mercator meters (Mapbox {bbox-epsg-3857}).",
+    ),
 ):
     try:
         _colormap(colormap_name)
@@ -116,12 +121,14 @@ def get_tile_by_bbox(
             detail=f"Product '{product_id}' has multiple variables; visual tiles support single-variable products only.",
         )
 
+    crs = crs.upper()
+    if crs not in ("EPSG:4326", "EPSG:3857"):
+        raise HTTPException(status_code=400, detail="crs must be 'EPSG:4326' or 'EPSG:3857'")
+
     try:
         minx, miny, maxx, maxy = (float(v) for v in bbox.split(","))
     except ValueError as e:
-        raise HTTPException(
-            status_code=400, detail="bbox must be 'minx,miny,maxx,maxy' in EPSG:3857"
-        ) from e
+        raise HTTPException(status_code=400, detail="bbox must be 'minx,miny,maxx,maxy'") from e
 
     rescale_range: tuple[float, float] | None = None
     if rescale:
@@ -139,7 +146,7 @@ def get_tile_by_bbox(
         raise HTTPException(status_code=404, detail=str(e)) from e
 
     try:
-        png = render_part(
+        png = render_bbox(
             ds,
             product.variable,
             (minx, miny, maxx, maxy),
@@ -147,6 +154,7 @@ def get_tile_by_bbox(
             height,
             colormap_name,
             rescale_range,
+            crs=crs,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
