@@ -4,11 +4,15 @@ from functools import lru_cache
 import numpy as np
 import xarray as xr
 from PIL import Image
+from pyproj import Transformer
 from rio_tiler.colormap import cmap as _rio_cmap
 from rio_tiler.errors import TileOutsideBounds
 from rio_tiler.io.xarray import XarrayReader
+from rioxarray.exceptions import NoDataInBounds
 
 from constants import CUSTOM_COLORMAPS
+
+_mercator_to_wgs84 = Transformer.from_crs("EPSG:3857", "EPSG:4326", always_xy=True)
 
 TILE_SIZE = 256
 
@@ -52,19 +56,82 @@ def empty_png() -> bytes:
     return buf.getvalue()
 
 
-def _to_scalar(ds: xr.Dataset, variable: str) -> xr.DataArray:
-    """Return a 2-D (lat × lon) float32 DataArray ready for XarrayReader."""
+def _composite_png(base: bytes, overlay: bytes) -> bytes:
+    """Merge two same-size RGBA PNGs: non-transparent overlay pixels replace base pixels."""
+    base_arr = np.array(Image.open(io.BytesIO(base)).convert("RGBA"))
+    over_arr = np.array(Image.open(io.BytesIO(overlay)).convert("RGBA"))
+    mask = over_arr[..., 3] > 0
+    base_arr[mask] = over_arr[mask]
+    buf = io.BytesIO()
+    Image.fromarray(base_arr, "RGBA").save(buf, format="PNG", optimize=False)
+    return buf.getvalue()
+
+
+def _apply_crs(da: xr.DataArray) -> xr.DataArray:
+    return da.rio.write_crs("EPSG:4326").rio.set_spatial_dims(x_dim="lon", y_dim="lat")
+
+
+def _to_scalar_parts(ds: xr.Dataset, variable: str) -> list[xr.DataArray]:
+    """Return float32 DataArrays ready for XarrayReader.
+
+    Returns one element in the common case. Returns two elements when the data
+    straddles the antimeridian (e.g. GSLA: 57–185°E):
+      - primary:  lon < 180  (unchanged)
+      - minor:    lon > 180  shifted by −360  (e.g. 180.2–185 → −179.8 to −175)
+
+    Detection uses a contiguity check on the normalised coordinate array rather
+    than a heuristic threshold: if wrapping lon > 180 to negative values leaves a
+    gap larger than 2× the native resolution, the data is a regional straddle, not
+    a global periodic grid.
+
+    lon == 180 is excluded from both segments so that rioxarray's half-pixel padding
+    keeps each segment's bounds strictly inside the ±180 limit rio_tiler enforces.
+    """
     da = ds[variable].astype(np.float32)
 
-    # Some stores use 0–360 longitude convention (values > 180).
-    # rioxarray requires -180 to 180, so wrap and re-sort before handing to XarrayReader.
-    if float(da.lon.max()) > 180:
-        da = da.assign_coords(lon=((da.lon + 180) % 360) - 180)
-        da = da.sortby("lon")
+    lat_min, lat_max = float(da.lat.min()), float(da.lat.max())
+    lon_min, lon_max = float(da.lon.min()), float(da.lon.max())
+    if not (-90 <= lat_min and lat_max <= 90 and -180 <= lon_min and lon_max <= 360):
+        raise ValueError(
+            f"Dataset '{variable}' does not appear to be in EPSG:4326: "
+            f"lat [{lat_min:.1f}, {lat_max:.1f}], lon [{lon_min:.1f}, {lon_max:.1f}]. "
+            "Expected lat ∈ [−90, 90] and lon ∈ [−180, 360]."
+        )
 
-    da = da.rio.write_crs("EPSG:4326")
-    da = da.rio.set_spatial_dims(x_dim="lon", y_dim="lat")
-    return da
+    if float(da.lon.max()) > 180:
+        normalised = np.where(da.lon.values > 180, da.lon.values - 360, da.lon.values)
+        native_res = abs(float(da.lon.values[1] - da.lon.values[0]))
+        max_gap = float(np.max(np.diff(np.sort(normalised))))
+
+        if max_gap <= 2 * native_res:
+            # Contiguous after normalisation → global-style wrap is safe.
+            da = da.assign_coords(lon=("lon", normalised)).sortby("lon")
+            return [_apply_crs(da)]
+
+        # Antimeridian straddle: split into two contiguous segments.
+        # Exclude exactly lon=180 from both sides — its half-pixel bound would
+        # land at ±180.x, which exceeds rio_tiler's strict ±180 check.
+        primary = _apply_crs(da.sel(lon=da.lon[da.lon < 180]))
+        minor_da = da.sel(lon=da.lon[da.lon > 180])
+        minor_da = _apply_crs(
+            minor_da.assign_coords(lon=("lon", minor_da.lon.values - 360)).sortby("lon")
+        )
+        return [_apply_crs(primary), minor_da]
+
+    return [_apply_crs(da)]
+
+
+def _rescale_range(
+    parts: list[xr.DataArray],
+    rescale: tuple[float, float] | None,
+) -> tuple[float, float] | None:
+    """Return (vmin, vmax) from rescale arg or data range; None if no valid data."""
+    if rescale is not None:
+        return rescale
+    all_valid = np.concatenate([p.values[~np.isnan(p.values)].ravel() for p in parts])
+    if not all_valid.size:
+        return None
+    return float(all_valid.min()), float(all_valid.max())
 
 
 def render_tile(
@@ -80,22 +147,73 @@ def render_tile(
 
     Returns a fully transparent tile for tiles outside the data extent.
     """
-    da = _to_scalar(ds, variable)
-
-    if rescale is None:
-        valid = da.values[~np.isnan(da.values)]
-        if not valid.size:
-            return empty_png()
-        vmin, vmax = float(valid.min()), float(valid.max())
-    else:
-        vmin, vmax = rescale
-
-    try:
-        with XarrayReader(da) as reader:
-            img = reader.tile(x, y, z, reproject_method="bilinear")
-    except TileOutsideBounds:
+    parts = _to_scalar_parts(ds, variable)
+    vrange = _rescale_range(parts, rescale)
+    if vrange is None:
         return empty_png()
-
+    vmin, vmax = vrange
     span = vmax - vmin or 1.0
-    img.rescale(in_range=[(vmin, vmin + span)])
-    return img.render(img_format="PNG", colormap=_colormap(colormap_name))
+    cm = _colormap(colormap_name)
+    result: bytes | None = None
+
+    for da in parts:
+        try:
+            with XarrayReader(da) as reader:
+                img = reader.tile(x, y, z, reproject_method="bilinear")
+        except TileOutsideBounds:
+            continue
+        img.rescale(in_range=[(vmin, vmin + span)])
+        rendered = img.render(img_format="PNG", colormap=cm)
+        result = rendered if result is None else _composite_png(result, rendered)
+
+    return result or empty_png()
+
+
+def render_bbox(
+    ds: xr.Dataset,
+    variable: str,
+    bbox: tuple[float, float, float, float],
+    width: int,
+    height: int,
+    colormap_name: str = "viridis",
+    rescale: tuple[float, float] | None = None,
+    crs: str = "EPSG:4326",
+) -> bytes:
+    """Return a PNG image for an arbitrary bbox.
+
+    bbox must be (minx, miny, maxx, maxy) in the given crs ('EPSG:4326' degrees or 'EPSG:3857' meters).
+    Returns a fully transparent tile when the bbox does not intersect the data.
+    """
+    parts = _to_scalar_parts(ds, variable)
+    vrange = _rescale_range(parts, rescale)
+    if vrange is None:
+        return empty_png()
+    vmin, vmax = vrange
+    span = vmax - vmin or 1.0
+    cm = _colormap(colormap_name)
+
+    minx, miny, maxx, maxy = bbox
+    if crs == "EPSG:3857":
+        lon_min, lat_min = _mercator_to_wgs84.transform(minx, miny)
+        lon_max, lat_max = _mercator_to_wgs84.transform(maxx, maxy)
+    else:
+        lon_min, lat_min, lon_max, lat_max = minx, miny, maxx, maxy
+
+    result: bytes | None = None
+
+    for da in parts:
+        try:
+            with XarrayReader(da) as reader:
+                img = reader.part(
+                    (lon_min, lat_min, lon_max, lat_max),
+                    width=width,
+                    height=height,
+                    reproject_method="bilinear",
+                )
+        except (TileOutsideBounds, NoDataInBounds):
+            continue
+        img.rescale(in_range=[(vmin, vmin + span)])
+        rendered = img.render(img_format="PNG", colormap=cm)
+        result = rendered if result is None else _composite_png(result, rendered)
+
+    return result or empty_png()

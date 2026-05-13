@@ -62,7 +62,7 @@ Raw RGBA tiles for WebGL shader consumption — pixel bytes encode scientific va
 |--------|------|-------------|
 | GET | `/data_tiles/products` | List all registered products |
 | GET | `/data_tiles/manifest?from=&to=` | Available dates for all products (defaults to last 3 months) |
-| GET | `/data_tiles/{product_id}/{date}/{z}/{x}/{y}.png` | Raw value-encoded tile |
+| GET | `/data_tiles/{product_id}/{date}/tiles/{z}/{x}/{y}.png` | Raw value-encoded tile |
 | GET | `/data_tiles/{product_id}/{date}/manifest.json` | Tile config (bounds, value ranges, LOD grid) |
 | GET | `/data_tiles/{product_id}/{date}/point?lat=&lon=` | Point value lookup |
 
@@ -72,7 +72,8 @@ Colourised Web Mercator (XYZ) tiles — compatible with MapboxGL `raster` source
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/visual_tiles/{product_id}/{date}/{z}/{x}/{y}.png` | Colourised PNG tile |
+| GET | `/visual_tiles/{product_id}/{date}/tiles/{z}/{x}/{y}.png` | Colourised PNG tile (Web Mercator XYZ) |
+| GET | `/visual_tiles/{product_id}/{date}/bbox?bbox=minx,miny,maxx,maxy` | Colourised PNG for a Web Mercator bbox (EPSG:3857) |
 | GET | `/visual_tiles/colormaps` | All supported colormap names grouped by source (custom, rio-tiler, matplotlib) |
 
 Query parameters for tile requests:
@@ -156,6 +157,7 @@ See [`docs/security.md`](docs/security.md) for how admin endpoints are secured i
 
 ## Docs
 
+- [`docs/tile_system.md`](docs/tile_system.md) — tile coordinate systems: how `data_tiles` and `visual_tiles` use `z`/`x`/`y` differently
 - [`docs/technical.md`](docs/technical.md) — architecture, LOD algorithm, caching strategy, PNG encoding contract
 - [`docs/concurrency.md`](docs/concurrency.md) — concurrency model, capacity evaluation, thread pool and cache sizing
 - [`docs/dataset.md`](docs/dataset.md) — per-store variable/dimension/chunking reference
