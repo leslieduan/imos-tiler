@@ -62,6 +62,8 @@ warm  → get_lod_grids (product.lod_grids already set)                   → lo
 
 ## URL contract
 
+The two tile APIs use `z`/`x`/`y` with fundamentally different coordinate systems — see [`docs/tile_system.md`](tile_system.md) for a focused explanation.
+
 ### Data tiles (`/data_tiles`)
 
 Raw value-encoded RGBA tiles for WebGL shader consumption. Uses a custom geographic atlas grid — **not** Web Mercator.

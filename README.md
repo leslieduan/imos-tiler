@@ -156,6 +156,7 @@ See [`docs/security.md`](docs/security.md) for how admin endpoints are secured i
 
 ## Docs
 
+- [`docs/tile_system.md`](docs/tile_system.md) — tile coordinate systems: how `data_tiles` and `visual_tiles` use `z`/`x`/`y` differently
 - [`docs/technical.md`](docs/technical.md) — architecture, LOD algorithm, caching strategy, PNG encoding contract
 - [`docs/concurrency.md`](docs/concurrency.md) — concurrency model, capacity evaluation, thread pool and cache sizing
 - [`docs/dataset.md`](docs/dataset.md) — per-store variable/dimension/chunking reference
