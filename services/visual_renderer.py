@@ -4,11 +4,14 @@ from functools import lru_cache
 import numpy as np
 import xarray as xr
 from PIL import Image
+from pyproj import Transformer
 from rio_tiler.colormap import cmap as _rio_cmap
 from rio_tiler.errors import TileOutsideBounds
 from rio_tiler.io.xarray import XarrayReader
 
 from constants import CUSTOM_COLORMAPS
+
+_mercator_to_wgs84 = Transformer.from_crs("EPSG:3857", "EPSG:4326", always_xy=True)
 
 TILE_SIZE = 256
 
@@ -93,6 +96,50 @@ def render_tile(
     try:
         with XarrayReader(da) as reader:
             img = reader.tile(x, y, z, reproject_method="bilinear")
+    except TileOutsideBounds:
+        return empty_png()
+
+    span = vmax - vmin or 1.0
+    img.rescale(in_range=[(vmin, vmin + span)])
+    return img.render(img_format="PNG", colormap=_colormap(colormap_name))
+
+
+def render_part(
+    ds: xr.Dataset,
+    variable: str,
+    bbox_3857: tuple[float, float, float, float],
+    width: int,
+    height: int,
+    colormap_name: str = "viridis",
+    rescale: tuple[float, float] | None = None,
+) -> bytes:
+    """Return a PNG image for an arbitrary Web Mercator bbox (EPSG:3857).
+
+    Used by the Mapbox WMS-style raster source ({bbox-epsg-3857} placeholder).
+    Returns a fully transparent tile when the bbox does not intersect the data.
+    """
+    da = _to_scalar(ds, variable)
+
+    if rescale is None:
+        valid = da.values[~np.isnan(da.values)]
+        if not valid.size:
+            return empty_png()
+        vmin, vmax = float(valid.min()), float(valid.max())
+    else:
+        vmin, vmax = rescale
+
+    minx, miny, maxx, maxy = bbox_3857
+    lon_min, lat_min = _mercator_to_wgs84.transform(minx, miny)
+    lon_max, lat_max = _mercator_to_wgs84.transform(maxx, maxy)
+
+    try:
+        with XarrayReader(da) as reader:
+            img = reader.part(
+                (lon_min, lat_min, lon_max, lat_max),
+                width=width,
+                height=height,
+                reproject_method="bilinear",
+            )
     except TileOutsideBounds:
         return empty_png()
 

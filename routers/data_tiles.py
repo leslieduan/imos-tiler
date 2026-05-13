@@ -15,7 +15,7 @@ _PRODUCT_EX: dict[str, Example] = {"default": Example(value="sea_level_anomaly")
 _DATE_EX: dict[str, Example] = {"default": Example(value="2024-02-24")}
 
 
-@router.get("/{product_id}/{date}/{z}/{x}/{y}.png")
+@router.get("/{product_id}/{date}/tiles/{z}/{x}/{y}.png")
 def get_tile(
     product_id: str = Path(openapi_examples=_PRODUCT_EX),
     date: str = Path(pattern=r"^\d{4}-\d{2}-\d{2}$", openapi_examples=_DATE_EX),

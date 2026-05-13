@@ -71,7 +71,7 @@ Raw value-encoded RGBA tiles for WebGL shader consumption. Uses a custom geograp
 ```
 GET /data_tiles/products                                 → list all registered products
 GET /data_tiles/manifest?from=YYYY-MM-DD&to=YYYY-MM-DD  → available dates for all products
-GET /data_tiles/{product_id}/{date}/{z}/{x}/{y}.png      → raw RGBA PNG tile
+GET /data_tiles/{product_id}/{date}/tiles/{z}/{x}/{y}.png → raw RGBA PNG tile
 GET /data_tiles/{product_id}/{date}/manifest.json        → bounds + value ranges + LOD grid config
 GET /data_tiles/{product_id}/{date}/point?lat=&lon=      → variable value at point
 ```
@@ -84,7 +84,7 @@ Colourised PNG tiles in standard Web Mercator (XYZ) — compatible with MapboxGL
 
 ```
 GET /visual_tiles/colormaps                                                        → all supported colormap names
-GET /visual_tiles/{product_id}/{date}/{z}/{x}/{y}.png?colormap=viridis&rescale=min,max
+GET /visual_tiles/{product_id}/{date}/tiles/{z}/{x}/{y}.png?colormap=viridis&rescale=min,max
 ```
 
 | Query param | Default | Description |

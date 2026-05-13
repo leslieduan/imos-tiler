@@ -1,6 +1,6 @@
 # Tile System
 
-This project serves two independent tile APIs from the same underlying Zarr data: `data_tiles` and `visual_tiles`. They share the URL shape `/{product_id}/{date}/{z}/{x}/{y}.png` but `z`, `x`, `y` mean entirely different things in each.
+This project serves two independent tile APIs from the same underlying Zarr data: `data_tiles` and `visual_tiles`. They share the URL shape `/{product_id}/{date}/tiles/{z}/{x}/{y}.png` but `z`, `x`, `y` mean entirely different things in each.
 
 ---
 

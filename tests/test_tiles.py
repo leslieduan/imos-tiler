@@ -32,7 +32,7 @@ def _make_ds() -> xr.Dataset:
 
 
 def test_tile_unknown_product():
-    response = client.get("/data_tiles/nonexistent/2024-01-01/1/0/0.png")
+    response = client.get("/data_tiles/nonexistent/2024-01-01/tiles/1/0/0.png")
     assert response.status_code == 404
 
 
@@ -50,7 +50,7 @@ def test_tile_out_of_bounds():
         patch("routers.data_tiles.get_lod_grids", return_value=_LOD_GRIDS),
         patch("routers.products.load_slice", return_value=_make_ds()),
     ):
-        response = client.get("/data_tiles/sea_level_anomaly/2024-01-01/1/5/5.png")
+        response = client.get("/data_tiles/sea_level_anomaly/2024-01-01/tiles/1/5/5.png")
     assert response.status_code == 404
 
 
@@ -59,7 +59,7 @@ def test_tile_missing_date():
         patch("routers.data_tiles.get_lod_grids", return_value=_LOD_GRIDS),
         patch("routers.products.load_slice", side_effect=FileNotFoundError("No data")),
     ):
-        response = client.get("/data_tiles/sea_level_anomaly/9999-01-01/1/0/0.png")
+        response = client.get("/data_tiles/sea_level_anomaly/9999-01-01/tiles/1/0/0.png")
     assert response.status_code == 404
 
 
@@ -69,7 +69,7 @@ def test_tile_ok():
         patch("routers.products.load_slice", return_value=_make_ds()),
         patch("routers.data_tiles.render_tile", return_value=b"\x89PNG\r\n\x1a\n"),
     ):
-        response = client.get("/data_tiles/sea_level_anomaly/2024-01-01/1/0/0.png")
+        response = client.get("/data_tiles/sea_level_anomaly/2024-01-01/tiles/1/0/0.png")
     assert response.status_code == 200
     assert response.headers["content-type"] == "image/png"
 

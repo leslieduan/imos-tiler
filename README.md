@@ -62,7 +62,7 @@ Raw RGBA tiles for WebGL shader consumption — pixel bytes encode scientific va
 |--------|------|-------------|
 | GET | `/data_tiles/products` | List all registered products |
 | GET | `/data_tiles/manifest?from=&to=` | Available dates for all products (defaults to last 3 months) |
-| GET | `/data_tiles/{product_id}/{date}/{z}/{x}/{y}.png` | Raw value-encoded tile |
+| GET | `/data_tiles/{product_id}/{date}/tiles/{z}/{x}/{y}.png` | Raw value-encoded tile |
 | GET | `/data_tiles/{product_id}/{date}/manifest.json` | Tile config (bounds, value ranges, LOD grid) |
 | GET | `/data_tiles/{product_id}/{date}/point?lat=&lon=` | Point value lookup |
 
@@ -72,7 +72,7 @@ Colourised Web Mercator (XYZ) tiles — compatible with MapboxGL `raster` source
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/visual_tiles/{product_id}/{date}/{z}/{x}/{y}.png` | Colourised PNG tile |
+| GET | `/visual_tiles/{product_id}/{date}/tiles/{z}/{x}/{y}.png` | Colourised PNG tile |
 | GET | `/visual_tiles/colormaps` | All supported colormap names grouped by source (custom, rio-tiler, matplotlib) |
 
 Query parameters for tile requests:

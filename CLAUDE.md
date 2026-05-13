@@ -48,7 +48,7 @@ docs/dataset.md          ← per-store variable/dimension/chunking reference
 ### URL contract
 
 ```
-GET /tiles/{product_id}/{date}/{z}/{x}/{y}.png
+GET /tiles/{product_id}/{date}/tiles/{z}/{x}/{y}.png
 GET /tiles/{product_id}/{date}/manifest.json
 GET /tiles/{product_id}/{date}/point?lat=&lon=
 ```

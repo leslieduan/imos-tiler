@@ -3,7 +3,7 @@ from fastapi.responses import JSONResponse, Response
 
 from services.colormap_store import list_colormaps
 from services.loader import load_slice
-from services.visual_renderer import _colormap, render_tile
+from services.visual_renderer import _colormap, render_part, render_tile
 
 from .products import _get_product_or_404
 from .products import router as products_router
@@ -18,7 +18,7 @@ def get_colormaps():
 
 
 @router.get(
-    "/{product_id}/{date}/{z}/{x}/{y}.png",
+    "/{product_id}/{date}/tiles/{z}/{x}/{y}.png",
     summary="Visualisation raster tile",
     description=(
         "Standard Web Mercator (XYZ) tile rendered as a colourised PNG. "
@@ -78,6 +78,76 @@ def get_tile(
 
     try:
         png = render_tile(ds, product.variable, x, y, z, colormap_name, rescale_range)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    return Response(content=png, media_type="image/png")
+
+
+@router.get(
+    "/{product_id}/{date}/bbox",
+    summary="Visualisation tile by bbox",
+    description=(
+        "Renders a colourised PNG for an arbitrary Web Mercator bounding box (EPSG:3857). "
+        "Compatible with Mapbox GL raster sources using the {bbox-epsg-3857} placeholder."
+    ),
+)
+def get_tile_by_bbox(
+    product_id: str = Path(...),
+    date: str = Path(..., pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    bbox: str = Query(
+        ...,
+        description="Bounding box in EPSG:3857 as 'minx,miny,maxx,maxy'.",
+    ),
+    width: int = Query(256, ge=1, le=2048),
+    height: int = Query(256, ge=1, le=2048),
+    colormap_name: str = Query("viridis", alias="colormap"),
+    rescale: str | None = Query(None, description="Value range as 'min,max'."),
+):
+    try:
+        _colormap(colormap_name)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    product = _get_product_or_404(product_id)
+    if isinstance(product.variable, list):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Product '{product_id}' has multiple variables; visual tiles support single-variable products only.",
+        )
+
+    try:
+        minx, miny, maxx, maxy = (float(v) for v in bbox.split(","))
+    except ValueError as e:
+        raise HTTPException(
+            status_code=400, detail="bbox must be 'minx,miny,maxx,maxy' in EPSG:3857"
+        ) from e
+
+    rescale_range: tuple[float, float] | None = None
+    if rescale:
+        try:
+            lo, hi = rescale.split(",")
+            rescale_range = (float(lo), float(hi))
+        except ValueError as e:
+            raise HTTPException(
+                status_code=400, detail="rescale must be 'min,max', e.g. '-0.5,0.5'"
+            ) from e
+
+    try:
+        ds = load_slice(product.source_path, date, [product.variable])
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+
+    try:
+        png = render_part(
+            ds,
+            product.variable,
+            (minx, miny, maxx, maxy),
+            width,
+            height,
+            colormap_name,
+            rescale_range,
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
