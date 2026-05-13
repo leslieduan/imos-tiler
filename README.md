@@ -1,6 +1,6 @@
 # titiler-project
 
-Tile server for IMOS ocean data products. Built with FastAPI, it serves map tiles for products like sea level anomaly, ocean current, and sea surface temperature.
+Tile server for IMOS ocean data products. Built with FastAPI, it serves map tiles from Zarr-backed stores. Products are managed at runtime via the admin API — no redeploy required.
 
 ## Setup
 
@@ -60,6 +60,7 @@ Raw RGBA tiles for WebGL shader consumption — pixel bytes encode scientific va
 
 | Method | Path | Description |
 |--------|------|-------------|
+| GET | `/data_tiles/products` | List all registered products |
 | GET | `/data_tiles/manifest?from=&to=` | Available dates for all products (defaults to last 3 months) |
 | GET | `/data_tiles/{product_id}/{date}/{z}/{x}/{y}.png` | Raw value-encoded tile |
 | GET | `/data_tiles/{product_id}/{date}/manifest.json` | Tile config (bounds, value ranges, LOD grid) |
@@ -72,8 +73,9 @@ Colourised Web Mercator (XYZ) tiles — compatible with MapboxGL `raster` source
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/visual_tiles/{product_id}/{date}/{z}/{x}/{y}.png` | Colourised PNG tile |
+| GET | `/visual_tiles/colormaps` | All supported colormap names grouped by source (custom, rio-tiler, matplotlib) |
 
-Query parameters:
+Query parameters for tile requests:
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -82,14 +84,12 @@ Query parameters:
 
 ### Admin (`/admin`)
 
-Requires `X-Admin-Key` header. Admin endpoints are always available at port 8000 — on EC2, use an SSH tunnel (`ssh -L 8000:localhost:8000 ec2-user@your-ec2-ip`) before calling them.
+Requires `X-Admin-Key` header. Admin endpoints are blocked at the nginx layer and only reachable at port 8000 — on EC2, use an SSH tunnel (`ssh -L 8000:localhost:8000 ec2-user@your-ec2-ip`) before calling them.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/admin/products` | List all registered products |
 | POST | `/admin/products` | Register a new product |
 | DELETE | `/admin/products/{id}` | Remove a product |
-| GET | `/admin/colormaps` | List all custom colormaps |
 | POST | `/admin/colormaps` | Register a new custom colormap |
 | DELETE | `/admin/colormaps/{name}` | Remove a custom colormap |
 
@@ -129,7 +129,7 @@ curl -X DELETE http://localhost:8000/admin/products/sea_level_anomaly \
 
 ## Managing colormaps
 
-Custom colormaps are stored in `colormaps.json` and loaded on startup. Changes via the admin API take effect immediately without a restart. Colormap names registered here can then be used via `?colormap=<name>` on any visual tile request.
+Custom colormaps are stored in `colormaps.json` and loaded on startup. Changes via the admin API take effect immediately without a restart. All supported colormap names (custom, rio-tiler built-ins, and matplotlib) can be browsed via `GET /visual_tiles/colormaps`. Names registered here can be used via `?colormap=<name>` on any visual tile request.
 
 Each colormap is exactly 256 RGBA entries (one per normalised byte value 0–255).
 

@@ -11,7 +11,7 @@ from starlette.middleware.cors import CORSMiddleware
 from uvicorn.config import LOGGING_CONFIG
 
 from constants import PRODUCTS
-from routers.admin import router as admin_router
+from routers.admin import admin_router
 from routers.data_tiles import router as data_tiles_router
 from routers.visual_tiles import router as visual_tiles_router
 from services.colormap_store import load_colormaps
@@ -69,7 +69,7 @@ app.add_middleware(
 
 app.include_router(data_tiles_router, prefix="/data_tiles", tags=["data_tiles"])
 app.include_router(visual_tiles_router, prefix="/visual_tiles", tags=["visual_tiles"])
-app.include_router(admin_router, prefix="/admin", tags=["Admin"])
+app.include_router(admin_router, prefix="/admin", tags=["admin"])
 
 
 @app.exception_handler(Exception)

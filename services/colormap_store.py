@@ -41,8 +41,23 @@ def remove_colormap(name: str) -> None:
     _reload(data)
 
 
-def list_colormaps() -> dict[str, list]:
-    return _read_file()
+def list_colormaps() -> dict[str, list[str]]:
+    """Return all supported colormap names grouped by source.
+
+    Priority mirrors _colormap(): custom → rio-tiler → matplotlib.
+    """
+    import matplotlib
+    from rio_tiler.colormap import cmap as _rio_cmap
+
+    custom_names = list(CUSTOM_COLORMAPS.keys())
+    custom_set = set(custom_names)
+
+    rio_names = sorted(n for n in _rio_cmap.list() if n not in custom_set)
+    rio_set = set(rio_names)
+
+    mpl_names = sorted(n for n in matplotlib.colormaps if n not in custom_set and n not in rio_set)
+
+    return {"custom": custom_names, "rio_tiler": rio_names, "matplotlib": mpl_names}
 
 
 def _read_file() -> dict[str, list]:

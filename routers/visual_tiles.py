@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException, Path, Query
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 
+from services.colormap_store import list_colormaps
 from services.loader import load_slice
 from services.visual_renderer import _colormap, render_tile
 
@@ -9,6 +10,11 @@ from .products import router as products_router
 
 router = APIRouter()
 router.include_router(products_router)
+
+
+@router.get("/colormaps")
+def get_colormaps():
+    return JSONResponse(content=list_colormaps())
 
 
 @router.get(

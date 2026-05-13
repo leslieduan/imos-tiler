@@ -6,12 +6,8 @@ from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field, field_validator
 
 from constants import CHUNK_PX, PADDING
-from services.colormap_store import (
-    list_colormaps,
-    register_colormap,
-    remove_colormap,
-)
-from services.product_store import list_products, register_product, remove_product
+from services.colormap_store import register_colormap, remove_colormap
+from services.product_store import register_product, remove_product
 
 _api_key_header = APIKeyHeader(name="X-Admin-Key")
 
@@ -24,7 +20,7 @@ def _require_admin_key(key: str = Security(_api_key_header)) -> None:
         raise HTTPException(status_code=403, detail="Invalid admin key")
 
 
-router = APIRouter(dependencies=[Depends(_require_admin_key)])
+admin_router = APIRouter(dependencies=[Depends(_require_admin_key)])
 
 
 class ProductPayload(BaseModel):
@@ -56,12 +52,7 @@ class ProductPayload(BaseModel):
         return v
 
 
-@router.get("/products")
-def get_products():
-    return JSONResponse(content=list_products())
-
-
-@router.post("/products", status_code=201)
+@admin_router.post("/products", status_code=201)
 def add_product(payload: ProductPayload):
     try:
         product = register_product(payload.model_dump())
@@ -74,7 +65,7 @@ def add_product(payload: ProductPayload):
     )
 
 
-@router.delete("/products/{product_id}", status_code=204)
+@admin_router.delete("/products/{product_id}", status_code=204)
 def delete_product(product_id: str):
     try:
         remove_product(product_id)
@@ -113,12 +104,7 @@ class ColormapPayload(BaseModel):
         return [(rgba[0], rgba[1], rgba[2], rgba[3]) for rgba in self.entries]
 
 
-@router.get("/colormaps")
-def get_colormaps():
-    return JSONResponse(content=list_colormaps())
-
-
-@router.post("/colormaps", status_code=201)
+@admin_router.post("/colormaps", status_code=201)
 def add_colormap(payload: ColormapPayload):
     try:
         register_colormap(payload.name, payload.to_tuples())
@@ -129,7 +115,7 @@ def add_colormap(payload: ColormapPayload):
     return JSONResponse(status_code=201, content={"name": payload.name})
 
 
-@router.delete("/colormaps/{name}", status_code=204)
+@admin_router.delete("/colormaps/{name}", status_code=204)
 def delete_colormap(name: str = Path(...)):
     try:
         remove_colormap(name)
