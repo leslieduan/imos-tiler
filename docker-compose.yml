@@ -11,9 +11,15 @@ services:
     volumes:
       - ./products.json:/app/products.json
       - ./colormaps.json:/app/colormaps.json
+      - ./slice_cache:/app/slice_cache
     environment:
       - PYTHONUNBUFFERED=1
       - ADMIN_API_KEY=${ADMIN_API_KEY}
+      - DISK_CACHE_PATH=/app/slice_cache
+      - DISK_CACHE_LIMIT_GB=20
+      - CACHE_DAYS=30
+      - PREWARM_WORKERS=4
+      - CACHE_REFRESH_INTERVAL_SECONDS=14400
     restart: unless-stopped
 
   nginx:

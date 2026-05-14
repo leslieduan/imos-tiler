@@ -41,10 +41,16 @@ Zarr eliminates this entirely: metadata is one `.zmetadata` HTTP request, and va
 │  loader.py         │             │  data_renderer.py    │
 │                    │             │  visual_renderer.py  │
 │  store singleton   │             │                      │
-│  slice cache LRU   │             │  processed grid      │
+│  L1 slice cache    │             │  processed grid      │
 │  (url,date,vars)   │             │  cache LRU (data)    │
 └─────────┬──────────┘             │  XarrayReader (vis.) │
-          │ miss                   └─────────────────────-┘
+          │ L1 miss                └─────────────────────-┘
+┌─────────▼──────────┐
+│  Disk cache        │
+│  slice_cache/      │
+│  lz4 pkl per date  │
+└─────────┬──────────┘
+          │ L2 miss
 ┌─────────▼────────┐
 │     AWS S3       │
 │   Zarr stores    │
@@ -56,15 +62,17 @@ Zarr eliminates this entirely: metadata is one `.zmetadata` HTTP request, and va
 **Data tiles** (`/data_tiles/{product_id}/{date}/tiles/{z}/{x}/{y}.png`):
 
 ```
-cold  → get_lod_grids (opens store, computes lod_grids) → load_slice (.compute()) → _get_processed (resample) → _extract_chunk → PNG encode
-warm  → get_lod_grids (already set)                     → load_slice (cache hit)  → _get_processed (cache hit) → _extract_chunk → PNG encode
+S3 cold   → get_lod_grids (opens store, computes lod_grids) → load_slice (S3 .compute(), ~2s)  → _get_processed (resample) → _extract_chunk → PNG encode
+disk warm → get_lod_grids (already set)                     → load_slice (disk read, ~30ms)     → _get_processed (resample) → _extract_chunk → PNG encode
+mem warm  → get_lod_grids (already set)                     → load_slice (L1 hit, <1ms)         → _get_processed (cache hit) → _extract_chunk → PNG encode
 ```
 
 **Visual tiles** (`/visual_tiles/{product_id}/{date}/tiles/{z}/{x}/{y}.png` or `/bbox`):
 
 ```
-cold  → load_slice (.compute()) → _to_scalar_parts (antimeridian split if needed) → XarrayReader.tile/part → colormap + PNG encode
-warm  → load_slice (cache hit)  → _to_scalar_parts → XarrayReader.tile/part → colormap + PNG encode
+S3 cold   → load_slice (S3 .compute(), ~2s)  → _to_scalar_parts (antimeridian split if needed) → XarrayReader.tile/part → colormap + PNG encode
+disk warm → load_slice (disk read, ~30ms)     → _to_scalar_parts → XarrayReader.tile/part → colormap + PNG encode
+mem warm  → load_slice (L1 hit, <1ms)         → _to_scalar_parts → XarrayReader.tile/part → colormap + PNG encode
 ```
 
 Visual tiles use `rio-tiler`'s `XarrayReader` for Web Mercator reprojection; no processed grid cache is involved.
@@ -89,8 +97,9 @@ titiler-project/
     visual_tiles.py              ← /visual_tiles — colourised Web Mercator XYZ tiles + bbox
     products.py                  ← shared: /products, /manifest, /{id}/{date}/point — included by both tile routers
     admin.py                     ← /admin — product and colormap management (key-protected)
+  slice_cache/                   ← disk slice cache (lz4-compressed pickles, runtime, gitignored)
   services/
-    loader.py                    ← Zarr store singleton + per-(date, variables) slice cache + get_lod_grids
+    loader.py                    ← Zarr store singleton + L1 slice cache + disk cache + get_lod_grids
     data_renderer.py             ← processed grid cache + chunk extract + PNG encode (data tiles)
     visual_renderer.py           ← Web Mercator tile render + bbox render + colormap lookup (visual tiles)
     product_store.py             ← products.json read/write + in-memory PRODUCTS dict management
@@ -361,7 +370,7 @@ Both segments are rendered independently using `XarrayReader` and the results ar
 
 ## Caching strategy
 
-All caches are in-memory LRU (cachetools), evicted least-recently-used. Nothing written to disk.
+Three-tier cache stack. Cold S3 reads (~2s) are absorbed by disk (L2, ~30ms) and in-memory LRU (L1, <1ms). The disk cache is the primary mechanism for eliminating cold origin hits — it persists across server restarts and is pre-populated at startup.
 
 **Layer 1 — Store singleton** (`services/loader.py`, `_stores` dict keyed by URL)
 
@@ -376,19 +385,51 @@ Uses a **stale-while-revalidate** strategy to pick up newly appended time steps 
 
 Re-opening is cheap — `xr.open_zarr` reads only metadata and coordinate arrays (`time`, `lat`, `lon`), no data chunks. In-flight `load_slice` calls hold a direct Python reference to the old dataset object and complete normally. `_slice_cache` and `_processed_cache` entries for existing dates remain valid and unaffected.
 
-**Layer 2 — Slice cache** (`services/loader.py`, keyed `(store_url, date, variables)`)
+**Layer 2 — Slice cache, in-memory** (`services/loader.py`, `_slice_cache` keyed `(store_url, date, variables)`)
 
-Stores a fully-computed (`.compute()`) 2D lat×lon numpy slice. This is the only S3 data read — one chunk fetch per cold (date, variable) pair. Keyed by `variables` so different products using the same store cache independently.
+Stores a fully-computed (`.compute()`) 2D lat×lon numpy slice. Sub-millisecond on hit. Keyed by `variables` so different products using the same store cache independently.
 
 Size is controlled by the `SLICE_CACHE_SIZE` env var (default `100`). Each entry is roughly 2–7 MB depending on grid size and number of variables. Should be kept at least equal to `THREAD_POOL_SIZE` so a burst of cold requests does not immediately evict freshly computed slices.
 
-**Layer 3 — Processed grid cache** (`services/data_renderer.py`, keyed `(id(ds), lod)`)
+`id(ds)` is stable for as long as a slice is held in `_slice_cache` — this is the anchor for Layer 4.
+
+**Layer 3 — Slice cache, disk** (`slice_cache/` directory, `services/loader.py`)
+
+Persists fully-computed slices as lz4-compressed pickles to survive server restarts. On an L2 miss, `load_slice` checks disk before going to S3. A disk hit (~30ms read + decompress) is ~60× faster than a cold S3 fetch.
+
+File layout: `{DISK_CACHE_PATH}/{store_name}-{var_str}/{date}.pkl.lz4`
+
+Enabled by setting `DISK_CACHE_PATH` (e.g. `/app/slice_cache`). If unset, disk caching is disabled and all cold reads go directly to S3.
+
+Environment variables:
+
+| Variable | Default | Description |
+|---|---|---|
+| `DISK_CACHE_PATH` | _(unset)_ | Absolute path for disk cache. Disabled if unset. |
+| `DISK_CACHE_LIMIT_GB` | `20` | Maximum total disk usage before eviction runs |
+| `DISK_EVICTION_THRESHOLD` | `0.85` | Fraction of limit at which eviction triggers (0.0–1.0) |
+| `CACHE_DAYS` | `30` | How many of each product's most-recent available dates to cache |
+| `PREWARM_WORKERS` | `4` | Thread pool size for parallel prewarm at startup |
+| `CACHE_REFRESH_INTERVAL_SECONDS` | `14400` | How often (seconds) the background refresh cycle runs |
+
+**Startup prewarm** — `prewarm_disk_slices` runs at startup (and whenever a new product is added via the admin API). It fetches the latest `CACHE_DAYS` dates for every product using a `ThreadPoolExecutor` (`PREWARM_WORKERS` workers). Each job calls `load_slice`, which reads from disk if already cached or fetches from S3 and writes to disk. For 4 products × 30 dates with 4 workers, cold prewarm takes ~60s; subsequent restarts hit disk immediately (~30ms each, ~30s total).
+
+**Refresh cycle** — `_cache_refresh_loop` wakes every `CACHE_REFRESH_INTERVAL_SECONDS` (default 4 hours) and calls `refresh_disk_cache`. In steady state (IMOS data is daily), this adds ~1 new date per product and evicts dates that have rolled outside the `CACHE_DAYS` window. The refresh runs in a background thread via `asyncio.to_thread` — the event loop is never blocked, and concurrent requests are unaffected.
+
+**Eviction**:
+- *Stale dates* — `refresh_disk_cache` deletes any `.pkl.lz4` files whose dates are no longer in the `CACHE_DAYS` window.
+- *Disk pressure* — `_evict_disk_if_needed` (called at the start of each refresh cycle) removes files when total usage exceeds `DISK_EVICTION_THRESHOLD × DISK_CACHE_LIMIT_GB`. Files are sorted `(size ascending, date ascending)` — small+old files are evicted first, keeping the large satellite slices that would be most expensive to re-fetch.
+- *Product deletion* — `evict_product_cache` (called by `DELETE /admin/products/{id}`) removes the product's disk directory via `shutil.rmtree` and purges matching entries from the in-memory L2 cache immediately.
+
+Disk eviction never invalidates L2 in-memory entries — the in-memory data is still valid and serves requests until it falls out of the LRU naturally.
+
+**Layer 4 — Processed grid cache** (`services/data_renderer.py`, keyed `(id(ds), lod)`)
 
 Stores the resampled + normalised numpy arrays for the full LOD grid. A hit reduces per-tile work to `_extract_chunk` + PNG encode only — no S3 I/O, no resampling. `id(ds)` is stable because `ds` is held alive by Layer 2.
 
 Size is controlled by the `PROCESSED_CACHE_SIZE` env var (default `400`). Should be set to at least `SLICE_CACHE_SIZE × number_of_LOD_levels` so every cached slice can have its processed grids cached too.
 
-Visual tiles do not use Layer 3 — `XarrayReader` handles its own rendering per request from the Layer 2 slice.
+Visual tiles do not use Layer 4 — `XarrayReader` handles its own rendering per request from the Layer 2 slice.
 
 ### Thread safety
 

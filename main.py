@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import logging.config
 import os
@@ -15,7 +16,7 @@ from routers.admin import admin_router
 from routers.data_tiles import router as data_tiles_router
 from routers.visual_tiles import router as visual_tiles_router
 from services.colormap_store import load_colormaps
-from services.loader import prewarm_stores
+from services.loader import prewarm_disk_slices, prewarm_stores, refresh_disk_cache
 from services.product_store import load_products
 
 logger = logging.getLogger(__name__)
@@ -42,6 +43,12 @@ logging.config.dictConfig(LOGGING_CONFIG)
 # stale-while-revalidate TTL already ensures no request ever blocks on a re-open.
 
 
+async def _cache_refresh_loop(products: list, interval: int) -> None:
+    while True:
+        await asyncio.sleep(interval)
+        await asyncio.to_thread(refresh_disk_cache, products)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     limiter = anyio.to_thread.current_default_thread_limiter()
@@ -50,7 +57,16 @@ async def lifespan(app: FastAPI):
     load_colormaps()
     store_urls = list({p.source_path for p in PRODUCTS.values()})
     prewarm_stores(store_urls)
+    products = list(PRODUCTS.values())
+    asyncio.create_task(asyncio.to_thread(prewarm_disk_slices, products))
+    interval = int(os.environ.get("CACHE_REFRESH_INTERVAL_SECONDS", 14400))
+    refresh_task = asyncio.create_task(_cache_refresh_loop(products, interval))
     yield
+    refresh_task.cancel()
+    try:
+        await refresh_task
+    except asyncio.CancelledError:
+        pass
 
 
 app = FastAPI(

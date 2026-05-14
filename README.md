@@ -1,6 +1,6 @@
 # titiler-project
 
-On-demand tile server for IMOS ocean data products. Tiles are generated in real time without pre-rendering — even cold requests are fast, and warm requests served from the in-memory cache are near-instant. Products are managed at runtime via the admin API — no redeploy required.
+On-demand tile server for IMOS ocean data products. Tiles are generated in real time without pre-rendering. A three-tier cache (in-memory LRU → disk → S3) keeps cold requests fast: disk-warm slices serve in ~30ms vs ~2s from S3. Products are managed at runtime via the admin API — no redeploy required.
 
 ## Setup
 
@@ -30,6 +30,12 @@ Create a `.env` file in the project root before starting:
 
 ```bash
 ADMIN_API_KEY=your-secret-key
+```
+
+First-time setup — these files must exist on the host before the first `docker compose up`:
+
+```bash
+echo "[]" > products.json && echo "{}" > colormaps.json && mkdir -p slice_cache
 ```
 
 ```bash
