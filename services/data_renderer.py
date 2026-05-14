@@ -1,14 +1,3 @@
-"""
-Tile renderer.
-
-Uses the same processed grid cache pattern as renderer.py:
-  - _get_processed ressamples the full LOD grid once per (date, lod) and caches the
-    final numpy arrays — identical to the NetCDF processed cache.
-  - The dataset slice is already fully in RAM (computed by loader), so the resample
-    is pure CPU with no S3 I/O.
-  - _extract_chunk and _to_png_bytes are imported from renderer.py to avoid duplication.
-"""
-
 import concurrent.futures
 import logging
 import math
