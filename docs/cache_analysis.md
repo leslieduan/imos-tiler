@@ -8,6 +8,37 @@ The goal is a persistent L2 cache that survives restarts and reduces cold S3 rea
 
 ---
 
+## What Is Cached
+
+The cache does not store the full Zarr dataset. Each cache entry is a single **2D lat×lon slice** for one specific (date, variable set) combination — the result of calling `.sel(time=t).compute()` on the store. For a product with a 351×641 grid and one variable, this is a numpy array of ~1.7 MB of float64 values. The Zarr store itself may contain years of daily data across hundreds of time steps; only the dates actively needed (the latest `CACHE_DAYS`) are ever fetched and cached.
+
+**Serialisation and compression:** each slice is serialised with `pickle.dumps` and compressed with `lz4.frame.compress` before writing to disk. lz4 is a block compression algorithm optimised for speed over ratio — compress and decompress at ~500 MB/s on a single core, with typically 3–4× compression on float64 ocean arrays. Ocean grids contain large NaN land masks (contiguous regions of identical bit patterns) that compress extremely well, pushing effective ratios higher for products with significant land coverage.
+
+**Per-product size after lz4 compression:**
+
+| Product | Grid | Variables | Raw size | lz4 size | Compression ratio |
+|---|---|---|---|---|---|
+| sea_level_anomaly | 351×641 | 1 | 1.7 MB | ~0.5 MB | ~3.4× |
+| ocean_current | 351×641 | 2 | 3.4 MB | ~1.0 MB | ~3.4× |
+| radar_wind | 74×102 | 1 | 0.06 MB | ~0.02 MB | ~3× |
+| satellite_ssta | 2000×3900 | 1 | 62 MB | ~18 MB | ~3.4× |
+
+A disk read of a typical slice file (~0.5–18 MB) takes ~5ms on local SSD. Decompression adds ~25ms for the largest files. Total disk-warm latency is ~30ms — imperceptible to a map user compared to a 2s cold S3 read.
+
+**Storage scales cheaply.** Even with many more products and a longer cache window, the total footprint remains easily manageable on a single EBS volume:
+
+| Products | Dates cached | Est. total lz4 size | EBS gp3 cost/month |
+|---|---|---|---|
+| 4 (current) | 30 | ~600 MB | <$1 |
+| 10 | 30 | ~1.5 GB | <$1 |
+| 20 | 30 | ~3 GB | <$1 |
+| 20 | 90 | ~9 GB | ~$1 |
+| 50 | 90 | ~22 GB | ~$2 |
+
+EBS gp3 costs $0.08/GB-month. Even at 50 products × 90 dates the total cache fits in a 30 GB volume costing ~$2.50/month — less than an hour of ElastiCache. This is the core reason disk was chosen over Redis: the dataset grows with more products and longer windows, and disk scales linearly at near-zero marginal cost whereas Redis requires a larger (and disproportionately more expensive) instance class for each step up.
+
+---
+
 ## Options Evaluated
 
 ### Option 1 — Redis
