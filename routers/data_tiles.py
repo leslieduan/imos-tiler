@@ -37,7 +37,7 @@ def get_tile(
 
     variables = product.variable if isinstance(product.variable, list) else [product.variable]
     ds = _load_or_404(product.source_path, date, variables)
-    png_bytes = render_tile(product, ds, z, x, y)
+    png_bytes = render_tile(product, ds, z, x, y, date)
     return Response(content=png_bytes, media_type="image/png")
 
 

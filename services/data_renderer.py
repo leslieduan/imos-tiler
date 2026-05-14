@@ -9,6 +9,7 @@ Uses the same processed grid cache pattern as renderer.py:
   - _extract_chunk and _to_png_bytes are imported from renderer.py to avoid duplication.
 """
 
+import logging
 import math
 import os
 import threading
@@ -20,6 +21,8 @@ from cachetools import LRUCache
 from PIL import Image
 
 from constants import LOD_ZOOM_THRESHOLDS, Product
+
+logger = logging.getLogger(__name__)
 
 # Caches the full resampled grid arrays for a (ds, lod) pair so that all tile
 # requests for the same date+LOD share one resample instead of each repeating it.
@@ -110,8 +113,8 @@ def _compute_uv(
     return u_norm, v_norm, ocean
 
 
-def _get_processed(product: Product, ds: xr.Dataset, lod: int) -> tuple:
-    key = (id(ds), lod)
+def _get_processed(product: Product, ds: xr.Dataset, lod: int, date: str) -> tuple:
+    key = (product.source_path, date, str(product.variable), lod)
 
     while True:
         with _processed_lock:
@@ -138,6 +141,17 @@ def _get_processed(product: Product, ds: xr.Dataset, lod: int) -> tuple:
         with _processed_lock:
             del _processed_inflight[key]
         event.set()
+
+
+def evict_processed_cache(product: Product) -> None:
+    with _processed_lock:
+        keys_to_remove = [k for k in _processed_cache if k[0] == product.source_path]
+        for k in keys_to_remove:
+            del _processed_cache[k]
+    if keys_to_remove:
+        logger.info(
+            "Processed cache evicted %d entry/entries for: %s", len(keys_to_remove), product.id
+        )
 
 
 def _extract_chunk(
@@ -178,13 +192,13 @@ def _to_png_bytes(img_array: np.ndarray) -> bytes:
     return buf.getvalue()
 
 
-def render_tile(product: Product, ds: xr.Dataset, lod: int, cx: int, cy: int) -> bytes:
+def render_tile(product: Product, ds: xr.Dataset, lod: int, cx: int, cy: int, date: str) -> bytes:
     grid_cols, grid_rows = product.lod_grids[lod]
     total_w = grid_cols * product.chunk_px[0]
     total_h = grid_rows * product.chunk_px[1]
 
     if isinstance(product.variable, list):
-        u_norm, v_norm, ocean = _get_processed(product, ds, lod)
+        u_norm, v_norm, ocean = _get_processed(product, ds, lod, date)
         chunk_u = _extract_chunk(
             u_norm, cx, cy, total_w, total_h, product.chunk_px, product.padding
         )
@@ -199,7 +213,7 @@ def render_tile(product: Product, ds: xr.Dataset, lod: int, cx: int, cy: int) ->
         img[:, :, 2] = chunk_m * 255
         img[:, :, 3] = 255
     else:
-        val_24, ocean = _get_processed(product, ds, lod)
+        val_24, ocean = _get_processed(product, ds, lod, date)
         chunk_24 = _extract_chunk(
             val_24, cx, cy, total_w, total_h, product.chunk_px, product.padding
         )

@@ -268,6 +268,8 @@ def refresh_disk_cache(products: list[Product]) -> None:
 
 def evict_product_cache(product: "Product") -> None:
     """Remove all in-memory and disk cache entries for a deleted product."""
+    from services.data_renderer import evict_processed_cache
+
     variables = product.variable if isinstance(product.variable, list) else [product.variable]
     vars_tuple = tuple(sorted(variables))
 
@@ -279,6 +281,8 @@ def evict_product_cache(product: "Product") -> None:
             del _slice_cache[k]
     if keys_to_remove:
         logger.info("Memory cache evicted %d slice(s) for: %s", len(keys_to_remove), product.id)
+
+    evict_processed_cache(product)
 
     cache_dir = _disk_cache_dir(product.source_path, variables)
     if cache_dir is not None and cache_dir.exists():
