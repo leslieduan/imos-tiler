@@ -4,7 +4,7 @@
 
 Cold tile requests for large dadaset take up to ~2s because `load_slice` reads Zarr chunks from S3. The in-memory `_slice_cache` eliminates repeat hits within one process lifetime, but is wiped on every container restart. CloudFront reduces origin load but has its own TTL and eviction — tiles regularly cycle out of the CDN cache and those misses flow back to the origin, hitting the cold S3 path again. The cold path therefore occurs both on container restart and on any CloudFront eviction.
 
-The goal is a persistent L2 cache that survives restarts and reduces cold S3 reads to milliseconds.
+The goal is a persistent L3 cache that survives restarts and reduces cold S3 reads to milliseconds.
 
 ---
 
@@ -49,7 +49,7 @@ Redis is an in-memory key-value store, commonly used as a distributed cache. The
 
 - Slices serialised with `lz4.frame.compress(pickle.dumps(ds))` and stored as Redis string keys
 - Populated by startup prewarm and a background refresh cron only — not by request hits
-- On L1 miss, probe Redis before going to S3
+- On L2 miss, probe Redis before going to S3
 
 **Sizing analysis:**
 
@@ -153,17 +153,17 @@ This makes ephemeral disk the right choice for **ECS Fargate** deployments: it a
 ```
 Request
   │
-  ├─ L1 hit? (_slice_cache, in-memory LRU)   → <1ms
+  ├─ L2 hit? (_slice_cache, in-memory LRU)   → <1ms
   │
-  ├─ L2 hit? (disk, lz4 pkl)                 → ~30ms  → populate L1
+  ├─ L3 hit? (disk, lz4 pkl)                 → ~30ms  → populate L2
   │
-  └─ L3 miss (S3 .compute())                 → ~2s    → populate L1, write L2
+  └─ S3 miss (.compute())                    → ~2s    → populate L2, write L3
                    ▲
      Written only by startup prewarm / 4-hour refresh cron
 ```
 
-**Why L1 is still needed alongside disk:**
-`_processed_cache` in `data_renderer.py` is keyed by `(id(ds), lod)`. This requires `_slice_cache` to return the **same Python object** for repeated calls within a process — each disk deserialisation produces a new object with a different `id`, so the processed grid cache would never hit without L1. L1 also avoids redundant disk reads for the 10–20 tile requests that arrive for the same product+date in a single map session.
+**Why L2 is still needed alongside disk:**
+`_processed_cache` in `data_renderer.py` is keyed by `(id(ds), lod)`. This requires `_slice_cache` to return the **same Python object** for repeated calls within a process — each disk deserialisation produces a new object with a different `id`, so the processed grid cache would never hit without L2. L2 also avoids redundant disk reads for the 10–20 tile requests that arrive for the same product+date in a single map session.
 
 **Disk eviction strategy:**
 Files are evicted sorted by `(size ascending, date ascending)` — small-grid products (cheap to re-fetch from S3) are evicted before large-grid products (expensive ~2s re-fetch), and within each size group, oldest dates go first. This keeps the satellite SSTA cache (most valuable) resident the longest under disk pressure.
@@ -172,7 +172,7 @@ Files are evicted sorted by `(size ascending, date ascending)` — small-grid pr
 
 ## Upgrade Path
 
-| Phase                                   | Deployment           | L2 cache                                                            |
+| Phase                                   | Deployment           | L3 cache                                                            |
 | --------------------------------------- | -------------------- | ------------------------------------------------------------------- |
 | Current                                 | EC2 + Docker Compose | EBS persistent disk (`DISK_CACHE_PATH=./slice_cache`)               |
 | Next                                    | ECS EC2 launch type  | EBS persistent disk (host bind mount, same env var, no code change) |

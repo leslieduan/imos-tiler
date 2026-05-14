@@ -13,48 +13,70 @@ Zarr eliminates this entirely: metadata is one `.zmetadata` HTTP request, and va
 ## Architecture
 
 ```
-                    ┌──────────────────────────────────────┐
-                    │           Frontend (WebGL/Map)        │
-                    └──────────────────┬───────────────────┘
-                                       │ HTTP
-                    ┌──────────────────▼───────────────────┐
-                    │            FastAPI  main.py           │
-                    └──────┬───────────────────┬───────────┘
-                           │                   │
-             ┌─────────────▼──────┐  ┌─────────▼──────────┐
-             │  routers/          │  │  routers/           │
-             │  data_tiles.py     │  │  visual_tiles.py    │
-             │  /data_tiles       │  │  /visual_tiles      │
-             └──────┬─────────────┘  └──────┬──────────────┘
-                    │  shared                │  shared
-                    └───────┬───────────────┘
-                    ┌───────▼──────────────┐
-                    │  routers/products.py  │
-                    │  /products /manifest  │
-                    │  /{id}/{date}/point   │
-                    └───────────────────────┘
-                           │
-          ┌────────────────┴─────────────────┐
-          │                                   │
-┌─────────▼──────────┐             ┌──────────▼──────────┐
-│  services/         │             │  services/           │
-│  loader.py         │             │  data_renderer.py    │
-│                    │             │  visual_renderer.py  │
-│  store singleton   │             │                      │
-│  L1 slice cache    │             │  processed grid      │
-│  (url,date,vars)   │             │  cache LRU (data)    │
-└─────────┬──────────┘             │  XarrayReader (vis.) │
-          │ L1 miss                └─────────────────────-┘
-┌─────────▼──────────┐
-│  Disk cache        │
-│  slice_cache/      │
-│  lz4 pkl per date  │
-└─────────┬──────────┘
-          │ L2 miss
-┌─────────▼────────┐
-│     AWS S3       │
-│   Zarr stores    │
-└──────────────────┘
+┌────────────────────────────────────────────────────────────────────────────┐
+│                         Client  (WebGL / Map)                              │
+└────────────────────────────────────────────────────────────────────────────┘
+                                      │ HTTP
+                                      ▼
+┌────────────────────────────────────────────────────────────────────────────┐
+│                          Nginx  (reverse proxy)                            │
+└────────────────────────────────────────────────────────────────────────────┘
+                                      │
+                                      ▼
+┌────────────────────────────────────────────────────────────────────────────┐
+│                            FastAPI  (main.py)                              │
+│                                                                            │
+└──────────────────┬───────────────────────────────────────┬─────────────────┘
+                   │                                       │
+                   ▼                                       ▼
+┌────────────────────────────────────┐  ┌────────────────────────────────────┐
+│          Tile Routers              │  │             /admin                 │
+│  /data_tiles  ·  /visual_tiles     │  │           admin.py                 │
+│       products.py  (shared)        │  │          X-Admin-Key               │
+│  /products · /manifest · /point    │  │                                    │
+└──────────────────┬─────────────────┘  └────────────────────────────────────┘
+                   │
+                   ├───────────────────────────────────────┐
+                   │                                       │
+                   ▼                                       ▼
+┌────────────────────────────────────┐  ┌────────────────────────────────────┐
+│        data_renderer.py            │  │       visual_renderer.py           │
+│                                    │  │                                    │
+│   L1 Processed grid cache          │  │   XarrayReader                     │
+│   (data tiles only)                │  │   Web Mercator reprojection        │
+│                                    │  │   no L1 cache                      │
+└──────────────────┬─────────────────┘  └──────────────────┬─────────────────┘
+                   │ L1 miss                               │ every request
+                   └──────────────────┬────────────────────┘
+                                      ▼
+┌────────────────────────────────────────────────────────────────────────────┐
+│                              loader.py                                     │
+│                                                                            │
+│   Store singleton                    L2 Slice cache                        │
+│   one per Zarr URL                   (url, date, vars)                     │
+│   stale-while-revalidate             fully-computed 2D lat×lon slice       │
+└────────────────────────────────────────────────────────────────────────────┘
+                                      │ L2 miss
+                                      ▼
+┌────────────────────────────────────────────────────────────────────────────┐
+│                           L3  Disk cache                                   │
+│                   .pkl.lz4 per date  ·  DISK_CACHE_PATH                    │
+└────────────────────────────────────────────────────────────────────────────┘
+                                      │ L3 miss
+                                      ▼
+┌────────────────────────────────────────────────────────────────────────────┐
+│                              AWS  S3                                       │
+│                            Zarr stores                                     │
+└────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Background tasks** run concurrently on the event loop — never blocking request handling:
+
+```
+server start  ──► prewarm_stores          warm all store singletons before first request
+server start  ──► prewarm_disk_slices     fill L3 for latest CACHE_DAYS dates (ThreadPoolExecutor)
+every 4 hours ──► _cache_refresh_loop     add newly available dates, evict stale from L3
+product added ──► prewarm_disk_slices     triggered async by POST /admin/products
 ```
 
 ### Request flow
@@ -64,17 +86,17 @@ Zarr eliminates this entirely: metadata is one `.zmetadata` HTTP request, and va
 `load_slice` is lazy — it is only called when `_get_processed` misses. On a processed cache hit, no slice I/O occurs at all.
 
 ```
-processed warm → get_lod_grids (already set) → _get_processed (cache hit)                                 → _extract_chunk → PNG encode
-disk warm      → get_lod_grids (already set) → _get_processed miss → load_slice (disk read, ~30ms)        → resample → cache → _extract_chunk → PNG encode
-S3 cold        → get_lod_grids (already set) → _get_processed miss → load_slice (S3 .compute(), ~2s)      → resample → cache → _extract_chunk → PNG encode
+processed warm → get_lod_grids (already set) → _get_processed (cache hit)                            → _extract_chunk → PNG encode
+disk warm      → get_lod_grids (already set) → _get_processed miss → load_slice (disk read, ~30ms)   → resample → cache → _extract_chunk → PNG encode
+S3 cold        → get_lod_grids (already set) → _get_processed miss → load_slice (S3 .compute(), ~2s) → resample → cache → _extract_chunk → PNG encode
 ```
 
 **Visual tiles** (`/visual_tiles/{product_id}/{date}/tiles/{z}/{x}/{y}.png` or `/bbox`):
 
 ```
-S3 cold   → load_slice (S3 .compute(), ~2s)  → _to_scalar_parts (antimeridian split if needed) → XarrayReader.tile/part → colormap + PNG encode
-disk warm → load_slice (disk read, ~30ms)     → _to_scalar_parts → XarrayReader.tile/part → colormap + PNG encode
-mem warm  → load_slice (L1 hit, <1ms)         → _to_scalar_parts → XarrayReader.tile/part → colormap + PNG encode
+S3 cold   → load_slice (S3 .compute(), ~2s) → _to_scalar_parts (antimeridian split if needed) → XarrayReader.tile/part → colormap + PNG encode
+disk warm → load_slice (disk read, ~30ms)    → _to_scalar_parts → XarrayReader.tile/part → colormap + PNG encode
+mem warm  → load_slice (L2 hit, <1ms)        → _to_scalar_parts → XarrayReader.tile/part → colormap + PNG encode
 ```
 
 Visual tiles use `rio-tiler`'s `XarrayReader` for Web Mercator reprojection; no processed grid cache is involved.
@@ -88,9 +110,11 @@ titiler-project/
   main.py                        ← mounts all routers, CORS middleware, lifespan startup
   constants.py                   ← Product dataclass + LOD algorithm; CUSTOM_COLORMAPS registry
                                     LOD_ZOOM_THRESHOLDS, MAX_LODS, MIN_COARSEST_GRID
+  products.json                  ← persisted product registrations (runtime, gitignored; local dev default)
+  colormaps.json                 ← persisted custom colormap registrations (runtime, gitignored; local dev default)
   data/
-    products.json                ← persisted product registrations (runtime, gitignored; Docker: data/products.json)
-    colormaps.json               ← persisted custom colormap registrations (runtime, gitignored; Docker: data/colormaps.json)
+    products.json                ← Docker: mounted volume, set via PRODUCTS_CONFIG_PATH=data/products.json
+    colormaps.json               ← Docker: mounted volume, set via COLORMAPS_CONFIG_PATH=data/colormaps.json
   docs/
     technical.md                 ← this file
     dataset.md                   ← per-store variable/dimension/chunking reference
@@ -100,14 +124,15 @@ titiler-project/
     visual_tiles.py              ← /visual_tiles — colourised Web Mercator XYZ tiles + bbox
     products.py                  ← shared: /products, /manifest, /{id}/{date}/point — included by both tile routers
     admin.py                     ← /admin — product and colormap management (key-protected)
-  slice_cache/                   ← disk slice cache (lz4-compressed pickles, runtime, gitignored)
   services/
-    loader.py                    ← Zarr store singleton + L1 slice cache + disk cache + get_lod_grids
+    loader.py                    ← Zarr store singleton + L2 slice cache + disk cache + get_lod_grids
     data_renderer.py             ← processed grid cache + chunk extract + PNG encode (data tiles)
     visual_renderer.py           ← Web Mercator tile render + bbox render + colormap lookup (visual tiles)
     product_store.py             ← products.json read/write + in-memory PRODUCTS dict management
     colormap_store.py            ← colormaps.json read/write + in-memory CUSTOM_COLORMAPS management
 ```
+
+`products.json` and `colormaps.json` default to the project root in local dev. In Docker (`docker-compose.yml`), they are overridden to `data/products.json` and `data/colormaps.json`, backed by a `./data` host volume. The disk slice cache directory is set via `DISK_CACHE_PATH` (default: unset in local dev; `/app/slice_cache` in Docker, backed by a `./slice_cache` host volume).
 
 ---
 
@@ -127,10 +152,10 @@ GET /{prefix}/{product_id}/{date}/point?lat=&lon=        → variable value at p
 
 `/manifest` parameters:
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `from` | 3 months before today | Start date inclusive (YYYY-MM-DD) |
-| `to` | unbounded | End date inclusive (YYYY-MM-DD) |
+| Parameter | Default               | Description                       |
+| --------- | --------------------- | --------------------------------- |
+| `from`    | 3 months before today | Start date inclusive (YYYY-MM-DD) |
+| `to`      | unbounded             | End date inclusive (YYYY-MM-DD)   |
 
 ```json
 {
@@ -168,19 +193,19 @@ GET /visual_tiles/{product_id}/{date}/bbox?bbox=minx,miny,maxx,maxy  → colouri
 
 Visual tile query parameters:
 
-| Query param | Default | Description |
-|---|---|---|
-| `colormap` | `viridis` | Colormap name — rio-tiler built-in, matplotlib name, or custom registered name |
-| `rescale` | data min/max for the date | Value range as `min,max`, e.g. `-0.5,0.5` |
+| Query param | Default                   | Description                                                                    |
+| ----------- | ------------------------- | ------------------------------------------------------------------------------ |
+| `colormap`  | `viridis`                 | Colormap name — rio-tiler built-in, matplotlib name, or custom registered name |
+| `rescale`   | data min/max for the date | Value range as `min,max`, e.g. `-0.5,0.5`                                      |
 
 Bbox-specific query parameters:
 
-| Query param | Default | Description |
-|---|---|---|
-| `bbox` | required | Bounding box as `minx,miny,maxx,maxy` in the CRS specified by `crs` |
-| `width` | `256` | Output image width in pixels (1–2048) |
-| `height` | `256` | Output image height in pixels (1–2048) |
-| `crs` | `EPSG:4326` | CRS of the bbox coordinates. `EPSG:4326` for geographic degrees; `EPSG:3857` for Web Mercator meters (Mapbox `{bbox-epsg-3857}`) |
+| Query param | Default     | Description                                                                                                                      |
+| ----------- | ----------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `bbox`      | required    | Bounding box as `minx,miny,maxx,maxy` in the CRS specified by `crs`                                                              |
+| `width`     | `256`       | Output image width in pixels (1–2048)                                                                                            |
+| `height`    | `256`       | Output image height in pixels (1–2048)                                                                                           |
+| `crs`       | `EPSG:4326` | CRS of the bbox coordinates. `EPSG:4326` for geographic degrees; `EPSG:3857` for Web Mercator meters (Mapbox `{bbox-epsg-3857}`) |
 
 ### Admin API (`/admin`)
 
@@ -200,12 +225,12 @@ DELETE /admin/colormaps/{name}      → remove a custom colormap
 
 Products are runtime-managed: `PRODUCTS` in `constants.py` starts empty and is populated on startup from `products.json` (written by the admin API). The table below reflects the products registered in the default deployment.
 
-| Product               | Variable(s) | Zarr store                                       |
-| --------------------- | ----------- | ------------------------------------------------ |
-| Sea level anomaly     | GSLA        | `model_sea_level_anomaly_gridded_realtime.zarr`  |
-| Ocean current         | UCUR, VCUR  | `model_sea_level_anomaly_gridded_realtime.zarr`  |
-| Radar wind (SA Gulfs) | WDIR        | `radar_SouthAustraliaGulfs_wind_delayed_qc.zarr` |
-| AusTemp heatwave SSTA | ssta        | `satellite_austemp_heatwave_8day.zarr`           |
+| Product ID                                       | Variable(s) | Zarr store                                       |
+| ------------------------------------------------ | ----------- | ------------------------------------------------ |
+| `sea_level_anomaly`                              | GSLA        | `model_sea_level_anomaly_gridded_realtime.zarr`  |
+| `ocean_current`                                  | UCUR, VCUR  | `model_sea_level_anomaly_gridded_realtime.zarr`  |
+| `radar_SouthAustraliaGulfs_wind_delayed_qc_wdir` | WDIR        | `radar_SouthAustraliaGulfs_wind_delayed_qc.zarr` |
+| `satellite_austemp_heatwave_8day_ssta`           | ssta        | `satellite_austemp_heatwave_8day.zarr`           |
 
 ---
 
@@ -238,7 +263,7 @@ Products start with `lod_grids={}`. On the first request:
 1. `get_lod_grids(product)` checks `product.lod_grids` — empty, so proceeds (double-checked locking)
 2. Opens the Zarr store (singleton — reused across all calls to the same URL)
 3. Reads lat/lon dimension sizes from store metadata (`.zmetadata`, no data fetch)
-4. Calls `product.apply_computed_lod_grids(data_width, data_height)`, which runs `_compute_lod_grids` and writes the result back via `object.__setattr__` (bypasses `frozen=True` for this one field only)
+4. Calls `product.apply_computed_lod_grids(data_width, data_height)`, which runs `_compute_lod_grids` and populates the result via `self.lod_grids.update()`. Although `Product` is a frozen dataclass, `lod_grids` is a mutable dict — `update()` mutates the dict in place without reassigning the attribute, so no frozen bypass is needed.
 5. All subsequent calls return immediately from the `if product.lod_grids` guard
 
 ---
@@ -249,10 +274,10 @@ Products start with `lod_grids={}`. On the first request:
 
 ### The rule
 
-| Layer | Representation |
-|---|---|
-| Zarr store `time` coordinate | UTC — numpy `datetime64[ns]` is always UTC by convention |
-| API request/response dates | Local Australian time — `Australia/Sydney` (AEST UTC+10 / AEDT UTC+11) |
+| Layer                        | Representation                                                         |
+| ---------------------------- | ---------------------------------------------------------------------- |
+| Zarr store `time` coordinate | UTC — numpy `datetime64[ns]` is always UTC by convention               |
+| API request/response dates   | Local Australian time — `Australia/Sydney` (AEST UTC+10 / AEDT UTC+11) |
 
 All satellite passes over Australia occur during Australian daytime. Their UTC timestamps typically fall on the **previous UTC day** (e.g. a pass at `2022-06-01 01:20 AEST` is `2022-05-31 15:20 UTC`). Comparing UTC dates to local request dates directly would return a 404 for every such record.
 
@@ -268,7 +293,7 @@ def _ts_to_local_date(ts) -> str:
 ```
 
 - **`get_available_dates`** — returns local dates so the frontend always receives values it can round-trip back as request dates.
-- **`load_slice`** — converts the requested local date to local midnight, then to UTC, before calling `sel(time=..., method="nearest")`. After selection, the returned timestamp is converted back to a local date and compared to the requested date to guard against `method="nearest"` reaching too far.
+- **`load_slice`** — iterates all timestamps in the store's `time` coordinate, converts each to a local date via `_ts_to_local_date`, and collects those that match the requested date string exactly. The first matching timestamp is selected with `sel(time=pd.Timestamp(matching[0]))`. If no timestamp maps to the requested local date, `FileNotFoundError` is raised. This avoids `method="nearest"` silently serving data from an adjacent day.
 
 ### What to check when adding a new product
 
@@ -302,6 +327,7 @@ The manifest returns bounds in geographic degrees (`lonMin`, `lonMax`, `latMin`,
 **Visual tiles** are reprojected to Web Mercator (EPSG:3857) by rio-tiler's `XarrayReader`. The source data must be in EPSG:4326 — see [Visual renderer CRS requirements](#visual-renderer-crs-requirements).
 
 Plate Carrée is the right choice for data tiles because:
+
 - Source Zarr data is on a regular lat/lon grid — tiles map directly with no reprojection overhead
 - Scientific accuracy is preserved — distances at different latitudes are not distorted
 - Standard for oceanographic datasets (IMOS, ERA5, CMIP6 all use regular lat/lon grids)
@@ -314,13 +340,13 @@ The frontend map canvas is in **Web Mercator (EPSG:3857)**. The WebGL shader con
 
 The manifest is the interface between the server's coordinate system and the shader's uniforms:
 
-| Manifest field | Shader uniform | Purpose |
-|---|---|---|
-| `bounds.lonMin/lonMax/latMin/latMax` | `u_data_bounds` | geographic extent for tile sampling |
-| `lods[n].grid` | `u_lod_grids` | cols×rows per LOD for chunk lookup |
-| `valueRange` | `u_value_range` | decode uint24 back to raw value (scalar products) |
-| `uRange` / `vRange` | `u_u_range` / `u_v_range` | decode U/V bytes back to raw values (UV products) |
-| `lods[n].chunkPx` / `storedPx` / `padding` | `u_uv_scale`, `u_uv_offset` | skip padding border in atlas UV |
+| Manifest field                             | Shader uniform              | Purpose                                           |
+| ------------------------------------------ | --------------------------- | ------------------------------------------------- |
+| `bounds.lonMin/lonMax/latMin/latMax`       | `u_data_bounds`             | geographic extent for tile sampling               |
+| `lods[n].grid`                             | `u_lod_grids`               | cols×rows per LOD for chunk lookup                |
+| `valueRange`                               | `u_value_range`             | decode uint24 back to raw value (scalar products) |
+| `uRange` / `vRange`                        | `u_u_range` / `u_v_range`   | decode U/V bytes back to raw values (UV products) |
+| `lods[n].chunkPx` / `storedPx` / `padding` | `u_uv_scale`, `u_uv_offset` | skip padding border in atlas UV                   |
 
 ---
 
@@ -328,7 +354,7 @@ The manifest is the interface between the server's coordinate system and the sha
 
 Tiles are RGBA PNGs (`optimize=False`). The byte layout is fixed and consumed by a WebGL shader:
 
-- **24-bit scalar** (GSLA, SSTA, WDIR, etc.): R=high byte, G=mid byte, B=low byte of normalised uint24; A=ocean mask (255=ocean, 0=land, premultiplied).
+- **24-bit scalar** (GSLA, SSTA, WDIR, etc.): R=high byte, G=mid byte, B=low byte of normalised uint24; A=ocean mask (255=ocean, 0=land). Land pixels have RGB zeroed (premultiplied form).
 - **UV vector** (e.g. ocean current): R=U normalised to 8-bit, G=V normalised to 8-bit, B=ocean mask×255, A=255.
 
 Normalisation ranges (`valueRange`, `uRange`/`vRange`) are computed from the full pre-resampled dataset and returned in `manifest.json`. All tiles for a date share the same ranges.
@@ -360,10 +386,10 @@ Some stores use longitudes that extend past 180° (e.g. GSLA: 57–185°E). `Xar
 
 The dataset is split into two segments:
 
-| Segment | Lon range | Notes |
-|---|---|---|
-| Primary | `lon < 180` | Native coords unchanged |
-| Minor | `lon > 180` shifted by −360 | e.g. 180.2–185 → −179.8 to −175 |
+| Segment | Lon range                   | Notes                           |
+| ------- | --------------------------- | ------------------------------- |
+| Primary | `lon < 180`                 | Native coords unchanged         |
+| Minor   | `lon > 180` shifted by −360 | e.g. 180.2–185 → −179.8 to −175 |
 
 `lon == 180` is excluded from both segments to keep each segment's half-pixel rioxarray bounds strictly inside `±180`.
 
@@ -373,9 +399,9 @@ Both segments are rendered independently using `XarrayReader` and the results ar
 
 ## Caching strategy
 
-Three-tier cache stack. Cold S3 reads (~2s) are absorbed by disk (L2, ~30ms) and in-memory LRU (L1, <1ms). The disk cache is the primary mechanism for eliminating cold origin hits — it persists across server restarts and is pre-populated at startup.
+Three-tier cache stack ordered tiles → S3: L1 (processed grid) → L2 (in-memory slice) → L3 (disk) → S3. Visual tiles have no L1; requests hit L2 first. Cold S3 reads (~2s) are absorbed by disk (L3, ~30ms) and in-memory LRU (L2, <1ms). The disk cache is the primary mechanism for eliminating cold origin hits — it persists across server restarts and is pre-populated at startup.
 
-**Layer 1 — Store singleton** (`services/loader.py`, `_stores` dict keyed by URL)
+**Store singleton** (`services/loader.py`, `_stores` dict keyed by URL)
 
 Caches the open Zarr store handle (lazy, metadata only). Shared across all products using the same store.
 
@@ -384,9 +410,21 @@ Uses a **stale-while-revalidate** strategy to pick up newly appended time steps 
 - **Startup** — `prewarm_stores` in `main.py` opens every registered store in background daemon threads so the cache is warm before the first request arrives.
 - **Within TTL** — the cached store is returned immediately (sub-millisecond).
 - **After TTL** (`STORE_TTL_SECONDS`, default `600`) — the stale store is returned immediately for the current request, and a single background daemon thread calls `_refresh_store_background` to re-open the store. `_store_refreshing` prevents duplicate refresh threads for the same URL.
-- **First-ever open** (no cached entry) — the request blocks until `xr.open_zarr` completes; all concurrent requests for the same URL wait on the same `Future` rather than each opening independently.
+- **First-ever open** (no cached entry) — the request blocks until `xr.open_zarr` completes; all concurrent requests for the same URL wait on the same `concurrent.futures.Future` rather than each opening independently.
 
 Re-opening is cheap — `xr.open_zarr` reads only metadata and coordinate arrays (`time`, `lat`, `lon`), no data chunks. In-flight `load_slice` calls hold a direct Python reference to the old dataset object and complete normally. `_slice_cache` and `_processed_cache` entries for existing dates remain valid and unaffected.
+
+**Layer 1 — Processed grid cache** (`services/data_renderer.py`, keyed `(source_path, date, variable, lod)`)
+
+Stores the resampled + normalised numpy arrays for the full LOD grid. A hit reduces per-tile work to `_extract_chunk` + PNG encode only — no S3 I/O, no resampling. The key is semantic (not object identity), so cache hits survive L2 slice evictions and disk-reloaded slices.
+
+Entry sizes for the satellite heatwave product (2000×3900): LOD 1 ~1.4 MB, LOD 2 ~3.3 MB, LOD 3 ~12 MB, LOD 4 ~41 MB. GSLA and radar products have only 1 LOD level at ~1.4 MB.
+
+Size is controlled by `PROCESSED_CACHE_SIZE` (default `50`). Sized as `SLICE_CACHE_SIZE × MAX_LODS` with headroom: `10 × 4 = 40`, rounded to 50. This keeps all LOD levels warm for every date in the L2 slice cache.
+
+On product deletion, `evict_processed_cache` is called by `evict_product_cache` in `loader.py` to purge all entries matching `source_path`.
+
+Visual tiles do not use Layer 1 — `XarrayReader` handles its own rendering per request from the Layer 2 slice.
 
 **Layer 2 — Slice cache, in-memory** (`services/loader.py`, `_slice_cache` keyed `(store_url, date, variables)`)
 
@@ -394,9 +432,9 @@ Stores a fully-computed (`.compute()`) 2D lat×lon numpy slice. Sub-millisecond 
 
 Size is controlled by the `SLICE_CACHE_SIZE` env var (default `10`). Entry size varies significantly by product: ~2 MB for GSLA (351×641), ~61 MB for the satellite heatwave products (2000×3900 float64).
 
-Primary consumers are **visual_tiles** (no processed grid cache above it — every tile request calls `load_slice`) and **data_tiles manifest/point** (always need `ds` directly). For data_tiles tile requests, the slice is only loaded on a `_processed_cache` miss; once the processed grid is warm, L1 is bypassed entirely.
+Primary consumers are **visual_tiles** (no processed grid cache above it — every tile request calls `load_slice`) and **data_tiles manifest/point** (always need `ds` directly). For data_tiles tile requests, the slice is only loaded on a `_processed_cache` miss; once the processed grid is warm, L2 is bypassed entirely.
 
-**Layer 3 — Slice cache, disk** (`slice_cache/` directory, `services/loader.py`)
+**Layer 3 — Slice cache, disk** (`DISK_CACHE_PATH` directory, `services/loader.py`)
 
 Persists fully-computed slices as lz4-compressed pickles to survive server restarts. On an L2 miss, `load_slice` checks disk before going to S3. A disk hit (~30ms read + decompress) is ~60× faster than a cold S3 fetch.
 
@@ -406,41 +444,30 @@ Enabled by setting `DISK_CACHE_PATH` (e.g. `/app/slice_cache`). If unset, disk c
 
 Environment variables:
 
-| Variable | Default | Description |
-|---|---|---|
-| `DISK_CACHE_PATH` | _(unset)_ | Absolute path for disk cache. Disabled if unset. |
-| `DISK_CACHE_LIMIT_GB` | `20` | Maximum total disk usage before eviction runs |
-| `DISK_EVICTION_THRESHOLD` | `0.85` | Fraction of limit at which eviction triggers (0.0–1.0) |
-| `CACHE_DAYS` | `30` | How many of each product's most-recent available dates to cache |
-| `PREWARM_WORKERS` | `4` | Thread pool size for parallel prewarm at startup |
-| `CACHE_REFRESH_INTERVAL_SECONDS` | `14400` | How often (seconds) the background refresh cycle runs |
+| Variable                         | Default   | Description                                                     |
+| -------------------------------- | --------- | --------------------------------------------------------------- |
+| `DISK_CACHE_PATH`                | _(unset)_ | Absolute path for disk cache. Disabled if unset.                |
+| `DISK_CACHE_LIMIT_GB`            | `20`      | Maximum total disk usage before eviction runs                   |
+| `DISK_EVICTION_THRESHOLD`        | `0.85`    | Fraction of limit at which eviction triggers (0.0–1.0)          |
+| `CACHE_DAYS`                     | `30`      | How many of each product's most-recent available dates to cache |
+| `PREWARM_WORKERS`                | `4`       | Thread pool size for parallel prewarm at startup                |
+| `CACHE_REFRESH_INTERVAL_SECONDS` | `14400`   | How often (seconds) the background refresh cycle runs           |
 
 **Startup prewarm** — `prewarm_disk_slices` runs at startup (and whenever a new product is added via the admin API). It fetches the latest `CACHE_DAYS` dates for every product using a `ThreadPoolExecutor` (`PREWARM_WORKERS` workers). Each job calls `load_slice`, which reads from disk if already cached or fetches from S3 and writes to disk. For 4 products × 30 dates with 4 workers, cold prewarm takes ~60s; subsequent restarts hit disk immediately (~30ms each, ~30s total).
 
 **Refresh cycle** — `_cache_refresh_loop` wakes every `CACHE_REFRESH_INTERVAL_SECONDS` (default 4 hours) and calls `refresh_disk_cache`. In steady state (IMOS data is daily), this adds ~1 new date per product and evicts dates that have rolled outside the `CACHE_DAYS` window. The refresh runs in a background thread via `asyncio.to_thread` — the event loop is never blocked, and concurrent requests are unaffected.
 
 **Eviction**:
-- *Stale dates* — `refresh_disk_cache` deletes any `.pkl.lz4` files whose dates are no longer in the `CACHE_DAYS` window.
-- *Disk pressure* — `_evict_disk_if_needed` (called at the start of each refresh cycle) removes files when total usage exceeds `DISK_EVICTION_THRESHOLD × DISK_CACHE_LIMIT_GB`. Files are sorted `(size ascending, date ascending)` — small+old files are evicted first, keeping the large satellite slices that would be most expensive to re-fetch.
-- *Product deletion* — `evict_product_cache` (called by `DELETE /admin/products/{id}`) removes the product's disk directory via `shutil.rmtree` and purges matching entries from the in-memory L2 cache immediately.
+
+- _Stale dates_ — `refresh_disk_cache` deletes any `.pkl.lz4` files whose dates are no longer in the `CACHE_DAYS` window.
+- _Disk pressure_ — `_evict_disk_if_needed` (called at the start of each refresh cycle) removes files when total usage exceeds `DISK_EVICTION_THRESHOLD × DISK_CACHE_LIMIT_GB`. Files are sorted `(size ascending, date ascending)` — small+old files are evicted first, keeping the large satellite slices that would be most expensive to re-fetch.
+- _Product deletion_ — `evict_product_cache` (called by `DELETE /admin/products/{id}`) removes the product's disk directory via `shutil.rmtree` and purges matching entries from the L2 in-memory cache immediately.
 
 Disk eviction never invalidates L2 in-memory entries — the in-memory data is still valid and serves requests until it falls out of the LRU naturally.
 
-**Layer 4 — Processed grid cache** (`services/data_renderer.py`, keyed `(source_path, date, variable, lod)`)
-
-Stores the resampled + normalised numpy arrays for the full LOD grid. A hit reduces per-tile work to `_extract_chunk` + PNG encode only — no S3 I/O, no resampling. The key is semantic (not object identity), so cache hits survive L1 slice evictions and disk-reloaded slices.
-
-Entry sizes for the satellite heatwave product (2000×3900): LOD 1 ~1.4 MB, LOD 2 ~3.3 MB, LOD 3 ~12 MB, LOD 4 ~41 MB. GSLA and radar products have only 1 LOD level at ~1.4 MB.
-
-Size is controlled by `PROCESSED_CACHE_SIZE` (default `50`). Sized as `SLICE_CACHE_SIZE × MAX_LODS` with headroom: `10 × 4 = 40`, rounded to 50. This keeps all LOD levels warm for every date in the L1 slice cache.
-
-On product deletion, `evict_processed_cache` is called by `evict_product_cache` in `loader.py` to purge all entries matching `source_path`.
-
-Visual tiles do not use Layer 4 — `XarrayReader` handles its own rendering per request from the Layer 2 slice.
-
 ### Thread safety
 
-All caches use `threading.Lock`. The processed grid cache additionally uses a `threading.Event` per in-flight key: concurrent requests for the same `(ds, lod)` wait for the first computation to complete rather than duplicating it.
+All caches use `threading.Lock`. Concurrent requests for the same in-flight key are deduplicated via `concurrent.futures.Future`: the first thread to miss the cache creates a `Future` and does the work; all other threads arriving for the same key block on `future.result()` and receive the same result when the single computation completes. This applies to both `_slice_in_flight` (slice cache) and `_processed_inflight` (processed grid cache). Errors propagate to all waiting threads so a failed request does not permanently block future attempts for the same key.
 
 ---
 
@@ -490,7 +517,7 @@ Each custom colormap is a list of exactly 256 RGBA tuples — one per normalised
 
 ### Cache behaviour
 
-`_colormap()` in `services/visual_renderer.py` is `@lru_cache`-d (max 64 entries). The cache is cleared automatically whenever a colormap is added, updated, or deleted via the admin API.
+`_colormap()` in `services/visual_renderer.py` is `@lru_cache`-d (max 64 entries). The cache is cleared automatically whenever a colormap is added or deleted via the admin API — `colormap_store._reload()` calls `_colormap.cache_clear()` after every write.
 
 ---
 
@@ -519,24 +546,26 @@ curl -X DELETE http://localhost:8000/admin/products/my_product \
 ```
 
 On the first request after registration:
+
 - The store is opened and coordinates are normalised automatically
 - LOD grids are computed from the store's actual lat/lon dimensions
 - Rendering and manifest generation work generically from `product.variable`
+- Disk cache prewarm is triggered immediately in a background thread
 
 ### Requirements for the Zarr store
 
-| Requirement | Detail |
-|---|---|
-| Coordinate names | Must be `lat`/`lon`/`time`, or the uppercase variants `LATITUDE`/`LONGITUDE`/`TIME` (renamed automatically on open). If a store uses different names, add a mapping to `COORD_NAMES` in `constants.py`. |
-| Spatial dimensions | `lat` and `lon` must be present after normalisation — `_open_store` raises `ValueError` with a clear message if not. |
-| Variable | The variable(s) named in `Product.variable` must exist in the store. |
+| Requirement        | Detail                                                                                                                                                                                                  |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Coordinate names   | Must be `lat`/`lon`/`time`, or the uppercase variants `LATITUDE`/`LONGITUDE`/`TIME` (renamed automatically on open). If a store uses different names, add a mapping to `COORD_NAMES` in `constants.py`. |
+| Spatial dimensions | `lat` and `lon` must be present after normalisation — `_open_store` raises `ValueError` with a clear message if not.                                                                                    |
+| Variable           | The variable(s) named in `Product.variable` must exist in the store.                                                                                                                                    |
 
 ### Optional overrides
 
 `Product` fields can be customised per product if the defaults don't fit:
 
-| Field | Default | When to override |
-|---|---|---|
-| `chunk_px` | `(240, 192)` | Store has very small or very large spatial extent |
-| `padding` | `1` | Tile edge artefacts, or no padding needed |
+| Field       | Default              | When to override                                          |
+| ----------- | -------------------- | --------------------------------------------------------- |
+| `chunk_px`  | `(240, 192)`         | Store has very small or very large spatial extent         |
+| `padding`   | `1`                  | Tile edge artefacts, or no padding needed                 |
 | `lod_grids` | `{}` (auto-computed) | Pre-set known grids to skip the first-request computation |

@@ -9,17 +9,17 @@ FastAPI runs `def` route handlers in a thread pool managed by anyio. Each concur
 `load_slice` is lazy — the route handler passes a callable to `render_tile`, which only invokes it if `_get_processed` misses. Each request falls into one of these paths:
 
 - **Processed warm** — `(product, date, lod)` already in `_processed_cache`. The thread does `_extract_chunk` + PNG encode only — no S3, disk, or slice I/O at all.
-- **Slice warm** — `_processed_cache` misses; `(product, date)` is in the L1 slice cache. The thread loads `ds` from memory, resamples, populates `_processed_cache`, then encodes the tile.
-- **Disk warm** — `_processed_cache` and L1 both miss; `(product, date)` is on disk. The thread reads + decompresses the lz4 pickle (~30ms), resamples, populates both caches, then encodes.
-- **Cold** — nothing cached. The thread fetches Zarr chunks from S3 (`.compute()`, ~2s), writes to disk and L1, resamples, populates `_processed_cache`, then encodes.
+- **Slice warm** — `_processed_cache` misses; `(product, date)` is in the L2 slice cache. The thread loads `ds` from memory, resamples, populates `_processed_cache`, then encodes the tile.
+- **Disk warm** — `_processed_cache` and L2 both miss; `(product, date)` is on disk. The thread reads + decompresses the lz4 pickle (~30ms), resamples, populates both caches, then encodes.
+- **Cold** — nothing cached. The thread fetches Zarr chunks from S3 (`.compute()`, ~2s), writes to disk and L2, resamples, populates `_processed_cache`, then encodes.
 
 ### Visual tile paths (`/visual_tiles/.../tiles/` and `/bbox`)
 
 No processed grid cache. Each request calls `load_slice` unconditionally:
 
-- **L1 warm** — `(product, date)` in the L1 slice cache. The thread reads `ds` from memory and renders via `XarrayReader`.
-- **Disk warm** — L1 miss; slice on disk. Reads + decompresses, populates L1, renders.
-- **Cold** — fetches from S3, writes to disk and L1, renders.
+- **L2 warm** — `(product, date)` in the L2 slice cache. The thread reads `ds` from memory and renders via `XarrayReader`.
+- **Disk warm** — L2 miss; slice on disk. Reads + decompresses, populates L2, renders.
+- **Cold** — fetches from S3, writes to disk and L2, renders.
 
 All paths share the same thread pool and compete for the same slots. Processed-warm data tile requests are fastest and release their slot quickly; cold requests hold slots for seconds.
 
@@ -35,7 +35,7 @@ All paths share the same thread pool and compete for the same slots. Processed-w
 | ---------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------- |
 | `THREAD_POOL_SIZE`     | `100`   | Max concurrent requests. Raise if you observe queuing under high load.                                                                |
 | `SLICE_CACHE_SIZE`     | `10`    | Number of concurrent active `(product, date)` pairs for visual_tiles. Each satellite heatwave slice is ~61 MB.                       |
-| `PROCESSED_CACHE_SIZE` | `50`    | `SLICE_CACHE_SIZE × MAX_LODS (4)` with headroom — keeps all LOD levels warm for every date in the L1 slice cache. Each satellite LOD 4 entry is ~41 MB. |
+| `PROCESSED_CACHE_SIZE` | `50`    | `SLICE_CACHE_SIZE × MAX_LODS (4)` with headroom — keeps all LOD levels warm for every date in the L2 slice cache. Each satellite LOD 4 entry is ~41 MB. |
 
 ### Store TTL
 

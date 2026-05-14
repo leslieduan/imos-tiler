@@ -193,7 +193,7 @@ def _prewarm_one(product: Product, date: str, variables: list[str]) -> None:
 
 
 def prewarm_disk_slices(products: list[Product]) -> None:
-    """Populate L1 from disk on startup; write to disk for any dates not yet cached.
+    """Populate L2 from disk on startup; write to disk for any dates not yet cached.
 
     Parallelises across (product, date) pairs — PREWARM_WORKERS controls concurrency
     (default 4). Cold S3 reads for different keys run concurrently; _slice_in_flight
