@@ -28,7 +28,7 @@ admin_router = APIRouter(dependencies=[Depends(_require_admin_key)])
 class ProductPayload(BaseModel):
     id: str
     source_path: str
-    variable: str | list[str] = ""
+    variable: str | list[str]
     chunk_px: list[int] = Field(default_factory=lambda: list(CHUNK_PX))
     padding: int = PADDING
 

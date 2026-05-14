@@ -20,10 +20,14 @@ COLORMAPS_CONFIG_PATH = os.environ.get("COLORMAPS_CONFIG_PATH", "colormaps.json"
 class Product:
     id: str
     source_path: str
-    variable: str | list[str] = ""
+    variable: str | list[str]
     lod_grids: dict[int, tuple[int, int]] = field(default_factory=dict)
     chunk_px: tuple[int, int] = CHUNK_PX
     padding: int = PADDING
+
+    def __post_init__(self) -> None:
+        if not self.variable:
+            raise ValueError(f"Product '{self.id}' must specify at least one variable")
 
     @staticmethod
     def _compute_lod_grids(
