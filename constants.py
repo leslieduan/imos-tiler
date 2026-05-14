@@ -63,9 +63,7 @@ class Product:
         """Compute and cache lod_grids from native data dimensions. No-op if already set."""
         if self.lod_grids:
             return
-        object.__setattr__(
-            self, "lod_grids", self._compute_lod_grids(data_width, data_height, self.chunk_px)
-        )
+        self.lod_grids.update(self._compute_lod_grids(data_width, data_height, self.chunk_px))
 
 
 PRODUCTS: dict[str, Product] = {}
