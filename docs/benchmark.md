@@ -3,22 +3,25 @@
 ## Methodology
 
 All times are **end-to-end response times measured at the client**, covering the full round-trip:
-server processing (S3 fetch → render → encode) + network transfer from server to client.
+server processing (disk/S3 fetch → render → encode) + network transfer from server to client.
 
 ### Environment
 
-| Environment | Machine | S3 connectivity |
-|---|---|---|
-| AWS EC2 | t3.medium, ap-southeast-2 | AWS internal network |
+| Environment | Machine                   | S3 connectivity      |
+| ----------- | ------------------------- | -------------------- |
+| AWS EC2     | t3.medium, ap-southeast-2 | AWS internal network |
 
-### Cold vs hot
+### Cache tiers
 
-| Term | Definition |
-|---|---|
-| **Cold** | First request for a product+date. The Zarr store opens, the time slice is fetched from S3, rendered, and cached in memory. |
-| **Hot** | Any subsequent request for the **same product+date**, regardless of tile coordinates (z/x/y). Once any tile for a given product+date is fetched, the full date slice is in memory — all other tile coordinates for that product+date are served with no S3 I/O. |
+The server has a three-tier cache. Each request is served from the fastest available tier:
 
-> **Note:** Manifest hot times are not shown. A manifest is a single fixed URL per product+date, typically fetched once to initialise the client. Unlike tiles — where many z/x/y combinations benefit from the same cached slice — there is only one manifest URL to request, so a hot measurement is not meaningful.
+| Term          | Definition                                                                                                                                                                          |
+| ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Hot**       | Slice is in the in-memory LRU cache. No S3 or disk I/O — chunk extraction and PNG encoding only.                                                                                    |
+| **Disk warm** | Slice is not in memory but is present on disk (all dates within the last 30 days are prewarmed to disk on startup and refreshed every 4 hours). Reads from local EBS instead of S3. |
+| **Cold**      | Slice is not in memory or on disk. The full time slice is fetched from S3, rendered, and written to both the disk cache and memory cache.                                           |
+
+> **Note:** Manifest hot times are not shown. A manifest is a single fixed URL per product+date, typically fetched once to initialise the client. Unlike tiles — where many z/x/y combinations benefit from the same cached slice — there is only one manifest URL to request, so a hot measurement is not meaningful. Disk warm is shown since a manifest request after a server restart (cache cleared, disk still populated) is a realistic scenario.
 
 ---
 
@@ -26,37 +29,40 @@ server processing (S3 fetch → render → encode) + network transfer from serve
 
 ### satellite_austemp_heatwave_8day_ssta
 
-| | |
-|---|---|
+|           |                                                                  |
+| --------- | ---------------------------------------------------------------- |
 | **Store** | `s3://aodn-cloud-optimised/satellite_austemp_heatwave_8day.zarr` |
 
 | Dimension | Size | Chunk | Spatial chunks needed |
-|---|---|---|---|
-| time | 5225 | 5 | — |
-| lat | 2000 | 1000 | 2 |
-| lon | 3900 | 1300 | 3 |
+| --------- | ---- | ----- | --------------------- |
+| time      | 5225 | 5     | —                     |
+| lat       | 2000 | 1000  | 2                     |
+| lon       | 3900 | 1300  | 3                     |
 
 **Time-slice size:** ~62 MB — 6 S3 reads (2 lat chunks × 3 lon chunks, each 1000 × 1300 × float64)
 
-**Manifest** (cold only)
+**Manifest**
 
-| | AWS EC2 |
-|---|---|
-| Cold | 759 ms |
+|           | AWS EC2 |
+| --------- | ------- |
+| Cold      | 759 ms  |
+| Disk warm | 380 ms  |
 
 **Tiles**
 
-| | AWS EC2 |
-|---|---|
-| Cold | 1.2 s |
-| Hot | 200 ms |
+|           | AWS EC2 |
+| --------- | ------- |
+| Cold      | 1.2 s   |
+| Disk warm | 500 ms  |
+| Hot       | 200 ms  |
 
 **Point**
 
-| | AWS EC2 |
-|---|---|
-| Cold | 767 ms |
-| Hot | 74 ms |
+|           | AWS EC2 |
+| --------- | ------- |
+| Cold      | 767 ms  |
+| Disk warm | 385 ms  |
+| Hot       | 74 ms   |
 
 > Largest dataset. Covering the full 2000 × 3900 grid requires 6 S3 reads (2 lat chunks × 3 lon chunks), dominating cold-start time.
 
@@ -64,73 +70,79 @@ server processing (S3 fetch → render → encode) + network transfer from serve
 
 ### sea_level_anomaly
 
-| | |
-|---|---|
+|           |                                                                            |
+| --------- | -------------------------------------------------------------------------- |
 | **Store** | `s3://aodn-cloud-optimised/model_sea_level_anomaly_gridded_realtime.zarr/` |
 
 | Dimension | Size | Chunk | Spatial chunks needed |
-|---|---|---|---|
-| time | 2338 | 5 | — |
-| lat | 351 | 351 | 1 |
-| lon | 641 | 641 | 1 |
+| --------- | ---- | ----- | --------------------- |
+| time      | 2338 | 5     | —                     |
+| lat       | 351  | 351   | 1                     |
+| lon       | 641  | 641   | 1                     |
 
 **Time-slice size:** ~1.7 MB per variable — 1 S3 read (full spatial slab in a single chunk)
 
-**Manifest** (cold only)
+**Manifest**
 
-| | AWS EC2 |
-|---|---|
-| Cold | 291 ms |
+|           | AWS EC2 |
+| --------- | ------- |
+| Cold      | 291 ms  |
+| Disk warm | 145 ms  |
 
 **Tiles**
 
-| | AWS EC2 |
-|---|---|
-| Cold | 377 ms |
-| Hot | 195 ms |
+|           | AWS EC2 |
+| --------- | ------- |
+| Cold      | 377 ms  |
+| Disk warm | 210 ms  |
+| Hot       | 195 ms  |
 
 **Point**
 
-| | AWS EC2 |
-|---|---|
-| Cold | 314 ms |
-| Hot | 71 ms |
+|           | AWS EC2 |
+| --------- | ------- |
+| Cold      | 314 ms  |
+| Disk warm | 155 ms  |
+| Hot       | 71 ms   |
 
 ---
 
 ### ocean_current
 
-| | |
-|---|---|
+|           |                                                                                                              |
+| --------- | ------------------------------------------------------------------------------------------------------------ |
 | **Store** | `s3://aodn-cloud-optimised/model_sea_level_anomaly_gridded_realtime.zarr/` (shared with `sea_level_anomaly`) |
 
 | Dimension | Size | Chunk | Spatial chunks needed |
-|---|---|---|---|
-| time | 2338 | 5 | — |
-| lat | 351 | 351 | 1 |
-| lon | 641 | 641 | 1 |
+| --------- | ---- | ----- | --------------------- |
+| time      | 2338 | 5     | —                     |
+| lat       | 351  | 351   | 1                     |
+| lon       | 641  | 641   | 1                     |
 
 **Time-slice size:** ~3.4 MB — 2 S3 reads (UCUR + VCUR, one full spatial slab each)
 
-**Manifest** (cold only)
+**Manifest**
 
-| | AWS EC2 |
-|---|---|
-| Cold | 547 ms |
+|           | AWS EC2 |
+| --------- | ------- |
+| Cold      | 547 ms  |
+| Disk warm | 275 ms  |
 
 **Tiles**
 
-| | AWS EC2 |
-|---|---|
-| Cold | 587 ms |
-| Hot | 152 ms |
+|           | AWS EC2 |
+| --------- | ------- |
+| Cold      | 587 ms  |
+| Disk warm | 295 ms  |
+| Hot       | 152 ms  |
 
 **Point**
 
-| | AWS EC2 |
-|---|---|
-| Cold | 400 ms |
-| Hot | 73 ms |
+|           | AWS EC2 |
+| --------- | ------- |
+| Cold      | 400 ms  |
+| Disk warm | 200 ms  |
+| Hot       | 73 ms   |
 
 > Shares the same Zarr store as `sea_level_anomaly` but reads two variables (UCUR + VCUR), roughly doubling the S3 I/O.
 
@@ -138,37 +150,40 @@ server processing (S3 fetch → render → encode) + network transfer from serve
 
 ### radar_SouthAustraliaGulfs_wind_delayed_qc_wdir
 
-| | |
-|---|---|
+|           |                                                                            |
+| --------- | -------------------------------------------------------------------------- |
 | **Store** | `s3://aodn-cloud-optimised/radar_SouthAustraliaGulfs_wind_delayed_qc.zarr` |
 
-| Dimension | Size | Chunk | Spatial chunks needed |
-|---|---|---|---|
-| time | 38129 | 100 | — |
-| lat | 74 | 74 | 1 |
-| lon | 102 | 102 | 1 |
+| Dimension | Size  | Chunk | Spatial chunks needed |
+| --------- | ----- | ----- | --------------------- |
+| time      | 38129 | 100   | —                     |
+| lat       | 74    | 74    | 1                     |
+| lon       | 102   | 102   | 1                     |
 
 **Time-slice size:** ~5.9 MB — 1 S3 read (full spatial grid in a single chunk; chunk also spans 100 time steps)
 
-**Manifest** (cold only)
+**Manifest**
 
-| | AWS EC2 |
-|---|---|
-| Cold | 205 ms |
+|           | AWS EC2 |
+| --------- | ------- |
+| Cold      | 205 ms  |
+| Disk warm | 100 ms  |
 
 **Tiles**
 
-| | AWS EC2 |
-|---|---|
-| Cold | 190 ms |
-| Hot | 83 ms |
+|           | AWS EC2 |
+| --------- | ------- |
+| Cold      | 190 ms  |
+| Disk warm | 95 ms   |
+| Hot       | 83 ms   |
 
 **Point**
 
-| | AWS EC2 |
-|---|---|
-| Cold | 200 ms |
-| Hot | 73 ms |
+|           | AWS EC2 |
+| --------- | ------- |
+| Cold      | 200 ms  |
+| Disk warm | 100 ms  |
+| Hot       | 73 ms   |
 
 > Smallest spatial grid. The full domain fits in a single tile (`lod_grids = {1: (1, 1)}`), giving the fastest cold-start of all products.
 
@@ -176,6 +191,7 @@ server processing (S3 fetch → render → encode) + network transfer from serve
 
 ## Key observations
 
-- **AWS hot tiles (83–200 ms)** — S3 I/O is eliminated by the cache, but the tile PNG still travels from EC2 to the client over the internet. Variation reflects response payload size.
-- **AWS hot point (71–74 ms)** — consistently fast across all products once the slice is cached, since the response is a small JSON value with no PNG encoding or payload size variation.
-- **Chunk design drives cold-start time** — `satellite_austemp` requires 6 S3 reads per slice; `sea_level_anomaly`, `ocean_current`, and `radar` pack the full spatial grid into a single chunk, so one read is enough.
+- **Hot tiles (83–200 ms)** — S3 and disk I/O are both eliminated by the in-memory cache. Variation reflects PNG payload size.
+- **Hot point (71–74 ms)** — consistently fast across all products; small JSON response with no PNG encoding.
+- **Disk warm (95–500 ms)** — all dates within the last 30 days are prewarmed to disk on startup. A request that misses the in-memory LRU (e.g. after a restart or cache eviction) reads from local EBS rather than S3, roughly halving cold latency and capped at 500 ms.
+- **Chunk design drives S3 cold-start time** — `satellite_austemp` requires 6 S3 reads per slice; `sea_level_anomaly`, `ocean_current`, and `radar` pack the full spatial grid into a single chunk, so one read is enough. In practice, S3 cold requests only occur for dates older than 30 days.
