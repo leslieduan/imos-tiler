@@ -6,9 +6,9 @@ client = TestClient(app, raise_server_exceptions=True)
 
 
 def test_root():
-    response = client.get("/")
+    response = client.get("/health")
     assert response.status_code == 200
-    assert response.json() == {"message": "Welcome to TiTiler"}
+    assert response.json() == {"status": "ok"}
 
 
 def test_openapi_schema():
