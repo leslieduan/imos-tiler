@@ -36,7 +36,7 @@ _lod_grids_lock = threading.Lock()
 # Each slice is ~7 MB (4 variables × 351 × 641 × float64).
 # SLICE_CACHE_SIZE controls how many slices to hold in memory (default 50 ≈ 350 MB).
 # Raise this as you add products/dates; lower it on memory-constrained deployments.
-_SLICE_CACHE_SIZE = int(os.environ.get("SLICE_CACHE_SIZE", 100))
+_SLICE_CACHE_SIZE = int(os.environ.get("SLICE_CACHE_SIZE", 10))
 _CACHE_DAYS = int(os.environ.get("CACHE_DAYS", 30))
 _slice_cache: LRUCache = LRUCache(maxsize=_SLICE_CACHE_SIZE)
 _slice_lock = threading.Lock()

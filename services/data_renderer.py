@@ -13,6 +13,7 @@ import logging
 import math
 import os
 import threading
+from collections.abc import Callable
 from io import BytesIO
 
 import numpy as np
@@ -24,13 +25,8 @@ from constants import LOD_ZOOM_THRESHOLDS, Product
 
 logger = logging.getLogger(__name__)
 
-# Caches the full resampled grid arrays for a (product, date, lod) combination so that
-# all tile requests for the same date+LOD share one resample instead of each repeating it.
-# Key is (source_path, date, variable, lod) — semantic identity, not object identity —
-# so the cache survives L1 slice evictions and disk-reloaded slices still hit here.
-# PROCESSED_CACHE_SIZE should be >= SLICE_CACHE_SIZE × number of LOD levels so that
-# every cached slice can have its processed grids cached too.
-_PROCESSED_CACHE_SIZE = int(os.environ.get("PROCESSED_CACHE_SIZE", 400))
+
+_PROCESSED_CACHE_SIZE = int(os.environ.get("PROCESSED_CACHE_SIZE", 50))
 _processed_cache: LRUCache = LRUCache(maxsize=_PROCESSED_CACHE_SIZE)
 _processed_inflight: dict = {}
 _processed_lock = threading.Lock()
@@ -112,7 +108,10 @@ def _compute_uv(
     return u_norm, v_norm, ocean
 
 
-def _get_processed(product: Product, ds: xr.Dataset, lod: int, date: str) -> tuple:
+def _get_processed(
+    product: Product, load_ds: Callable[[], xr.Dataset], lod: int, date: str
+) -> tuple:
+    """load_ds only called once per (product, date) when the processed grid is not cached yet."""
     key = (product.source_path, date, str(product.variable), lod)
 
     while True:
@@ -128,6 +127,7 @@ def _get_processed(product: Product, ds: xr.Dataset, lod: int, date: str) -> tup
         event.wait()
 
     try:
+        ds = load_ds()
         result = (
             _compute_uv(product, ds, lod)
             if isinstance(product.variable, list)
@@ -191,13 +191,15 @@ def _to_png_bytes(img_array: np.ndarray) -> bytes:
     return buf.getvalue()
 
 
-def render_tile(product: Product, ds: xr.Dataset, lod: int, cx: int, cy: int, date: str) -> bytes:
+def render_tile(
+    product: Product, load_ds: Callable[[], xr.Dataset], lod: int, cx: int, cy: int, date: str
+) -> bytes:
     grid_cols, grid_rows = product.lod_grids[lod]
     total_w = grid_cols * product.chunk_px[0]
     total_h = grid_rows * product.chunk_px[1]
 
     if isinstance(product.variable, list):
-        u_norm, v_norm, ocean = _get_processed(product, ds, lod, date)
+        u_norm, v_norm, ocean = _get_processed(product, load_ds, lod, date)
         chunk_u = _extract_chunk(
             u_norm, cx, cy, total_w, total_h, product.chunk_px, product.padding
         )
@@ -212,7 +214,7 @@ def render_tile(product: Product, ds: xr.Dataset, lod: int, cx: int, cy: int, da
         img[:, :, 2] = chunk_m * 255
         img[:, :, 3] = 255
     else:
-        val_24, ocean = _get_processed(product, ds, lod, date)
+        val_24, ocean = _get_processed(product, load_ds, lod, date)
         chunk_24 = _extract_chunk(
             val_24, cx, cy, total_w, total_h, product.chunk_px, product.padding
         )

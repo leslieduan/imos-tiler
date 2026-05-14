@@ -61,10 +61,12 @@ Zarr eliminates this entirely: metadata is one `.zmetadata` HTTP request, and va
 
 **Data tiles** (`/data_tiles/{product_id}/{date}/tiles/{z}/{x}/{y}.png`):
 
+`load_slice` is lazy — it is only called when `_get_processed` misses. On a processed cache hit, no slice I/O occurs at all.
+
 ```
-S3 cold   → get_lod_grids (opens store, computes lod_grids) → load_slice (S3 .compute(), ~2s)  → _get_processed (resample) → _extract_chunk → PNG encode
-disk warm → get_lod_grids (already set)                     → load_slice (disk read, ~30ms)     → _get_processed (resample) → _extract_chunk → PNG encode
-mem warm  → get_lod_grids (already set)                     → load_slice (L1 hit, <1ms)         → _get_processed (cache hit) → _extract_chunk → PNG encode
+processed warm → get_lod_grids (already set) → _get_processed (cache hit)                                 → _extract_chunk → PNG encode
+disk warm      → get_lod_grids (already set) → _get_processed miss → load_slice (disk read, ~30ms)        → resample → cache → _extract_chunk → PNG encode
+S3 cold        → get_lod_grids (already set) → _get_processed miss → load_slice (S3 .compute(), ~2s)      → resample → cache → _extract_chunk → PNG encode
 ```
 
 **Visual tiles** (`/visual_tiles/{product_id}/{date}/tiles/{z}/{x}/{y}.png` or `/bbox`):
@@ -390,9 +392,9 @@ Re-opening is cheap — `xr.open_zarr` reads only metadata and coordinate arrays
 
 Stores a fully-computed (`.compute()`) 2D lat×lon numpy slice. Sub-millisecond on hit. Keyed by `variables` so different products using the same store cache independently.
 
-Size is controlled by the `SLICE_CACHE_SIZE` env var (default `100`). Each entry is roughly 2–7 MB depending on grid size and number of variables. Should be kept at least equal to `THREAD_POOL_SIZE` so a burst of cold requests does not immediately evict freshly computed slices.
+Size is controlled by the `SLICE_CACHE_SIZE` env var (default `10`). Entry size varies significantly by product: ~2 MB for GSLA (351×641), ~61 MB for the satellite heatwave products (2000×3900 float64).
 
-`id(ds)` is stable for as long as a slice is held in `_slice_cache` — this is the anchor for Layer 4.
+Primary consumers are **visual_tiles** (no processed grid cache above it — every tile request calls `load_slice`) and **data_tiles manifest/point** (always need `ds` directly). For data_tiles tile requests, the slice is only loaded on a `_processed_cache` miss; once the processed grid is warm, L1 is bypassed entirely.
 
 **Layer 3 — Slice cache, disk** (`slice_cache/` directory, `services/loader.py`)
 
@@ -424,11 +426,15 @@ Environment variables:
 
 Disk eviction never invalidates L2 in-memory entries — the in-memory data is still valid and serves requests until it falls out of the LRU naturally.
 
-**Layer 4 — Processed grid cache** (`services/data_renderer.py`, keyed `(id(ds), lod)`)
+**Layer 4 — Processed grid cache** (`services/data_renderer.py`, keyed `(source_path, date, variable, lod)`)
 
-Stores the resampled + normalised numpy arrays for the full LOD grid. A hit reduces per-tile work to `_extract_chunk` + PNG encode only — no S3 I/O, no resampling. `id(ds)` is stable because `ds` is held alive by Layer 2.
+Stores the resampled + normalised numpy arrays for the full LOD grid. A hit reduces per-tile work to `_extract_chunk` + PNG encode only — no S3 I/O, no resampling. The key is semantic (not object identity), so cache hits survive L1 slice evictions and disk-reloaded slices.
 
-Size is controlled by the `PROCESSED_CACHE_SIZE` env var (default `400`). Should be set to at least `SLICE_CACHE_SIZE × number_of_LOD_levels` so every cached slice can have its processed grids cached too.
+Entry sizes for the satellite heatwave product (2000×3900): LOD 1 ~1.4 MB, LOD 2 ~3.3 MB, LOD 3 ~12 MB, LOD 4 ~41 MB. GSLA and radar products have only 1 LOD level at ~1.4 MB.
+
+Size is controlled by `PROCESSED_CACHE_SIZE` (default `50`). Sized as `SLICE_CACHE_SIZE × MAX_LODS` with headroom: `10 × 4 = 40`, rounded to 50. This keeps all LOD levels warm for every date in the L1 slice cache.
+
+On product deletion, `evict_processed_cache` is called by `evict_product_cache` in `loader.py` to purge all entries matching `source_path`.
 
 Visual tiles do not use Layer 4 — `XarrayReader` handles its own rendering per request from the Layer 2 slice.
 
@@ -442,13 +448,15 @@ All caches use `threading.Lock`. The processed grid cache additionally uses a `t
 
 See [`docs/concurrency.md`](concurrency.md) for the full concurrency model, capacity evaluation, stampede protection, and scaling notes.
 
-The three sizing env vars form a consistent chain — if you raise `THREAD_POOL_SIZE`, raise the other two proportionally:
+Cache sizing is driven by dataset slice size and concurrent active dates, not by `THREAD_POOL_SIZE`. The satellite heatwave products (2000×3900, ~61 MB/slice) dominate memory; GSLA and radar are negligible by comparison.
 
 ```
-THREAD_POOL_SIZE=100  →  SLICE_CACHE_SIZE=100  →  PROCESSED_CACHE_SIZE=400
-(max concurrent cold       (retain everything          (SLICE_CACHE_SIZE × ~4 LOD levels)
- requests)                  that gets computed)
+SLICE_CACHE_SIZE=10        →  PROCESSED_CACHE_SIZE=50
+(concurrent active dates       (SLICE_CACHE_SIZE × MAX_LODS(4) + headroom)
+ for visual_tiles + manifest)
 ```
+
+`THREAD_POOL_SIZE` controls request concurrency independently. Concurrent in-flight slice loads each hold ~61 MB in RAM for the duration of the request — `_slice_in_flight` deduplicates concurrent requests for the same key, limiting peak in-flight memory to `unique_keys × slice_size` rather than `THREAD_POOL_SIZE × slice_size`.
 
 ---
 
