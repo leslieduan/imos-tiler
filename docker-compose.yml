@@ -23,6 +23,12 @@ services:
       - PREWARM_WORKERS=${PREWARM_WORKERS:-4}
       - CACHE_REFRESH_INTERVAL_SECONDS=${CACHE_REFRESH_INTERVAL_SECONDS:-14400}
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
     logging:
       driver: awslogs
       options:
@@ -31,6 +37,14 @@ services:
         awslogs-stream: app
         awslogs-create-group: "true"
 
+  autoheal:
+    image: willfarrell/autoheal:latest
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - AUTOHEAL_CONTAINER_LABEL=all
+
   nginx:
     image: nginx:alpine
     ports:
@@ -38,7 +52,8 @@ services:
     volumes:
       - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
     depends_on:
-      - app
+      app:
+        condition: service_healthy
     restart: unless-stopped
     logging:
       driver: awslogs

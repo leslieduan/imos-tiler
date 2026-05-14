@@ -100,6 +100,6 @@ async def global_exception_handler(request: Request, exc: Exception) -> JSONResp
     return JSONResponse(status_code=500, content={"detail": "Internal server error"})
 
 
-@app.get("/")
-def read_index():
-    return {"message": "Welcome to TiTiler"}
+@app.get("/health")
+def health():
+    return {"status": "ok"}
