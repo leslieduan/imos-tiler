@@ -185,14 +185,14 @@ def _evict_disk_if_needed() -> None:
 
 def _prewarm_one(product: Product, date: str, variables: list[str]) -> None:
     try:
-        ds = load_slice(product.source_path, date, variables)
         cache_path = _disk_cache_path(product.source_path, date, variables)
-        if cache_path is not None and not cache_path.exists():
+        if cache_path is not None and cache_path.exists():
+            return
+        ds = load_slice(product.source_path, date, variables)
+        if cache_path is not None:
             cache_path.parent.mkdir(parents=True, exist_ok=True)
             cache_path.write_bytes(lz4.frame.compress(pickle.dumps(ds)))
             logger.info("Disk prewarm written (S3): %s / %s", product.id, date)
-        else:
-            logger.info("Disk prewarm loaded (disk): %s / %s", product.id, date)
     except Exception:
         logger.warning("Disk prewarm failed: %s / %s", product.id, date, exc_info=True)
 
