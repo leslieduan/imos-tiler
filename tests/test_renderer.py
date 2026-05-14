@@ -49,12 +49,14 @@ def clear_processed_cache():
 
 
 def test_render_tile_scalar_is_valid_png():
-    png = render_tile(SCALAR_PRODUCT, _make_ds(["sst"]), 1, 0, 0)
+    ds = _make_ds(["sst"])
+    png = render_tile(SCALAR_PRODUCT, lambda: ds, 1, 0, 0, "2024-01-01")
     assert png[:8] == b"\x89PNG\r\n\x1a\n"
 
 
 def test_render_tile_uv_is_valid_png():
-    png = render_tile(UV_PRODUCT, _make_ds(["u", "v"]), 1, 0, 0)
+    ds = _make_ds(["u", "v"])
+    png = render_tile(UV_PRODUCT, lambda: ds, 1, 0, 0, "2024-01-01")
     assert png[:8] == b"\x89PNG\r\n\x1a\n"
 
 
