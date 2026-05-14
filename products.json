@@ -61,5 +61,15 @@
       192
     ],
     "padding": 1
+  },
+  {
+    "id": "satellite_austemp_heatwave_8day_MCS_category",
+    "source_path": "s3://aodn-cloud-optimised/satellite_austemp_heatwave_8day.zarr",
+    "variable": "MCS_category",
+    "chunk_px": [
+      240,
+      192
+    ],
+    "padding": 1
   }
 ]

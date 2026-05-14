@@ -55,8 +55,12 @@ def test_tile_out_of_bounds():
 
 
 def test_tile_missing_date():
+    def _lod_grids_with_update(product):
+        product.lod_grids.update(_LOD_GRIDS)
+        return _LOD_GRIDS
+
     with (
-        patch("routers.data_tiles.get_lod_grids", return_value=_LOD_GRIDS),
+        patch("routers.data_tiles.get_lod_grids", side_effect=_lod_grids_with_update),
         patch("routers.products.load_slice", side_effect=FileNotFoundError("No data")),
     ):
         response = client.get("/data_tiles/sea_level_anomaly/9999-01-01/tiles/1/0/0.png")

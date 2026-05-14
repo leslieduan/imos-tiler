@@ -20,10 +20,14 @@ COLORMAPS_CONFIG_PATH = os.environ.get("COLORMAPS_CONFIG_PATH", "colormaps.json"
 class Product:
     id: str
     source_path: str
-    variable: str | list[str] = ""
+    variable: str | list[str]
     lod_grids: dict[int, tuple[int, int]] = field(default_factory=dict)
     chunk_px: tuple[int, int] = CHUNK_PX
     padding: int = PADDING
+
+    def __post_init__(self) -> None:
+        if not self.variable:
+            raise ValueError(f"Product '{self.id}' must specify at least one variable")
 
     @staticmethod
     def _compute_lod_grids(
@@ -59,13 +63,15 @@ class Product:
             levels = [(finest_cols, finest_rows)]
         return {i + 1: lvl for i, lvl in enumerate(levels[-max_lods:])}
 
+    @property
+    def variables(self) -> list[str]:
+        return self.variable if isinstance(self.variable, list) else [self.variable]
+
     def apply_computed_lod_grids(self, data_width: int, data_height: int) -> None:
         """Compute and cache lod_grids from native data dimensions. No-op if already set."""
         if self.lod_grids:
             return
-        object.__setattr__(
-            self, "lod_grids", self._compute_lod_grids(data_width, data_height, self.chunk_px)
-        )
+        self.lod_grids.update(self._compute_lod_grids(data_width, data_height, self.chunk_px))
 
 
 PRODUCTS: dict[str, Product] = {}

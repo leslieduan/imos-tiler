@@ -4,13 +4,24 @@
 
 FastAPI runs `def` route handlers in a thread pool managed by anyio. Each concurrent request gets its own thread — the same one-thread-per-request model as Spring/Tomcat, but with a smaller default pool.
 
-Each request for a tile falls into one of three paths:
+### Data tile paths (`/data_tiles/.../tiles/`)
 
-- **Hot** — `(product, date)` already in the in-memory slice cache. The thread does chunk extraction and PNG encoding only — no S3 or disk I/O.
-- **Disk warm** — `(product, date)` not in memory but present on disk. The thread reads and decompresses the LZ4-pickled slice from local EBS, populates the in-memory cache, then encodes the PNG. No S3 I/O.
-- **Cold** — `(product, date)` not in memory or on disk. The thread fetches Zarr chunks from S3 (`.compute()`), decompresses them, writes the result to both the disk cache and the in-memory cache.
+`load_slice` is lazy — the route handler passes a callable to `render_tile`, which only invokes it if `_get_processed` misses. Each request falls into one of these paths:
 
-All three paths share the same thread pool, so they compete for the same slots. Disk warm and cold requests are the most expensive; hot requests return quickly and release their slot.
+- **Processed warm** — `(product, date, lod)` already in `_processed_cache`. The thread does `_extract_chunk` + PNG encode only — no S3, disk, or slice I/O at all.
+- **Slice warm** — `_processed_cache` misses; `(product, date)` is in the L1 slice cache. The thread loads `ds` from memory, resamples, populates `_processed_cache`, then encodes the tile.
+- **Disk warm** — `_processed_cache` and L1 both miss; `(product, date)` is on disk. The thread reads + decompresses the lz4 pickle (~30ms), resamples, populates both caches, then encodes.
+- **Cold** — nothing cached. The thread fetches Zarr chunks from S3 (`.compute()`, ~2s), writes to disk and L1, resamples, populates `_processed_cache`, then encodes.
+
+### Visual tile paths (`/visual_tiles/.../tiles/` and `/bbox`)
+
+No processed grid cache. Each request calls `load_slice` unconditionally:
+
+- **L1 warm** — `(product, date)` in the L1 slice cache. The thread reads `ds` from memory and renders via `XarrayReader`.
+- **Disk warm** — L1 miss; slice on disk. Reads + decompresses, populates L1, renders.
+- **Cold** — fetches from S3, writes to disk and L1, renders.
+
+All paths share the same thread pool and compete for the same slots. Processed-warm data tile requests are fastest and release their slot quickly; cold requests hold slots for seconds.
 
 ---
 
@@ -18,13 +29,13 @@ All three paths share the same thread pool, so they compete for the same slots. 
 
 ### Thread pool and memory caches
 
-Three env vars form a consistent sizing chain. If you raise `THREAD_POOL_SIZE`, raise the other two proportionally.
+`THREAD_POOL_SIZE` is independent of the cache sizes. Cache sizing is driven by dataset slice size and the number of concurrently active dates.
 
-| Env var                | Default | Rule                                                                                                      |
-| ---------------------- | ------- | --------------------------------------------------------------------------------------------------------- |
-| `THREAD_POOL_SIZE`     | `100`   | Max concurrent requests. Raise if you observe queuing under high load.                                    |
-| `SLICE_CACHE_SIZE`     | `100`   | Keep ≥ `THREAD_POOL_SIZE` so a burst of cold requests does not immediately evict freshly computed slices. |
-| `PROCESSED_CACHE_SIZE` | `400`   | Keep ≥ `SLICE_CACHE_SIZE × number_of_LOD_levels` (typically 3–5).                                         |
+| Env var                | Default | Rule                                                                                                                                  |
+| ---------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `THREAD_POOL_SIZE`     | `100`   | Max concurrent requests. Raise if you observe queuing under high load.                                                                |
+| `SLICE_CACHE_SIZE`     | `10`    | Number of concurrent active `(product, date)` pairs for visual_tiles. Each satellite heatwave slice is ~61 MB.                       |
+| `PROCESSED_CACHE_SIZE` | `50`    | `SLICE_CACHE_SIZE × MAX_LODS (4)` with headroom — keeps all LOD levels warm for every date in the L1 slice cache. Each satellite LOD 4 entry is ~41 MB. |
 
 ### Store TTL
 
@@ -81,13 +92,21 @@ In practice, cold S3 requests only occur for dates older than 30 days (outside t
 
 ## Stampede protection
 
-Without protection, concurrent requests for the same uncached `(product, date)` all see a cache miss and each launches its own `.compute()` — redundant S3 downloads proportional to the number of concurrent requesters.
+Two layers of stampede protection prevent redundant recomputation.
 
-`loader.py` uses a per-key `Future` (`_slice_in_flight`) to prevent this. The first thread to miss the cache creates the Future and does the `.compute()`; all other threads arriving for the same key during that window wait on `future.result()` instead of duplicating the work. Errors propagate to all waiting threads, and the in-flight entry is always cleaned up so a failed request does not permanently block future attempts.
+**Slice layer** (`loader.py`, `_slice_in_flight`)
+
+Without protection, concurrent requests for the same uncached `(product, date)` would each launch their own `.compute()` — redundant S3 downloads proportional to the number of concurrent requesters.
+
+`_slice_in_flight` is a per-key `Future` dict. The first thread to miss the cache creates the Future and does the `.compute()`; all other threads arriving for the same key during that window wait on `future.result()` instead. This also limits peak in-flight memory to `unique_keys × slice_size` rather than `concurrent_requests × slice_size`. Errors propagate to all waiting threads, and the in-flight entry is always cleaned up.
 
 The same pattern is applied to store opens (`_store_in_flight`) so two requests for different store URLs arriving simultaneously do not block each other.
 
-> **Note:** Waiting threads still consume a thread slot. If 10 requests arrive for the same cold slice, 1 thread fetches and 9 block — all 10 slots are occupied until the fetch completes. This is unavoidable without a dedicated waiting queue, but the impact is short-lived given the ~200ms–2s cold duration on EC2.
+**Processed grid layer** (`data_renderer.py`, `_processed_inflight`)
+
+Concurrent requests for the same `(product, date, lod)` that all miss `_processed_cache` would each run the full resample. `_processed_inflight` uses a per-key `threading.Event` to ensure only the first thread runs `_compute_scalar`/`_compute_uv`; all others wait on the event and receive the cached result when it fires.
+
+> **Note:** Waiting threads still consume a thread slot at both layers. If 10 requests arrive for the same cold slice, 1 thread fetches and 9 block — all 10 slots are occupied until the fetch completes. This is unavoidable without a dedicated waiting queue, but the impact is short-lived given the ~200ms–2s cold duration on EC2.
 
 ---
 

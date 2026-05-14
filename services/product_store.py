@@ -62,7 +62,7 @@ def _from_dict(entry: dict) -> Product:
     return Product(
         id=entry["id"],
         source_path=entry["source_path"],
-        variable=entry.get("variable", ""),
+        variable=entry["variable"],
         chunk_px=tuple(chunk_px),  # type: ignore[arg-type]
         padding=entry.get("padding", PADDING),
     )

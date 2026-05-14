@@ -32,29 +32,20 @@ _store_in_flight: dict[str, concurrent.futures.Future] = {}
 # Separate lock for product.lod_grids lazy initialization.
 _lod_grids_lock = threading.Lock()
 
-# Cache of fully-computed 2D (lat × lon) slices keyed by (store_url, date, variables).
-# Each slice is ~7 MB (4 variables × 351 × 641 × float64).
-# SLICE_CACHE_SIZE controls how many slices to hold in memory (default 50 ≈ 350 MB).
-# Raise this as you add products/dates; lower it on memory-constrained deployments.
-_SLICE_CACHE_SIZE = int(os.environ.get("SLICE_CACHE_SIZE", 100))
+_SLICE_CACHE_SIZE = int(os.environ.get("SLICE_CACHE_SIZE", 10))
 _CACHE_DAYS = int(os.environ.get("CACHE_DAYS", 30))
 _slice_cache: LRUCache = LRUCache(maxsize=_SLICE_CACHE_SIZE)
 _slice_lock = threading.Lock()
 _slice_in_flight: dict[tuple, concurrent.futures.Future] = {}
 
 
-def _disk_cache_dir(store_url: str, variables: list[str]) -> Path | None:
+def _disk_cache_path(store_url: str, date: str, variables: list[str]) -> Path | None:
     base = os.environ.get("DISK_CACHE_PATH")
     if not base:
         return None
     store_name = store_url.rstrip("/").split("/")[-1]
     var_str = ",".join(sorted(variables))
-    return Path(base) / f"{store_name}-{var_str}"
-
-
-def _disk_cache_path(store_url: str, date: str, variables: list[str]) -> Path | None:
-    d = _disk_cache_dir(store_url, variables)
-    return d / f"{date}.pkl.lz4" if d is not None else None
+    return Path(base) / f"{store_name}-{var_str}" / f"{date}.pkl.lz4"
 
 
 def _open_store(store_url: str) -> xr.Dataset:
@@ -213,7 +204,7 @@ def prewarm_disk_slices(products: list[Product]) -> None:
 
     jobs: list[tuple[Product, str, list[str]]] = []
     for product in products:
-        variables = product.variable if isinstance(product.variable, list) else [product.variable]
+        variables = product.variables
         try:
             dates = get_available_dates(product.source_path)[-_CACHE_DAYS:]
         except Exception:
@@ -236,16 +227,17 @@ def refresh_disk_cache(products: list[Product]) -> None:
         return
     _evict_disk_if_needed()
     for product in products:
-        variables = product.variable if isinstance(product.variable, list) else [product.variable]
+        variables = product.variables
         try:
             target_dates = set(get_available_dates(product.source_path)[-_CACHE_DAYS:])
         except Exception:
             logger.warning("Refresh: could not get dates for %s", product.id, exc_info=True)
             continue
 
-        cache_dir = _disk_cache_dir(product.source_path, variables)
-        if cache_dir is None:
+        _p = _disk_cache_path(product.source_path, "", variables)
+        if _p is None:
             continue
+        cache_dir = _p.parent
         cache_dir.mkdir(parents=True, exist_ok=True)
         cached_dates = {f.name.split(".")[0] for f in cache_dir.glob("*.pkl.lz4")}
 
@@ -268,7 +260,9 @@ def refresh_disk_cache(products: list[Product]) -> None:
 
 def evict_product_cache(product: "Product") -> None:
     """Remove all in-memory and disk cache entries for a deleted product."""
-    variables = product.variable if isinstance(product.variable, list) else [product.variable]
+    from services.data_renderer import evict_processed_cache
+
+    variables = product.variables
     vars_tuple = tuple(sorted(variables))
 
     with _slice_lock:
@@ -280,9 +274,11 @@ def evict_product_cache(product: "Product") -> None:
     if keys_to_remove:
         logger.info("Memory cache evicted %d slice(s) for: %s", len(keys_to_remove), product.id)
 
-    cache_dir = _disk_cache_dir(product.source_path, variables)
-    if cache_dir is not None and cache_dir.exists():
-        shutil.rmtree(cache_dir, ignore_errors=True)
+    evict_processed_cache(product)
+
+    _p = _disk_cache_path(product.source_path, "", variables)
+    if _p is not None and _p.parent.exists():
+        shutil.rmtree(_p.parent, ignore_errors=True)
         logger.info("Disk cache evicted (product removed): %s", product.id)
 
 

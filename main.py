@@ -48,15 +48,16 @@ async def lifespan(app: FastAPI):
     store_urls = list({p.source_path for p in PRODUCTS.values()})
     prewarm_stores(store_urls)
     products = list(PRODUCTS.values())
-    asyncio.create_task(asyncio.to_thread(prewarm_disk_slices, products))
+    prewarm_task = asyncio.create_task(asyncio.to_thread(prewarm_disk_slices, products))
     interval = int(os.environ.get("CACHE_REFRESH_INTERVAL_SECONDS", 14400))
     refresh_task = asyncio.create_task(_cache_refresh_loop(products, interval))
     yield
-    refresh_task.cancel()
-    try:
-        await refresh_task
-    except asyncio.CancelledError:
-        pass
+    for task in (prewarm_task, refresh_task):
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
 
 
 app = FastAPI(

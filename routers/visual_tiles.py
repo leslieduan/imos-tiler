@@ -2,14 +2,25 @@ from fastapi import APIRouter, HTTPException, Path, Query
 from fastapi.responses import JSONResponse, Response
 
 from services.colormap_store import list_colormaps
-from services.loader import load_slice
 from services.visual_renderer import _colormap, render_bbox, render_tile
 
-from .products import _get_product_or_404
+from .products import _get_product_or_404, _load_slice_or_404
 from .products import router as products_router
 
 router = APIRouter()
 router.include_router(products_router)
+
+
+def _parse_rescale(rescale: str | None) -> tuple[float, float] | None:
+    if not rescale:
+        return None
+    try:
+        lo, hi = rescale.split(",")
+        return (float(lo), float(hi))
+    except ValueError as e:
+        raise HTTPException(
+            status_code=400, detail="rescale must be 'min,max', e.g. '-0.5,0.5'"
+        ) from e
 
 
 @router.get("/colormaps")
@@ -61,20 +72,9 @@ def get_tile(
             detail=f"Tile ({x},{y}) out of range for z={z}; valid range is 0–{max_index}.",
         )
 
-    try:
-        ds = load_slice(product.source_path, date, [product.variable])
-    except FileNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
+    ds = _load_slice_or_404(product.source_path, date, [product.variable])
 
-    rescale_range: tuple[float, float] | None = None
-    if rescale:
-        try:
-            lo, hi = rescale.split(",")
-            rescale_range = (float(lo), float(hi))
-        except ValueError as e:
-            raise HTTPException(
-                status_code=400, detail="rescale must be 'min,max', e.g. '-0.5,0.5'"
-            ) from e
+    rescale_range = _parse_rescale(rescale)
 
     try:
         png = render_tile(ds, product.variable, x, y, z, colormap_name, rescale_range)
@@ -130,20 +130,9 @@ def get_bbox(
     except ValueError as e:
         raise HTTPException(status_code=400, detail="bbox must be 'minx,miny,maxx,maxy'") from e
 
-    rescale_range: tuple[float, float] | None = None
-    if rescale:
-        try:
-            lo, hi = rescale.split(",")
-            rescale_range = (float(lo), float(hi))
-        except ValueError as e:
-            raise HTTPException(
-                status_code=400, detail="rescale must be 'min,max', e.g. '-0.5,0.5'"
-            ) from e
+    rescale_range = _parse_rescale(rescale)
 
-    try:
-        ds = load_slice(product.source_path, date, [product.variable])
-    except FileNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
+    ds = _load_slice_or_404(product.source_path, date, [product.variable])
 
     try:
         png = render_bbox(
