@@ -17,7 +17,7 @@ _DATE_EX: dict[str, Example] = {"default": Example(value="2024-02-24")}
 
 
 @router.get("/products")
-def get_products():
+async def get_products():
     return JSONResponse(content=list_products())
 
 

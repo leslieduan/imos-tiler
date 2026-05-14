@@ -24,7 +24,7 @@ def _parse_rescale(rescale: str | None) -> tuple[float, float] | None:
 
 
 @router.get("/colormaps")
-def get_colormaps():
+async def get_colormaps():
     return JSONResponse(content=list_colormaps())
 
 
