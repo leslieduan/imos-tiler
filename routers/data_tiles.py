@@ -5,7 +5,7 @@ from fastapi.responses import JSONResponse, Response
 from services.data_renderer import render_manifest, render_tile
 from services.loader import get_lod_grids
 
-from .products import _get_product_or_404, _load_or_404
+from .products import _get_product_or_404, _load_slice_or_404
 from .products import router as products_router
 
 router = APIRouter()
@@ -36,7 +36,7 @@ def get_tile(
         )
 
     variables = product.variable if isinstance(product.variable, list) else [product.variable]
-    ds = _load_or_404(product.source_path, date, variables)
+    ds = _load_slice_or_404(product.source_path, date, variables)
     png_bytes = render_tile(product, ds, z, x, y, date)
     return Response(content=png_bytes, media_type="image/png")
 
@@ -49,5 +49,5 @@ def get_manifest(
     product = _get_product_or_404(product_id)
     get_lod_grids(product)
     variables = product.variable if isinstance(product.variable, list) else [product.variable]
-    ds = _load_or_404(product.source_path, date, variables)
+    ds = _load_slice_or_404(product.source_path, date, variables)
     return JSONResponse(content=render_manifest(product, ds))

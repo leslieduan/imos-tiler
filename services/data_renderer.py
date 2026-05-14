@@ -24,11 +24,10 @@ from constants import LOD_ZOOM_THRESHOLDS, Product
 
 logger = logging.getLogger(__name__)
 
-# Caches the full resampled grid arrays for a (ds, lod) pair so that all tile
-# requests for the same date+LOD share one resample instead of each repeating it.
-# Key is (id(ds), lod): each product's ds is a distinct object from _slice_cache, so
-# id(ds) implicitly encodes the product. id reuse is impossible because _slice_cache
-# holds a strong reference to every ds, preventing GC for the cache's lifetime.
+# Caches the full resampled grid arrays for a (product, date, lod) combination so that
+# all tile requests for the same date+LOD share one resample instead of each repeating it.
+# Key is (source_path, date, variable, lod) — semantic identity, not object identity —
+# so the cache survives L1 slice evictions and disk-reloaded slices still hit here.
 # PROCESSED_CACHE_SIZE should be >= SLICE_CACHE_SIZE × number of LOD levels so that
 # every cached slice can have its processed grids cached too.
 _PROCESSED_CACHE_SIZE = int(os.environ.get("PROCESSED_CACHE_SIZE", 400))

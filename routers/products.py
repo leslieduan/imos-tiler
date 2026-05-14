@@ -28,7 +28,7 @@ def _get_product_or_404(product_id: str):
     return product
 
 
-def _load_or_404(store_url: str, date: str, variables: list[str]):
+def _load_slice_or_404(store_url: str, date: str, variables: list[str]):
     try:
         return load_slice(store_url, date, variables)
     except FileNotFoundError as e:
@@ -90,7 +90,7 @@ def get_point(
 ):
     product = _get_product_or_404(product_id)
     variables = product.variable if isinstance(product.variable, list) else [product.variable]
-    ds = _load_or_404(product.source_path, date, variables)
+    ds = _load_slice_or_404(product.source_path, date, variables)
 
     point = ds.sel(lat=lat, lon=lon, method="nearest")
 
