@@ -56,26 +56,30 @@ def _resample_to_grid(ds: xr.Dataset, total_w: int, total_h: int) -> xr.Dataset:
     return result
 
 
+def _normalize(arr: np.ndarray, lo: float, hi: float, out_max: int) -> np.ndarray:
+    """Normalize arr to [0, out_max], replacing NaN with 0. Returns uint8 or uint32."""
+    span = hi - lo if hi != lo else 1.0
+    result = np.clip((np.nan_to_num(arr, nan=0.0) - lo) / span * out_max, 0, out_max)
+    return result.astype(np.uint32 if out_max > 255 else np.uint8)
+
+
+def _var_range(ds: xr.Dataset, var: str) -> tuple[float, float]:
+    lo = float(ds[var].min(skipna=True).values)
+    hi = float(ds[var].max(skipna=True).values)
+    return lo, hi if hi != lo else lo + 1.0
+
+
 def _compute_scalar(product: Product, ds: xr.Dataset, lod: int) -> tuple[np.ndarray, np.ndarray]:
     grid_cols, grid_rows = product.lod_grids[lod]
     total_w = grid_cols * product.chunk_px[0]
     total_h = grid_rows * product.chunk_px[1]
 
-    val_min = float(ds[product.variable].min(skipna=True).values)
-    val_max = float(ds[product.variable].max(skipna=True).values)
-    if val_max == val_min:
-        val_max = val_min + 1.0
-
+    val_min, val_max = _var_range(ds, product.variable)
     raw = _resample_to_grid(ds[[product.variable]], total_w, total_h)[
         product.variable
     ].values.squeeze()
     ocean = (~np.isnan(raw)).astype(np.uint8)
-    val_24 = np.clip(
-        (np.nan_to_num(raw, nan=0.0) - val_min) / (val_max - val_min) * 16777215,
-        0,
-        16777215,
-    ).astype(np.uint32)
-    return val_24, ocean
+    return _normalize(raw, val_min, val_max, 16777215), ocean
 
 
 def _compute_uv(
@@ -86,27 +90,14 @@ def _compute_uv(
     total_w = grid_cols * product.chunk_px[0]
     total_h = grid_rows * product.chunk_px[1]
 
-    u_min = float(ds[u_var].min(skipna=True).values)
-    u_max = float(ds[u_var].max(skipna=True).values)
-    v_min = float(ds[v_var].min(skipna=True).values)
-    v_max = float(ds[v_var].max(skipna=True).values)
-    if u_max == u_min:
-        u_max = u_min + 1.0
-    if v_max == v_min:
-        v_max = v_min + 1.0
-
+    u_min, u_max = _var_range(ds, u_var)
+    v_min, v_max = _var_range(ds, v_var)
     ds_r = _resample_to_grid(ds[[u_var, v_var]], total_w, total_h)
     u_raw = ds_r[u_var].values.squeeze()
     v_raw = ds_r[v_var].values.squeeze()
 
     ocean = (~np.isnan(u_raw)).astype(np.uint8)
-    u_norm = np.clip(
-        (np.nan_to_num(u_raw, nan=0.0) - u_min) / (u_max - u_min) * 255, 0, 255
-    ).astype(np.uint8)
-    v_norm = np.clip(
-        (np.nan_to_num(v_raw, nan=0.0) - v_min) / (v_max - v_min) * 255, 0, 255
-    ).astype(np.uint8)
-    return u_norm, v_norm, ocean
+    return _normalize(u_raw, u_min, u_max, 255), _normalize(v_raw, v_min, v_max, 255), ocean
 
 
 def _get_processed(
