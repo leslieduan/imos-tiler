@@ -32,12 +32,6 @@ Create a `.env` file in the project root before starting:
 ADMIN_API_KEY=your-secret-key
 ```
 
-First-time setup — these files must exist on the host before the first `docker compose up`:
-
-```bash
-echo "[]" > products.json && echo "{}" > colormaps.json && mkdir -p slice_cache
-```
-
 ```bash
 # Build and start
 docker compose up --build
@@ -172,6 +166,7 @@ See [`docs/security.md`](docs/security.md) for how admin endpoints are secured i
 
 - [`docs/tile_system.md`](docs/tile_system.md) — tile coordinate systems: how `data_tiles` and `visual_tiles` use `z`/`x`/`y` differently
 - [`docs/technical.md`](docs/technical.md) — architecture, LOD algorithm, caching strategy, PNG encoding contract
+- [`docs/cache_analysis.md`](docs/cache_analysis.md) — cache option analysis: why disk cache was chosen over Redis and EFS
 - [`docs/concurrency.md`](docs/concurrency.md) — concurrency model, capacity evaluation, thread pool and cache sizing
 - [`docs/dataset.md`](docs/dataset.md) — per-store variable/dimension/chunking reference
 - [`docs/security.md`](docs/security.md) — admin endpoint security, API key setup, nginx, EC2 configuration

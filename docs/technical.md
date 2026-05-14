@@ -86,8 +86,9 @@ titiler-project/
   main.py                        ← mounts all routers, CORS middleware, lifespan startup
   constants.py                   ← Product dataclass + LOD algorithm; CUSTOM_COLORMAPS registry
                                     LOD_ZOOM_THRESHOLDS, MAX_LODS, MIN_COARSEST_GRID
-  products.json                  ← persisted product registrations (runtime, gitignored)
-  colormaps.json                 ← persisted custom colormap registrations (runtime, gitignored)
+  data/
+    products.json                ← persisted product registrations (runtime, gitignored; Docker: data/products.json)
+    colormaps.json               ← persisted custom colormap registrations (runtime, gitignored; Docker: data/colormaps.json)
   docs/
     technical.md                 ← this file
     dataset.md                   ← per-store variable/dimension/chunking reference
