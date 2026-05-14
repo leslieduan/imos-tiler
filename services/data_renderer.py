@@ -9,6 +9,7 @@ Uses the same processed grid cache pattern as renderer.py:
   - _extract_chunk and _to_png_bytes are imported from renderer.py to avoid duplication.
 """
 
+import concurrent.futures
 import logging
 import math
 import os
@@ -28,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 _PROCESSED_CACHE_SIZE = int(os.environ.get("PROCESSED_CACHE_SIZE", 50))
 _processed_cache: LRUCache = LRUCache(maxsize=_PROCESSED_CACHE_SIZE)
-_processed_inflight: dict = {}
+_processed_inflight: dict[tuple, concurrent.futures.Future] = {}
 _processed_lock = threading.Lock()
 
 
@@ -114,17 +115,20 @@ def _get_processed(
     """load_ds only called once per (product, date) when the processed grid is not cached yet."""
     key = (product.source_path, date, str(product.variable), lod)
 
-    while True:
-        with _processed_lock:
-            cached = _processed_cache.get(key)
-            if cached is not None:
-                return cached
-            if key not in _processed_inflight:
-                event = threading.Event()
-                _processed_inflight[key] = event
-                break
-            event = _processed_inflight[key]
-        event.wait()
+    should_compute = False
+    with _processed_lock:
+        cached = _processed_cache.get(key)
+        if cached is not None:
+            return cached
+        if key in _processed_inflight:
+            future = _processed_inflight[key]
+        else:
+            future: concurrent.futures.Future = concurrent.futures.Future()
+            _processed_inflight[key] = future
+            should_compute = True
+
+    if not should_compute:
+        return future.result()
 
     try:
         ds = load_ds()
@@ -135,11 +139,14 @@ def _get_processed(
         )
         with _processed_lock:
             _processed_cache[key] = result
-        return result
+        future.set_result(result)
+    except Exception as e:
+        future.set_exception(e)
+        raise
     finally:
         with _processed_lock:
-            del _processed_inflight[key]
-        event.set()
+            _processed_inflight.pop(key, None)
+    return result
 
 
 def evict_processed_cache(product: Product) -> None:

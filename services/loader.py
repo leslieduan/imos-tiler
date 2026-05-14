@@ -32,10 +32,6 @@ _store_in_flight: dict[str, concurrent.futures.Future] = {}
 # Separate lock for product.lod_grids lazy initialization.
 _lod_grids_lock = threading.Lock()
 
-# Cache of fully-computed 2D (lat × lon) slices keyed by (store_url, date, variables).
-# Each slice is ~7 MB (4 variables × 351 × 641 × float64).
-# SLICE_CACHE_SIZE controls how many slices to hold in memory (default 50 ≈ 350 MB).
-# Raise this as you add products/dates; lower it on memory-constrained deployments.
 _SLICE_CACHE_SIZE = int(os.environ.get("SLICE_CACHE_SIZE", 10))
 _CACHE_DAYS = int(os.environ.get("CACHE_DAYS", 30))
 _slice_cache: LRUCache = LRUCache(maxsize=_SLICE_CACHE_SIZE)
