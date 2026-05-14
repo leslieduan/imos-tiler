@@ -193,6 +193,8 @@ def _prewarm_one(product: Product, date: str, variables: list[str]) -> None:
             cache_path.parent.mkdir(parents=True, exist_ok=True)
             cache_path.write_bytes(lz4.frame.compress(pickle.dumps(ds)))
             logger.info("Disk prewarm written (S3): %s / %s", product.id, date)
+    except FileNotFoundError:
+        pass  # date in time index but nearest match is a different local day — not cacheable
     except Exception:
         logger.warning("Disk prewarm failed: %s / %s", product.id, date, exc_info=True)
 
@@ -340,13 +342,10 @@ def load_slice(store_url: str, date: str, variables: list[str]) -> xr.Dataset:
                 logger.warning("Disk cache read failed: %s", cache_path, exc_info=True)
 
         store = _get_store(store_url)
-        local_midnight = pd.Timestamp(date, tz=_LOCAL_TZ).tz_convert("UTC").tz_localize(None)
-        ds = store[variables].sel(time=local_midnight, method="nearest").compute()
-        selected_date = _ts_to_local_date(ds.time.values)
-        if selected_date != date:
-            raise FileNotFoundError(
-                f"No data for date {date!r} (nearest available: {selected_date!r})"
-            )
+        matching = [ts for ts in store.coords["time"].values if _ts_to_local_date(ts) == date]
+        if not matching:
+            raise FileNotFoundError(f"No data for date {date!r}")
+        ds = store[variables].sel(time=pd.Timestamp(matching[0])).compute()
         with _slice_lock:
             _slice_cache[cache_key] = ds
         future.set_result(ds)
