@@ -131,6 +131,8 @@ def _get_store(store_url: str) -> xr.Dataset:
 
 
 def prewarm_stores(store_urls: list[str]) -> None:
+    """it moves the one-time S3 metadata cost from the first user request to server startup,
+    where it's invisible. Also enable get_products_availability fast response on first call."""
     for url in store_urls:
         threading.Thread(target=_get_store, args=(url,), daemon=True).start()
 
