@@ -59,6 +59,10 @@ class Product:
             levels = [(finest_cols, finest_rows)]
         return {i + 1: lvl for i, lvl in enumerate(levels[-max_lods:])}
 
+    @property
+    def variables(self) -> list[str]:
+        return self.variable if isinstance(self.variable, list) else [self.variable]
+
     def apply_computed_lod_grids(self, data_width: int, data_height: int) -> None:
         """Compute and cache lod_grids from native data dimensions. No-op if already set."""
         if self.lod_grids:

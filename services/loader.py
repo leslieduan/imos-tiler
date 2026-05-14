@@ -209,7 +209,7 @@ def prewarm_disk_slices(products: list[Product]) -> None:
 
     jobs: list[tuple[Product, str, list[str]]] = []
     for product in products:
-        variables = product.variable if isinstance(product.variable, list) else [product.variable]
+        variables = product.variables
         try:
             dates = get_available_dates(product.source_path)[-_CACHE_DAYS:]
         except Exception:
@@ -232,7 +232,7 @@ def refresh_disk_cache(products: list[Product]) -> None:
         return
     _evict_disk_if_needed()
     for product in products:
-        variables = product.variable if isinstance(product.variable, list) else [product.variable]
+        variables = product.variables
         try:
             target_dates = set(get_available_dates(product.source_path)[-_CACHE_DAYS:])
         except Exception:
@@ -266,7 +266,7 @@ def evict_product_cache(product: "Product") -> None:
     """Remove all in-memory and disk cache entries for a deleted product."""
     from services.data_renderer import evict_processed_cache
 
-    variables = product.variable if isinstance(product.variable, list) else [product.variable]
+    variables = product.variables
     vars_tuple = tuple(sorted(variables))
 
     with _slice_lock:

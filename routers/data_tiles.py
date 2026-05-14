@@ -35,7 +35,7 @@ def get_tile(
             status_code=404, detail=f"Tile {z}/{x}/{y} out of bounds (grid {grid_cols}×{grid_rows})"
         )
 
-    variables = product.variable if isinstance(product.variable, list) else [product.variable]
+    variables = product.variables
     png_bytes = render_tile(
         product,
         lambda: _load_slice_or_404(product.source_path, date, variables),
@@ -54,6 +54,6 @@ def get_manifest(
 ):
     product = _get_product_or_404(product_id)
     get_lod_grids(product)
-    variables = product.variable if isinstance(product.variable, list) else [product.variable]
+    variables = product.variables
     ds = _load_slice_or_404(product.source_path, date, variables)
     return JSONResponse(content=render_manifest(product, ds))

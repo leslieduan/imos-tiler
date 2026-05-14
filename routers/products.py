@@ -89,7 +89,7 @@ def get_point(
     lon: float = Query(..., openapi_examples={"default": Example(value=151.2)}),
 ):
     product = _get_product_or_404(product_id)
-    variables = product.variable if isinstance(product.variable, list) else [product.variable]
+    variables = product.variables
     ds = _load_slice_or_404(product.source_path, date, variables)
 
     point = ds.sel(lat=lat, lon=lon, method="nearest")
