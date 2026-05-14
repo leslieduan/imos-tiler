@@ -39,18 +39,13 @@ _slice_lock = threading.Lock()
 _slice_in_flight: dict[tuple, concurrent.futures.Future] = {}
 
 
-def _disk_cache_dir(store_url: str, variables: list[str]) -> Path | None:
+def _disk_cache_path(store_url: str, date: str, variables: list[str]) -> Path | None:
     base = os.environ.get("DISK_CACHE_PATH")
     if not base:
         return None
     store_name = store_url.rstrip("/").split("/")[-1]
     var_str = ",".join(sorted(variables))
-    return Path(base) / f"{store_name}-{var_str}"
-
-
-def _disk_cache_path(store_url: str, date: str, variables: list[str]) -> Path | None:
-    d = _disk_cache_dir(store_url, variables)
-    return d / f"{date}.pkl.lz4" if d is not None else None
+    return Path(base) / f"{store_name}-{var_str}" / f"{date}.pkl.lz4"
 
 
 def _open_store(store_url: str) -> xr.Dataset:
@@ -239,9 +234,10 @@ def refresh_disk_cache(products: list[Product]) -> None:
             logger.warning("Refresh: could not get dates for %s", product.id, exc_info=True)
             continue
 
-        cache_dir = _disk_cache_dir(product.source_path, variables)
-        if cache_dir is None:
+        _p = _disk_cache_path(product.source_path, "", variables)
+        if _p is None:
             continue
+        cache_dir = _p.parent
         cache_dir.mkdir(parents=True, exist_ok=True)
         cached_dates = {f.name.split(".")[0] for f in cache_dir.glob("*.pkl.lz4")}
 
@@ -280,9 +276,9 @@ def evict_product_cache(product: "Product") -> None:
 
     evict_processed_cache(product)
 
-    cache_dir = _disk_cache_dir(product.source_path, variables)
-    if cache_dir is not None and cache_dir.exists():
-        shutil.rmtree(cache_dir, ignore_errors=True)
+    _p = _disk_cache_path(product.source_path, "", variables)
+    if _p is not None and _p.parent.exists():
+        shutil.rmtree(_p.parent, ignore_errors=True)
         logger.info("Disk cache evicted (product removed): %s", product.id)
 
 
