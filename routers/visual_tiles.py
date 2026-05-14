@@ -11,6 +11,18 @@ router = APIRouter()
 router.include_router(products_router)
 
 
+def _parse_rescale(rescale: str | None) -> tuple[float, float] | None:
+    if not rescale:
+        return None
+    try:
+        lo, hi = rescale.split(",")
+        return (float(lo), float(hi))
+    except ValueError as e:
+        raise HTTPException(
+            status_code=400, detail="rescale must be 'min,max', e.g. '-0.5,0.5'"
+        ) from e
+
+
 @router.get("/colormaps")
 def get_colormaps():
     return JSONResponse(content=list_colormaps())
@@ -62,15 +74,7 @@ def get_tile(
 
     ds = _load_slice_or_404(product.source_path, date, [product.variable])
 
-    rescale_range: tuple[float, float] | None = None
-    if rescale:
-        try:
-            lo, hi = rescale.split(",")
-            rescale_range = (float(lo), float(hi))
-        except ValueError as e:
-            raise HTTPException(
-                status_code=400, detail="rescale must be 'min,max', e.g. '-0.5,0.5'"
-            ) from e
+    rescale_range = _parse_rescale(rescale)
 
     try:
         png = render_tile(ds, product.variable, x, y, z, colormap_name, rescale_range)
@@ -126,15 +130,7 @@ def get_bbox(
     except ValueError as e:
         raise HTTPException(status_code=400, detail="bbox must be 'minx,miny,maxx,maxy'") from e
 
-    rescale_range: tuple[float, float] | None = None
-    if rescale:
-        try:
-            lo, hi = rescale.split(",")
-            rescale_range = (float(lo), float(hi))
-        except ValueError as e:
-            raise HTTPException(
-                status_code=400, detail="rescale must be 'min,max', e.g. '-0.5,0.5'"
-            ) from e
+    rescale_range = _parse_rescale(rescale)
 
     ds = _load_slice_or_404(product.source_path, date, [product.variable])
 
