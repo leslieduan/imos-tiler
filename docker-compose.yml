@@ -23,6 +23,13 @@ services:
       - PREWARM_WORKERS=${PREWARM_WORKERS:-4}
       - CACHE_REFRESH_INTERVAL_SECONDS=${CACHE_REFRESH_INTERVAL_SECONDS:-14400}
     restart: unless-stopped
+    logging:
+      driver: awslogs
+      options:
+        awslogs-region: ap-southeast-2
+        awslogs-group: /titiler/app
+        awslogs-stream: app
+        awslogs-create-group: "true"
 
   nginx:
     image: nginx:alpine
@@ -33,3 +40,10 @@ services:
     depends_on:
       - app
     restart: unless-stopped
+    logging:
+      driver: awslogs
+      options:
+        awslogs-region: ap-southeast-2
+        awslogs-group: /titiler/nginx
+        awslogs-stream: nginx
+        awslogs-create-group: "true"
