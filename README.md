@@ -1,6 +1,6 @@
 # titiler-project
 
-On-demand tile server for IMOS ocean data products. Tiles are generated in real time without pre-rendering — even cold requests are fast, and warm requests served from the in-memory cache are near-instant. Products are managed at runtime via the admin API — no redeploy required.
+On-demand tile server for IMOS ocean data products. Tiles are generated in real time without pre-rendering. A three-tier cache (in-memory LRU → disk → S3) keeps cold requests fast: disk-warm slices serve in ~30ms vs ~2s from S3. Products are managed at runtime via the admin API — no redeploy required.
 
 ## Setup
 
@@ -166,6 +166,7 @@ See [`docs/security.md`](docs/security.md) for how admin endpoints are secured i
 
 - [`docs/tile_system.md`](docs/tile_system.md) — tile coordinate systems: how `data_tiles` and `visual_tiles` use `z`/`x`/`y` differently
 - [`docs/technical.md`](docs/technical.md) — architecture, LOD algorithm, caching strategy, PNG encoding contract
+- [`docs/cache_analysis.md`](docs/cache_analysis.md) — cache option analysis: why disk cache was chosen over Redis and EFS
 - [`docs/concurrency.md`](docs/concurrency.md) — concurrency model, capacity evaluation, thread pool and cache sizing
 - [`docs/dataset.md`](docs/dataset.md) — per-store variable/dimension/chunking reference
 - [`docs/security.md`](docs/security.md) — admin endpoint security, API key setup, nginx, EC2 configuration

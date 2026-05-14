@@ -17,5 +17,7 @@ titiler-demo-key.pem
 products.json
 
 
-# Local deployment notes
-ec2-manual-deploy.md
+
+
+# slice cache
+slice_cache/

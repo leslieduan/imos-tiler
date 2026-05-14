@@ -1,4 +1,5 @@
 import math
+import os
 from dataclasses import dataclass, field
 
 # Applied in loaders to normalise coordinate names across all products.
@@ -11,8 +12,8 @@ LOD_ZOOM_THRESHOLDS: dict[int, int] = {2: 4, 3: 5, 4: 6}
 PADDING = 1
 CHUNK_PX = (240, 192)
 
-PRODUCTS_CONFIG_PATH = "products.json"
-COLORMAPS_CONFIG_PATH = "colormaps.json"
+PRODUCTS_CONFIG_PATH = os.environ.get("PRODUCTS_CONFIG_PATH", "products.json")
+COLORMAPS_CONFIG_PATH = os.environ.get("COLORMAPS_CONFIG_PATH", "colormaps.json")
 
 
 @dataclass(frozen=True)

@@ -16,9 +16,12 @@ RUN uv sync --frozen --no-dev --no-install-project
 COPY main.py constants.py ./
 COPY routers/ routers/
 COPY services/ services/
+COPY docker-entrypoint.sh /docker-entrypoint.sh
+RUN chmod +x /docker-entrypoint.sh
 
 ENV PATH="/app/.venv/bin:$PATH"
 
 EXPOSE 8000
 
+ENTRYPOINT ["/docker-entrypoint.sh"]
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import logging.config
 import os
@@ -15,7 +16,7 @@ from routers.admin import admin_router
 from routers.data_tiles import router as data_tiles_router
 from routers.visual_tiles import router as visual_tiles_router
 from services.colormap_store import load_colormaps
-from services.loader import prewarm_stores
+from services.loader import prewarm_disk_slices, prewarm_stores, refresh_disk_cache
 from services.product_store import load_products
 
 logger = logging.getLogger(__name__)
@@ -31,15 +32,11 @@ LOGGING_CONFIG["loggers"]["services"] = {
 }
 logging.config.dictConfig(LOGGING_CONFIG)
 
-# TODO: proactive poll, detects if zarr updated. (quite overskill but a smart plan if needed in the future)
-# A background thread wakes every N minutes(cron job), calls xr.open_zarr for each unique store URL,
-# and compares ds.sizes["time"] against the cached store. If the shape has grown (new time
-# steps appended), evict the store entry and call prewarm_stores so the cache is refreshed
-# before any request arrives. Reading .zmetadata via xr.open_zarr is pure metadata — no
-# spatial data chunks are fetched — so the poll is cheap even across many stores.
-# This would make the TTL a pure safety net (poll thread crash) rather than the primary
-# refresh mechanism. Not implemented because IMOS data updates at most daily and the
-# stale-while-revalidate TTL already ensures no request ever blocks on a re-open.
+
+async def _cache_refresh_loop(products: list, interval: int) -> None:
+    while True:
+        await asyncio.sleep(interval)
+        await asyncio.to_thread(refresh_disk_cache, products)
 
 
 @asynccontextmanager
@@ -50,7 +47,16 @@ async def lifespan(app: FastAPI):
     load_colormaps()
     store_urls = list({p.source_path for p in PRODUCTS.values()})
     prewarm_stores(store_urls)
+    products = list(PRODUCTS.values())
+    asyncio.create_task(asyncio.to_thread(prewarm_disk_slices, products))
+    interval = int(os.environ.get("CACHE_REFRESH_INTERVAL_SECONDS", 14400))
+    refresh_task = asyncio.create_task(_cache_refresh_loop(products, interval))
     yield
+    refresh_task.cancel()
+    try:
+        await refresh_task
+    except asyncio.CancelledError:
+        pass
 
 
 app = FastAPI(

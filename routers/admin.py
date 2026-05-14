@@ -1,3 +1,4 @@
+import asyncio
 import os
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Security
@@ -5,8 +6,9 @@ from fastapi.responses import JSONResponse
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field, field_validator
 
-from constants import CHUNK_PX, PADDING
+from constants import CHUNK_PX, PADDING, PRODUCTS
 from services.colormap_store import register_colormap, remove_colormap
+from services.loader import evict_product_cache, prewarm_disk_slices
 from services.product_store import register_product, remove_product
 
 _api_key_header = APIKeyHeader(name="X-Admin-Key")
@@ -53,13 +55,14 @@ class ProductPayload(BaseModel):
 
 
 @admin_router.post("/products", status_code=201)
-def add_product(payload: ProductPayload):
+async def add_product(payload: ProductPayload):
     try:
         product = register_product(payload.model_dump())
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to persist product: {e}") from e
+    asyncio.create_task(asyncio.to_thread(prewarm_disk_slices, [product]))
     return JSONResponse(
         status_code=201, content={"id": product.id, "source_path": product.source_path}
     )
@@ -67,6 +70,7 @@ def add_product(payload: ProductPayload):
 
 @admin_router.delete("/products/{product_id}", status_code=204)
 def delete_product(product_id: str):
+    product = PRODUCTS.get(product_id)
     try:
         remove_product(product_id)
     except KeyError as e:
@@ -75,6 +79,8 @@ def delete_product(product_id: str):
         raise HTTPException(status_code=403, detail=str(e)) from e
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to persist removal: {e}") from e
+    if product is not None:
+        evict_product_cache(product)
 
 
 class ColormapPayload(BaseModel):
