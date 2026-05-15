@@ -15,7 +15,15 @@ _PRODUCT_EX: dict[str, Example] = {"default": Example(value="sea_level_anomaly")
 _DATE_EX: dict[str, Example] = {"default": Example(value="2024-02-24")}
 
 
-@router.get("/{product_id}/{date}/tiles/{z}/{x}/{y}.png")
+@router.get(
+    "/{product_id}/{date}/tiles/{z}/{x}/{y}.png",
+    summary="Raw data tile",
+    description=(
+        "Returns an RGBA PNG encoded for WebGL shader consumption. "
+        "Scalar products use R/G/B as a 24-bit normalised uint; UV vector products pack U in R and V in G. "
+        "Fetch the manifest first to get the normalisation ranges needed for decoding."
+    ),
+)
 def get_tile(
     product_id: str = Path(openapi_examples=_PRODUCT_EX),
     date: str = Path(pattern=r"^\d{4}-\d{2}-\d{2}$", openapi_examples=_DATE_EX),
@@ -47,7 +55,14 @@ def get_tile(
     return Response(content=png_bytes, media_type="image/png")
 
 
-@router.get("/{product_id}/{date}/manifest.json")
+@router.get(
+    "/{product_id}/{date}/manifest.json",
+    summary="Data tile manifest",
+    description=(
+        "Returns the LOD grid dimensions and value normalisation ranges for a product on a given date. "
+        "Required for decoding raw data tiles — provides `valueRange` for scalar products and `uRange`/`vRange` for UV vector products."
+    ),
+)
 def get_manifest(
     product_id: str = Path(openapi_examples=_PRODUCT_EX),
     date: str = Path(pattern=r"^\d{4}-\d{2}-\d{2}$", openapi_examples=_DATE_EX),

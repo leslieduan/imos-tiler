@@ -1,4 +1,5 @@
 from fastapi import APIRouter, HTTPException, Path, Query
+from fastapi.openapi.models import Example
 from fastapi.responses import JSONResponse, Response
 
 from services.colormap_store import list_colormaps
@@ -9,6 +10,9 @@ from .products import router as products_router
 
 router = APIRouter()
 router.include_router(products_router)
+
+_PRODUCT_EX: dict[str, Example] = {"default": Example(value="sea_level_anomaly")}
+_DATE_EX: dict[str, Example] = {"default": Example(value="2024-02-24")}
 
 
 def _parse_rescale(rescale: str | None) -> tuple[float, float] | None:
@@ -23,7 +27,7 @@ def _parse_rescale(rescale: str | None) -> tuple[float, float] | None:
         ) from e
 
 
-@router.get("/colormaps")
+@router.get("/colormaps", summary="List available colormaps")
 async def get_colormaps():
     return JSONResponse(content=list_colormaps())
 
@@ -38,11 +42,11 @@ async def get_colormaps():
     ),
 )
 def get_tile(
-    product_id: str = Path(...),
-    date: str = Path(..., pattern=r"^\d{4}-\d{2}-\d{2}$"),
-    z: int = Path(...),
-    x: int = Path(...),
-    y: int = Path(...),
+    product_id: str = Path(openapi_examples=_PRODUCT_EX),
+    date: str = Path(pattern=r"^\d{4}-\d{2}-\d{2}$", openapi_examples=_DATE_EX),
+    z: int = Path(openapi_examples={"default": Example(value=1)}),
+    x: int = Path(openapi_examples={"default": Example(value=0)}),
+    y: int = Path(openapi_examples={"default": Example(value=0)}),
     colormap_name: str = Query(
         "viridis",
         alias="colormap",
@@ -94,10 +98,10 @@ def get_tile(
     ),
 )
 def get_bbox(
-    product_id: str = Path(...),
-    date: str = Path(..., pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    product_id: str = Path(openapi_examples=_PRODUCT_EX),
+    date: str = Path(pattern=r"^\d{4}-\d{2}-\d{2}$", openapi_examples=_DATE_EX),
     bbox: str = Query(
-        ...,
+        "89.0,-60.0,180.0,10.0",
         description="Bounding box as 'minx,miny,maxx,maxy' in the CRS specified by the crs parameter.",
     ),
     width: int = Query(256, ge=1, le=2048),
