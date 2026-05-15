@@ -137,7 +137,7 @@ def test_availability_ok():
     with (
         patch("routers.products.PRODUCTS", _FAKE_PRODUCTS),
         patch("routers.products.get_available_dates", return_value=["2024-06-01", "2024-07-01"]),
-        patch("routers.products._three_months_ago", return_value="2024-01-01"),
+        patch("routers.products.three_months_ago", return_value="2024-01-01"),
     ):
         response = client.get("/data_tiles/manifest")
     assert response.status_code == 200
@@ -163,7 +163,7 @@ def test_availability_no_dates_in_range():
     with (
         patch("routers.products.PRODUCTS", _FAKE_PRODUCTS),
         patch("routers.products.get_available_dates", return_value=["2020-01-01"]),
-        patch("routers.products._three_months_ago", return_value="2024-01-01"),
+        patch("routers.products.three_months_ago", return_value="2024-01-01"),
     ):
         response = client.get("/data_tiles/manifest")
     assert response.status_code == 200

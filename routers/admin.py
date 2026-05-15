@@ -1,6 +1,5 @@
 import asyncio
 import os
-from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Security
 from fastapi.responses import JSONResponse
@@ -11,6 +10,7 @@ from constants import CHUNK_PX, PADDING, PRODUCTS
 from services.colormap_store import ColormapMode, register_colormap, remove_colormap
 from services.loader import evict_product_cache, prewarm_disk_slices
 from services.product_store import register_product, remove_product
+from utils.colors import build_categorical_lut, interpolate_colormap, parse_color
 
 _api_key_header = APIKeyHeader(name="X-Admin-Key")
 
@@ -97,52 +97,6 @@ def delete_product(product_id: str):
         evict_product_cache(product)
 
 
-def _hex_to_rgba(hex_color: str) -> list[int]:
-    h = hex_color.lstrip("#")
-    if len(h) == 3:
-        h = "".join(c * 2 for c in h)
-    if len(h) == 6:
-        return [int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16), 255]
-    if len(h) == 8:
-        return [int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16), int(h[6:8], 16)]
-    raise ValueError(f"invalid hex color: {hex_color!r}")
-
-
-def _interpolate_colormap(stops: list[list[int]]) -> list[list[int]]:
-    """Linearly interpolate N evenly-spaced RGBA stops to 256 entries."""
-    import numpy as np
-
-    arr = np.array(stops, dtype=float)
-    x_stops = np.linspace(0, 1, len(stops))
-    x_out = np.linspace(0, 1, 256)
-    interpolated = np.stack([np.interp(x_out, x_stops, arr[:, c]) for c in range(4)], axis=1)
-    return np.clip(interpolated, 0, 255).round().astype(int).tolist()  # type: ignore[no-any-return]
-
-
-def _parse_color(v: Any, label: str) -> list[int]:
-    if isinstance(v, str):
-        return _hex_to_rgba(v)
-    if isinstance(v, list | tuple):
-        rgba = list(v)
-        if len(rgba) != 4 or not all(isinstance(c, int) and 0 <= c <= 255 for c in rgba):
-            raise ValueError(f"{label} must be [r, g, b, a] with values 0–255")
-        return rgba
-    raise ValueError(f"{label} must be a hex string or [r, g, b, a] list")
-
-
-def _categorical_colormap(
-    categories: dict[int, list[int]], data_range: tuple[float, float]
-) -> list[list[int]]:
-    lo, hi = data_range
-    span = hi - lo or 1.0
-    lut = [[0, 0, 0, 0] for _ in range(256)]
-    for val, color in categories.items():
-        slot = round((val - lo) / span * 255)
-        if 0 <= slot <= 255:
-            lut[slot] = color
-    return lut
-
-
 class ColormapPayload(BaseModel):
     name: str
     mode: ColormapMode = Field(
@@ -170,7 +124,7 @@ class ColormapPayload(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def build_lut(cls, data: Any) -> Any:
+    def build_lut(cls, data: dict) -> dict:
         mode = data.get("mode", "ramp")
         raw = data.get("entries")
         if isinstance(raw, dict) and mode != "categorical":
@@ -189,9 +143,9 @@ class ColormapPayload(BaseModel):
                 val = int(k)
             except (ValueError, TypeError) as e:
                 raise ValueError(f"entries key {k!r} must be an integer") from e
-            categories[val] = _parse_color(v, f"entries[{k!r}]")
+            categories[val] = parse_color(v, f"entries[{k!r}]")
         data_range = (float(min(categories)), float(max(categories)))
-        data["entries"] = _categorical_colormap(categories, data_range)
+        data["entries"] = build_categorical_lut(categories, data_range)
         return data
 
     @field_validator("entries", mode="before")
@@ -204,11 +158,11 @@ class ColormapPayload(BaseModel):
         normalized: list[list[int]] = []
         for i, entry in enumerate(v):
             try:
-                rgba = _parse_color(entry, f"entry {i}")
+                rgba = parse_color(entry, f"entry {i}")
             except ValueError as e:
                 raise ValueError(f"entry {i}: {e}") from e
             normalized.append(rgba)
-        return normalized if len(normalized) == 256 else _interpolate_colormap(normalized)
+        return normalized if len(normalized) == 256 else interpolate_colormap(normalized)
 
     def to_tuples(self) -> list[tuple[int, int, int, int]]:
         return [(rgba[0], rgba[1], rgba[2], rgba[3]) for rgba in self.entries]
