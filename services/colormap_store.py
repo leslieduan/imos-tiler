@@ -56,23 +56,27 @@ def remove_colormap(name: str) -> None:
     _reload(data)
 
 
-def list_colormaps() -> dict[str, list[str]]:
+def list_colormaps() -> dict[str, list]:
     """Return all supported colormap names grouped by source.
 
     Priority mirrors _colormap(): custom → rio-tiler → matplotlib.
+    Custom entries include their mode; rio-tiler and matplotlib entries are plain strings.
     """
     import matplotlib
     from rio_tiler.colormap import cmap as _rio_cmap
 
-    custom_names = list(_custom_colormaps.keys())
-    custom_set = set(custom_names)
+    custom = [
+        {"name": name, "mode": _custom_colormap_modes.get(name, "ramp")}
+        for name in _custom_colormaps
+    ]
+    custom_set = {entry["name"] for entry in custom}
 
     rio_names = sorted(n for n in _rio_cmap.list() if n not in custom_set)
     rio_set = set(rio_names)
 
     mpl_names = sorted(n for n in matplotlib.colormaps if n not in custom_set and n not in rio_set)
 
-    return {"custom": custom_names, "rio_tiler": rio_names, "matplotlib": mpl_names}
+    return {"custom": custom, "rio_tiler": rio_names, "matplotlib": mpl_names}
 
 
 def _read_file() -> dict[str, list]:
