@@ -274,26 +274,45 @@ Products start with `lod_grids={}`. On the first request:
 
 ### The rule
 
-| Layer                        | Representation                                                         |
-| ---------------------------- | ---------------------------------------------------------------------- |
-| Zarr store `time` coordinate | UTC — numpy `datetime64[ns]` is always UTC by convention               |
-| API request/response dates   | Local Australian time — `Australia/Sydney` (AEST UTC+10 / AEDT UTC+11) |
+| Layer                        | Representation                                                                         |
+| ---------------------------- | -------------------------------------------------------------------------------------- |
+| Zarr store `time` coordinate | UTC — numpy `datetime64[ns]` is always UTC by convention                               |
+| API request/response dates   | Local time in `TILE_TIMEZONE` (default `Australia/Sydney`, AEST UTC+10 / AEDT UTC+11) |
+
+`TILE_TIMEZONE` is an IANA timezone name read at startup from the environment variable of the same name. To deploy this server for a different region, set it in `.env` or `docker-compose.yml` before starting — no code changes are needed. All date conversion (manifest output, tile request matching, error messages) uses the configured timezone automatically.
 
 All satellite passes over Australia occur during Australian daytime. Their UTC timestamps typically fall on the **previous UTC day** (e.g. a pass at `2022-06-01 01:20 AEST` is `2022-05-31 15:20 UTC`). Comparing UTC dates to local request dates directly would return a 404 for every such record.
 
 ### How the server handles it
 
-Every point where a UTC timestamp is exposed or compared is converted to local time via `_ts_to_local_date` in `services/loader.py`:
+`_LOCAL_TZ` is read once at startup from the `TILE_TIMEZONE` environment variable:
 
 ```python
-_LOCAL_TZ = ZoneInfo("Australia/Sydney")  # handles AEST/AEDT automatically
+_LOCAL_TZ = ZoneInfo(os.environ.get("TILE_TIMEZONE", "Australia/Sydney"))
 
 def _ts_to_local_date(ts) -> str:
     return pd.Timestamp(ts).tz_localize("UTC").tz_convert(_LOCAL_TZ).strftime("%Y-%m-%d")
 ```
 
-- **`get_available_dates`** — returns local dates so the frontend always receives values it can round-trip back as request dates.
-- **`load_slice`** — iterates all timestamps in the store's `time` coordinate, converts each to a local date via `_ts_to_local_date`, and collects those that match the requested date string exactly. The first matching timestamp is selected with `sel(time=pd.Timestamp(matching[0]))`. If no timestamp maps to the requested local date, `FileNotFoundError` is raised. This avoids `method="nearest"` silently serving data from an adjacent day.
+Every point where a UTC timestamp is exposed or compared is converted to local time via `_ts_to_local_date`:
+
+- **`get_available_dates`** — converts store timestamps to local date strings. The manifest always returns values the client can round-trip back unchanged as request dates.
+- **`load_slice`** — iterates all timestamps in the store's `time` coordinate, converts each to a local date via `_ts_to_local_date`, and collects those that match the requested date string exactly. The first matching timestamp is selected with `sel(time=pd.Timestamp(matching[0]))`. If multiple timestamps map to the same local date (e.g. sub-daily data), a warning is logged and the first is used. If no timestamp maps to the requested local date, `FileNotFoundError` is raised with a message indicating that dates must be in `_LOCAL_TZ` local time (not UTC). This avoids `method="nearest"` silently serving data from an adjacent day.
+
+**Critical constraint** — `get_available_dates` and `load_slice` must always use the same `_LOCAL_TZ` value. Changing one without the other causes dates to silently mismatch: the manifest returns dates the client cannot successfully request. `TILE_TIMEZONE` is the single source of truth; never hardcode a timezone string in either function.
+
+### Client contract
+
+Dates in the API are **opaque keys**, not calendar dates in the client's local timezone. Clients must:
+
+1. Fetch available dates from `/manifest`
+2. Pass those exact date strings back in tile/point requests
+
+Do not construct date strings from the client's local clock — the server interprets them as `TILE_TIMEZONE` local dates, and a client in a different timezone would produce strings that do not exist in the manifest.
+
+### Sub-daily data
+
+The current API is day-granularity only. If a store ever has sub-daily time resolution, multiple UTC timestamps will map to the same local date — `load_slice` logs a warning and returns the first. Supporting hourly queries would require changes to the URL structure and cache key design; this is deferred until there is a concrete use case. See the discussion in the codebase for context.
 
 ### What to check when adding a new product
 
