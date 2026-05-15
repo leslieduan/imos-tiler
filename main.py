@@ -73,8 +73,6 @@ async def lifespan(app: FastAPI):
     load_colormaps()
     store_urls = list({p.source_path for p in PRODUCTS.values()})
     prewarm_stores(store_urls)
-    # Snapshot products once so eviction and prewarm see the same list (any product added
-    # via admin POST during startup is handled by its own prewarm in the admin handler).
     startup_products = list(PRODUCTS.values())
 
     async def _startup_cache_sync() -> None:

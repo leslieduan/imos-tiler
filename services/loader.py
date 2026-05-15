@@ -252,8 +252,7 @@ def evict_stale_and_orphans(products: list[Product]) -> None:
                 p.unlink()
                 logger.info("Disk cache evicted (stale): %s / %s", product.id, date)
 
-    # Remove cache dirs for products no longer registered (e.g. server crashed before evict,
-    # or product store was edited outside the admin API).
+    # Remove cache dirs for products no longer registered
     base = os.environ.get("DISK_CACHE_PATH")
     base_path = Path(base) if base else None
     if base_path and base_path.exists():
