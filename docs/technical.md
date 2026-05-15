@@ -274,10 +274,12 @@ Products start with `lod_grids={}`. On the first request:
 
 ### The rule
 
-| Layer                        | Representation                                                                    |
-| ---------------------------- | --------------------------------------------------------------------------------- |
-| Zarr store `time` coordinate | UTC — numpy `datetime64[ns]` is always UTC by convention                          |
+| Layer                        | Representation                                                                         |
+| ---------------------------- | -------------------------------------------------------------------------------------- |
+| Zarr store `time` coordinate | UTC — numpy `datetime64[ns]` is always UTC by convention                               |
 | API request/response dates   | Local time in `TILE_TIMEZONE` (default `Australia/Sydney`, AEST UTC+10 / AEDT UTC+11) |
+
+`TILE_TIMEZONE` is an IANA timezone name read at startup from the environment variable of the same name. To deploy this server for a different region, set it in `.env` or `docker-compose.yml` before starting — no code changes are needed. All date conversion (manifest output, tile request matching, error messages) uses the configured timezone automatically.
 
 All satellite passes over Australia occur during Australian daytime. Their UTC timestamps typically fall on the **previous UTC day** (e.g. a pass at `2022-06-01 01:20 AEST` is `2022-05-31 15:20 UTC`). Comparing UTC dates to local request dates directly would return a 404 for every such record.
 

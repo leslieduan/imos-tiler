@@ -50,9 +50,11 @@ Server is available at `http://localhost:80`.
 
 ## Important: date timezone convention
 
-> **Warning:** All dates in the API (`{date}` path params, `from`/`to` query params, `available_dates` responses) are in the server's local timezone (`TILE_TIMEZONE` env var, default `Australia/Sydney` — AEST/AEDT). The underlying Zarr store timestamps are UTC. The server converts between them internally.
+> **Warning:** All dates in the API (`{date}` path params, `from`/`to` query params, `available_dates` responses) are in the server's configured local timezone. This is controlled by the `TILE_TIMEZONE` env var (default `Australia/Sydney` — AEST/AEDT). To deploy this server for a different region, set `TILE_TIMEZONE` to any valid IANA timezone name (e.g. `America/New_York`, `Europe/London`) in `.env` or `docker-compose.yml` before starting — all date conversion will use that timezone automatically.
 >
-> **Always use dates from the manifest — never construct them from a local clock.** Dates are opaque keys: a client in a different timezone constructing `"2024-01-15"` from their own clock may produce a string that does not exist in the manifest. Passing a UTC date directly will also 404, because Australian satellite passes typically cross midnight UTC (e.g. a Sydney daytime pass at `2022-06-01 01:20 AEST` is `2022-05-31 15:20 UTC`).
+> The underlying Zarr store timestamps are always UTC. The server converts between them internally.
+>
+> **Always use dates from the manifest — never construct them from a local clock.** Dates are opaque keys: a client constructing a date string from their own clock may produce a value that does not exist in the manifest. Passing a UTC date directly will also 404, because satellite passes typically cross midnight UTC (e.g. a Sydney daytime pass at `2022-06-01 01:20 AEST` is `2022-05-31 15:20 UTC`).
 >
 > See [`docs/technical.md`](docs/technical.md#date-and-timezone-convention) for the full explanation.
 
