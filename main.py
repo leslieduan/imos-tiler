@@ -16,7 +16,12 @@ from routers.admin import admin_router
 from routers.data_tiles import router as data_tiles_router
 from routers.visual_tiles import router as visual_tiles_router
 from services.colormap_store import load_colormaps
-from services.loader import prewarm_disk_slices, prewarm_stores, refresh_disk_cache
+from services.loader import (
+    evict_stale_and_orphans,
+    prewarm_disk_slices,
+    prewarm_stores,
+    refresh_disk_cache,
+)
 from services.product_store import load_products
 
 logger = logging.getLogger(__name__)
@@ -33,11 +38,17 @@ LOGGING_CONFIG["loggers"]["services"] = {
 logging.config.dictConfig(LOGGING_CONFIG)
 
 
-async def _cache_refresh_loop(products: list, interval: int) -> None:
+async def _cache_refresh_loop(interval: int) -> None:
     while True:
         # yields to event loop — other tasks/requests run freely during the wait
         await asyncio.sleep(interval)
-        await asyncio.to_thread(refresh_disk_cache, products)
+        # Re-read PRODUCTS each cycle so products added/removed via the admin API are reflected.
+        # Catch broadly: an unhandled exception here would kill the loop for the lifetime
+        # of the process, silently disabling all future refreshes.
+        try:
+            await asyncio.to_thread(refresh_disk_cache, list(PRODUCTS.values()))
+        except Exception:
+            logger.exception("Cache refresh cycle failed; will retry next interval")
 
 
 # Lifespan manages server startup and shutdown. Everything before yield runs on startup,
@@ -62,17 +73,32 @@ async def lifespan(app: FastAPI):
     load_colormaps()
     store_urls = list({p.source_path for p in PRODUCTS.values()})
     prewarm_stores(store_urls)
-    products = list(PRODUCTS.values())
-    prewarm_task = asyncio.create_task(asyncio.to_thread(prewarm_disk_slices, products))
+    # Snapshot products once so eviction and prewarm see the same list (any product added
+    # via admin POST during startup is handled by its own prewarm in the admin handler).
+    startup_products = list(PRODUCTS.values())
+
+    async def _startup_cache_sync() -> None:
+        # Evict stale dates and orphan product dirs first so the cache reflects the current
+        # product/date state from the moment the server starts serving, then prewarm in
+        # parallel. Both run in threads so the event loop stays free for requests.
+        try:
+            await asyncio.to_thread(evict_stale_and_orphans, startup_products)
+        except Exception:
+            logger.exception("Startup cache eviction failed; continuing to prewarm")
+        await asyncio.to_thread(prewarm_disk_slices, startup_products)
+
+    prewarm_task = asyncio.create_task(_startup_cache_sync())
     interval = int(os.environ.get("CACHE_REFRESH_INTERVAL_SECONDS", 14400))
-    refresh_task = asyncio.create_task(_cache_refresh_loop(products, interval))
+    refresh_task = asyncio.create_task(_cache_refresh_loop(interval))
     yield
     for task in (prewarm_task, refresh_task):
         task.cancel()
         try:
             await task
-        except (asyncio.CancelledError, Exception):
+        except asyncio.CancelledError:
             pass
+        except Exception:
+            logger.exception("Background task exited with error")
 
 
 app = FastAPI(

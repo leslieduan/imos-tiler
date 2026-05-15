@@ -219,11 +219,65 @@ def prewarm_disk_slices(products: list[Product]) -> None:
         # pool.__exit__ calls shutdown(wait=True) — all jobs complete before returning
 
 
-def refresh_disk_cache(products: list[Product]) -> None:
-    """Add newly available dates to disk cache; evict dates outside each product's window."""
+def evict_stale_and_orphans(products: list[Product]) -> None:
+    """Remove cached dates outside each product's window and cache dirs for unknown products.
+
+    Callers MUST pass the full set of currently registered products. Anything not in
+    `products` is treated as orphaned and removed — passing a single-product list (as
+    admin POST does) would wipe every other product's cache.
+    """
     if not os.environ.get("DISK_CACHE_PATH"):
         return
     _evict_disk_if_needed()
+
+    for product in products:
+        variables = product.variables
+        try:
+            target_dates = set(get_available_dates(product.source_path)[-_CACHE_DAYS:])
+        except Exception:
+            logger.warning("Evict: could not get dates for %s", product.id, exc_info=True)
+            continue
+
+        _p = _disk_cache_path(product.source_path, "", variables)
+        if _p is None:
+            continue
+        cache_dir = _p.parent
+        if not cache_dir.exists():
+            continue
+        cached_dates = {f.name.split(".")[0] for f in cache_dir.glob("*.pkl.lz4")}
+
+        for date in sorted(cached_dates - target_dates):
+            p = _disk_cache_path(product.source_path, date, variables)
+            if p is not None and p.exists():
+                p.unlink()
+                logger.info("Disk cache evicted (stale): %s / %s", product.id, date)
+
+    # Remove cache dirs for products no longer registered (e.g. server crashed before evict,
+    # or product store was edited outside the admin API).
+    base = os.environ.get("DISK_CACHE_PATH")
+    base_path = Path(base) if base else None
+    if base_path and base_path.exists():
+        known_dirs = set()
+        for product in products:
+            _p = _disk_cache_path(product.source_path, "", product.variables)
+            if _p is not None:
+                known_dirs.add(_p.parent.name)
+        for entry in base_path.iterdir():
+            if entry.is_dir() and entry.name not in known_dirs:
+                shutil.rmtree(entry, ignore_errors=True)
+                logger.info("Disk cache evicted (orphaned product): %s", entry.name)
+
+
+def refresh_disk_cache(products: list[Product]) -> None:
+    """Add newly available dates to disk cache; evict dates outside each product's window.
+
+    Callers MUST pass the full set of currently registered products — see
+    [[evict_stale_and_orphans]] for why.
+    """
+    if not os.environ.get("DISK_CACHE_PATH"):
+        return
+    evict_stale_and_orphans(products)
+
     for product in products:
         variables = product.variables
         try:
@@ -248,12 +302,6 @@ def refresh_disk_cache(products: list[Product]) -> None:
                     logger.info("Disk cache added: %s / %s", product.id, date)
             except Exception:
                 logger.warning("Disk cache add failed: %s / %s", product.id, date, exc_info=True)
-
-        for date in sorted(cached_dates - target_dates):
-            p = _disk_cache_path(product.source_path, date, variables)
-            if p is not None and p.exists():
-                p.unlink()
-                logger.info("Disk cache evicted (stale): %s / %s", product.id, date)
 
 
 def evict_product_cache(product: "Product") -> None:
