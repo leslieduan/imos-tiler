@@ -171,7 +171,14 @@ class ColormapPayload(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def build_lut(cls, data: Any) -> Any:
-        if data.get("mode") != "categorical":
+        mode = data.get("mode", "ramp")
+        raw = data.get("entries")
+        if isinstance(raw, dict) and mode != "categorical":
+            raise ValueError(
+                f'entries is a dict, which is only valid for mode="categorical" '
+                f'(current mode: {mode!r}). Set "mode": "categorical" or pass a list of colour stops.'
+            )
+        if mode != "categorical":
             return data
         raw = data.get("entries")
         if not isinstance(raw, dict):

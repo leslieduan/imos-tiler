@@ -108,7 +108,7 @@ Visual tiles use `rio-tiler`'s `XarrayReader` for Web Mercator reprojection; no 
 ```
 titiler-project/
   main.py                        ← mounts all routers, CORS middleware, lifespan startup
-  constants.py                   ← Product dataclass + LOD algorithm; CUSTOM_COLORMAPS registry
+  constants.py                   ← Product dataclass + LOD algorithm
                                     LOD_ZOOM_THRESHOLDS, MAX_LODS, MIN_COARSEST_GRID
   products.json                  ← persisted product registrations (runtime, gitignored; local dev default)
   colormaps.json                 ← persisted custom colormap registrations (runtime, gitignored; local dev default)
@@ -129,7 +129,7 @@ titiler-project/
     data_renderer.py             ← processed grid cache + chunk extract + PNG encode (data tiles)
     visual_renderer.py           ← Web Mercator tile render + bbox render + colormap lookup (visual tiles)
     product_store.py             ← products.json read/write + in-memory PRODUCTS dict management
-    colormap_store.py            ← colormaps.json read/write + in-memory CUSTOM_COLORMAPS management
+    colormap_store.py            ← colormaps.json read/write + in-memory colormap registry + ColormapMode type
 ```
 
 `products.json` and `colormaps.json` default to the project root in local dev. In Docker (`docker-compose.yml`), they are overridden to `data/products.json` and `data/colormaps.json`, backed by a `./data` host volume. The disk slice cache directory is set via `DISK_CACHE_PATH` (default: unset in local dev; `/app/slice_cache` in Docker, backed by a `./slice_cache` host volume).
@@ -510,7 +510,7 @@ SLICE_CACHE_SIZE=10        →  PROCESSED_CACHE_SIZE=50
 
 Visual tiles support any colormap name that resolves through the following lookup chain (first match wins):
 
-1. **Custom registry** (`CUSTOM_COLORMAPS` in `constants.py` / `colormaps.json`) — names registered at runtime via the admin API.
+1. **Custom registry** (`colormaps.json`) — names registered at runtime via the admin API.
 2. **rio-tiler built-ins** — e.g. `viridis`, `plasma`, `inferno`.
 3. **matplotlib** — any name from `matplotlib.colormaps`, including diverging maps like `RdBu_r`, `coolwarm`.
 
@@ -530,9 +530,40 @@ An unrecognised name returns `400 Bad Request`.
 
 ### Custom colormaps
 
-Each custom colormap is a list of exactly 256 RGBA tuples — one per normalised byte value (0 = data minimum, 255 = data maximum after rescaling).
+Custom colormaps are registered via `POST /admin/colormaps` and persisted in `colormaps.json`. They are loaded on startup by `load_colormaps()` in `services/colormap_store.py` and take effect immediately without a server restart. The private registry and all accessor functions live in `colormap_store.py` — no other module holds colormap state directly.
 
-`CUSTOM_COLORMAPS` in `constants.py` is empty `{}` by default. Runtime additions are persisted in `colormaps.json` and managed via the admin API (`POST /admin/colormaps`, `DELETE /admin/colormaps/{name}`). They are loaded on startup by `load_colormaps()` in `services/colormap_store.py` and take effect immediately without a server restart.
+All colormaps are stored internally as 256-entry RGBA LUTs (one tuple per normalised byte value, where 0 = data minimum and 255 = data maximum after `rescale`). The `POST /admin/colormaps` payload normalises the input to this format at registration time.
+
+### Colormap modes
+
+The `mode` field on `POST /admin/colormaps` controls how the input stops are expanded to the 256-entry LUT:
+
+| Mode | `entries` format | Behaviour |
+|---|---|---|
+| `ramp` (default) | 2–256 colour stops | Evenly-spaced stops linearly interpolated to 256 entries |
+| `categorical` | dict `{"<int>": colour, ...}` | Each integer value maps to one LUT slot; all other slots are transparent |
+
+Each colour stop (in both modes) may be a CSS hex string (`#rgb`, `#rrggbb`, `#rrggbbaa`) or a `[r, g, b, a]` list. Hex strings without alpha default to fully opaque (a=255).
+
+**Ramp example** — 5 stops interpolated across the full LUT:
+
+```json
+{"name": "ocean_depth", "mode": "ramp", "entries": ["#000080", "#00ffff", "#ffffff", "#ff8c00", "#8b0000"]}
+```
+
+**Categorical example** — discrete class values 1–4:
+
+```json
+{
+  "name": "land_cover",
+  "mode": "categorical",
+  "entries": {"1": "#ffff00", "2": "#0000ff", "3": "#ff0000", "4": "#000000"}
+}
+```
+
+For categorical colormaps, `rescale=min,max` is **required** at render time and must match the range of the integer keys (e.g. `?rescale=1,4`). Omitting `rescale` with a categorical colormap returns `400 Bad Request`. This is enforced because the renderer auto-rescales to the per-tile data range when `rescale` is absent, which would corrupt the LUT slot mapping.
+
+The data range for a categorical colormap is inferred from the key range (`min(keys)` → `max(keys)`) at registration time and used to place each value in the LUT. Values not covered by any key render as fully transparent.
 
 ### Cache behaviour
 
