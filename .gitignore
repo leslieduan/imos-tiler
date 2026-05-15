@@ -15,6 +15,7 @@ titiler-demo-key.pem
 
 # Runtime state
 products.json
+colormaps.json
 
 
 

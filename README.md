@@ -1,6 +1,6 @@
 # titiler-project
 
-On-demand tile server for IMOS ocean data products. Tiles are generated in real time without pre-rendering. A three-tier cache (in-memory LRU → disk → S3) keeps cold requests fast: disk-warm slices serve in ~30ms vs ~2s from S3. Products are managed at runtime via the admin API — no redeploy required.
+On-demand tile server for IMOS ocean data products. Tiles are generated in real time without pre-rendering. A three-tier cache — processed grids (in-memory) → slice LRU (in-memory) → slice files (disk) — absorbs cold S3 reads: disk-warm slices serve in ~30ms vs ~2s from S3. Products are managed at runtime via the admin API — no redeploy required.
 
 ## Setup
 
