@@ -124,8 +124,15 @@ def health():
     return {"status": "ok"}
 
 
-# TODO: Coordinate system and projection pipeline section in technical.md is not good, because we
+# TODO: 1. Coordinate system and projection pipeline section in technical.md is not good, because we
 # have two different tiles systems, the data-tiles is using custom xyz tiles system, while the visual-tiles is using standard web mercator.
 # We should clarify this in the documentation, specify data-tiles is genreated in ESGF:4326 and visual-tiles is generate in Web Mercator:3857,
 # and webgl shader will reproject data-tiles from ESGF:4326 to Web Mercator:3857. While visual-tiles is already in Web Mercator:3857, so no
 # reprojection is needed, and it work well with all the map library or services that support web mercator.
+
+# TODO: 2. Background task including prewarm_task and refresh_task is not accurately described in technical.md.
+
+
+# TODO:3. We should have a section in technical.md to explain how the event loop and multithreading work in this project,
+# so when background taks running CPU/IO-heavy work, it will not block the event loop and the server can still handle incoming requests concurrently.
+# Also, explain why not use event loop for most endpoints, because of heavy CPU/IO work and xarray not supoort async reading.
