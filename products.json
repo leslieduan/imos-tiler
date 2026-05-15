@@ -10,39 +10,9 @@
     "padding": 1
   },
   {
-    "id": "radar_SouthAustraliaGulfs_wind_delayed_qc_wdir",
-    "source_path": "s3://aodn-cloud-optimised/radar_SouthAustraliaGulfs_wind_delayed_qc.zarr",
-    "variable": "WDIR",
-    "chunk_px": [
-      240,
-      192
-    ],
-    "padding": 1
-  },
-  {
     "id": "satellite_austemp_heatwave_8day_ssta",
     "source_path": "s3://aodn-cloud-optimised/satellite_austemp_heatwave_8day.zarr",
     "variable": "ssta",
-    "chunk_px": [
-      240,
-      192
-    ],
-    "padding": 1
-  },
-  {
-    "id": "satellite_ghrsst_l3c_1day_nighttime_snpp_australia",
-    "source_path": "s3://aodn-cloud-optimised/satellite_ghrsst_l3c_1day_nighttime_snpp_australia.zarr/",
-    "variable": "sst_mean",
-    "chunk_px": [
-      240,
-      192
-    ],
-    "padding": 1
-  },
-  {
-    "id": "satellite_ghrsst_l3c_1day_nighttime_snpp_australia_sea_surface_temperature",
-    "source_path": "s3://aodn-cloud-optimised/satellite_ghrsst_l3c_1day_nighttime_snpp_australia.zarr/",
-    "variable": "sea_surface_temperature",
     "chunk_px": [
       240,
       192
@@ -63,9 +33,9 @@
     "padding": 1
   },
   {
-    "id": "satellite_austemp_heatwave_8day_MCS_category",
-    "source_path": "s3://aodn-cloud-optimised/satellite_austemp_heatwave_8day.zarr",
-    "variable": "MCS_category",
+    "id": "satellite_ghrsst_l4_gamssa_1day_multi_sensor_world_analysed_sst",
+    "source_path": "s3://aodn-cloud-optimised/satellite_ghrsst_l4_gamssa_1day_multi_sensor_world.zarr/",
+    "variable": "analysed_sst",
     "chunk_px": [
       240,
       192
