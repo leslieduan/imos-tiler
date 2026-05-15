@@ -54,7 +54,15 @@ class ProductPayload(BaseModel):
         return v
 
 
-@admin_router.post("/products", status_code=201)
+@admin_router.post(
+    "/products",
+    status_code=201,
+    summary="Register a product",
+    description=(
+        "Registers a new product from a Zarr store and triggers a background cache prewarm. "
+        "The store must expose `lat`, `lon`, and `time` coordinates. Returns 409 if the product ID already exists."
+    ),
+)
 async def add_product(payload: ProductPayload):
     try:
         product = register_product(payload.model_dump())
@@ -68,7 +76,12 @@ async def add_product(payload: ProductPayload):
     )
 
 
-@admin_router.delete("/products/{product_id}", status_code=204)
+@admin_router.delete(
+    "/products/{product_id}",
+    status_code=204,
+    summary="Deregister a product",
+    description="Removes the product and evicts its cached data. Returns 404 if the product does not exist.",
+)
 def delete_product(product_id: str):
     product = PRODUCTS.get(product_id)
     try:
@@ -110,7 +123,12 @@ class ColormapPayload(BaseModel):
         return [(rgba[0], rgba[1], rgba[2], rgba[3]) for rgba in self.entries]
 
 
-@admin_router.post("/colormaps", status_code=201)
+@admin_router.post(
+    "/colormaps",
+    status_code=201,
+    summary="Register a custom colormap",
+    description="Registers a named colormap from 256 RGBA entries. Returns 409 if the name already exists.",
+)
 def add_colormap(payload: ColormapPayload):
     try:
         register_colormap(payload.name, payload.to_tuples())
@@ -121,7 +139,12 @@ def add_colormap(payload: ColormapPayload):
     return JSONResponse(status_code=201, content={"name": payload.name})
 
 
-@admin_router.delete("/colormaps/{name}", status_code=204)
+@admin_router.delete(
+    "/colormaps/{name}",
+    status_code=204,
+    summary="Remove a custom colormap",
+    description="Removes a previously registered custom colormap. Returns 404 if not found.",
+)
 def delete_colormap(name: str = Path(...)):
     try:
         remove_colormap(name)

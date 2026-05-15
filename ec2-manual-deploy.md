@@ -90,7 +90,6 @@ cat > /app/titiler-project/data/products.json << 'EOF'
 [
   {"id":"sea_level_anomaly","source_path":"s3://aodn-cloud-optimised/model_sea_level_anomaly_gridded_realtime.zarr/","variable":"GSLA","chunk_px":[240,192],"padding":1},
   {"id":"ocean_current","source_path":"s3://aodn-cloud-optimised/model_sea_level_anomaly_gridded_realtime.zarr/","variable":["UCUR","VCUR"],"chunk_px":[240,192],"padding":1},
-  {"id":"radar_SouthAustraliaGulfs_wind_delayed_qc_wdir","source_path":"s3://aodn-cloud-optimised/radar_SouthAustraliaGulfs_wind_delayed_qc.zarr","variable":"WDIR","chunk_px":[240,192],"padding":1},
   {"id":"satellite_austemp_heatwave_8day_ssta","source_path":"s3://aodn-cloud-optimised/satellite_austemp_heatwave_8day.zarr","variable":"ssta","chunk_px":[240,192],"padding":1}
 ]
 EOF
@@ -104,7 +103,12 @@ The Zarr stores are on a public S3 bucket so no AWS credentials are needed. All 
 
 ```bash
 cat > /app/titiler-project/.env << 'EOF'
-ADMIN_API_KEY=change-me-before-production
+ADMIN_API_KEY=titiler_imos_admin
+
+# Timezone used to convert UTC store timestamps to local dates for the manifest and tile endpoints.
+# Set to any IANA timezone name (e.g. America/New_York, Europe/London) to deploy for a different region.
+# Both get_available_dates and load_slice must use the same value — do not change one without the other.
+TILE_TIMEZONE=Australia/Sydney
 
 # Store TTL: seconds before a Zarr store is re-opened to pick up newly appended time steps.
 STORE_TTL_SECONDS=600
@@ -113,10 +117,10 @@ STORE_TTL_SECONDS=600
 THREAD_POOL_SIZE=100
 
 # Slice cache: number of fully-computed (store, date) slices to hold in RAM.
-SLICE_CACHE_SIZE=100
+SLICE_CACHE_SIZE=10
 
 # Processed cache: number of resampled LOD grids to hold in RAM.
-PROCESSED_CACHE_SIZE=400
+PROCESSED_CACHE_SIZE=50
 
 # Disk cache: maximum total size before pressure eviction runs.
 DISK_CACHE_LIMIT_GB=20
@@ -159,10 +163,11 @@ On first start, the server prewarmed the disk cache in the background — logs w
 
 ```bash
 # From inside EC2
-curl http://localhost:8000
+curl http://localhost:8000/health
 
 # From your browser
-curl http://<your-ec2-public-ip>/data_tiles/sea_level_anomaly/2024-01-01/manifest.json
+curl http://<your-ec2-public-ip>/health
+curl http://<your-ec2-public-ip>/data_tiles/products
 ```
 
 ---
@@ -181,12 +186,12 @@ Both `data/` (products, colormaps) and `slice_cache/` are preserved across redep
 
 ## Quick Reference
 
-| What                        | Command                                              |
-| --------------------------- | ---------------------------------------------------- |
-| View logs                   | `docker compose logs -f`                             |
-| Stop                        | `docker compose down`                                |
-| Restart                     | `docker compose restart`                             |
-| Rebuild after code change   | `docker compose up -d --build`                       |
-| Check disk cache size       | `du -sh /app/titiler-project/slice_cache`             |
-| Clear disk cache            | `rm -rf /app/titiler-project/slice_cache/*`           |
-| Check disk usage            | `df -h`                                              |
+| What                      | Command                                     |
+| ------------------------- | ------------------------------------------- |
+| View logs                 | `docker compose logs -f`                    |
+| Stop                      | `docker compose down`                       |
+| Restart                   | `docker compose restart`                    |
+| Rebuild after code change | `docker compose up -d --build`              |
+| Check disk cache size     | `du -sh /app/titiler-project/slice_cache`   |
+| Clear disk cache          | `rm -rf /app/titiler-project/slice_cache/*` |
+| Check disk usage          | `df -h`                                     |
