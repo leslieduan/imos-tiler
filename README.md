@@ -50,7 +50,9 @@ Server is available at `http://localhost:80`.
 
 ## Important: date timezone convention
 
-> **Warning:** All dates in the API (`{date}` path params, `from`/`to` query params, `available_dates` responses) are in **local Australian time** (`Australia/Sydney` — AEST/AEDT). The underlying Zarr store timestamps are UTC. The server converts between them internally — do not bypass this by passing UTC dates directly, or tiles will 404 for any date where the satellite pass crosses midnight UTC (which is the common case for Australian daytime observations).
+> **Warning:** All dates in the API (`{date}` path params, `from`/`to` query params, `available_dates` responses) are in the server's local timezone (`TILE_TIMEZONE` env var, default `Australia/Sydney` — AEST/AEDT). The underlying Zarr store timestamps are UTC. The server converts between them internally.
+>
+> **Always use dates from the manifest — never construct them from a local clock.** Dates are opaque keys: a client in a different timezone constructing `"2024-01-15"` from their own clock may produce a string that does not exist in the manifest. Passing a UTC date directly will also 404, because Australian satellite passes typically cross midnight UTC (e.g. a Sydney daytime pass at `2022-06-01 01:20 AEST` is `2022-05-31 15:20 UTC`).
 >
 > See [`docs/technical.md`](docs/technical.md#date-and-timezone-convention) for the full explanation.
 

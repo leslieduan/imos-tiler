@@ -15,7 +15,9 @@ from cachetools import LRUCache
 
 from constants import COORD_NAMES, Product
 
-_LOCAL_TZ = ZoneInfo("Australia/Sydney")
+# Both get_available_dates and load_slice must use the same timezone — dates exposed by the
+# manifest are local dates in this zone, and requests are expected to send them back unchanged.
+_LOCAL_TZ = ZoneInfo(os.environ.get("TILE_TIMEZONE", "Australia/Sydney"))
 
 logger = logging.getLogger(__name__)
 
@@ -342,7 +344,18 @@ def load_slice(store_url: str, date: str, variables: list[str]) -> xr.Dataset:
         store = _get_store(store_url)
         matching = [ts for ts in store.coords["time"].values if _ts_to_local_date(ts) == date]
         if not matching:
-            raise FileNotFoundError(f"No data for date {date!r}")
+            raise FileNotFoundError(
+                f"No data for date {date!r}. Dates must be {_LOCAL_TZ.key} local dates "
+                f"(as returned by the manifest endpoint), not UTC."
+            )
+        if len(matching) > 1:
+            logger.warning(
+                "Multiple timestamps (%d) map to date %r in %s; using first: %s",
+                len(matching),
+                date,
+                store_url,
+                matching[0],
+            )
         ds = store[variables].sel(time=pd.Timestamp(matching[0])).compute()
         with _slice_lock:
             _slice_cache[cache_key] = ds

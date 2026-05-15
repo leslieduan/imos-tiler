@@ -12,6 +12,7 @@ services:
       - ADMIN_API_KEY=${ADMIN_API_KEY}
       - PRODUCTS_CONFIG_PATH=data/products.json
       - COLORMAPS_CONFIG_PATH=data/colormaps.json
+      - TILE_TIMEZONE=${TILE_TIMEZONE:-Australia/Sydney}
       - STORE_TTL_SECONDS=${STORE_TTL_SECONDS:-600}
       - THREAD_POOL_SIZE=${THREAD_POOL_SIZE:-100}
       - SLICE_CACHE_SIZE=${SLICE_CACHE_SIZE:-10}
