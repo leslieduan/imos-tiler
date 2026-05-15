@@ -75,8 +75,3 @@ class Product:
 
 
 PRODUCTS: dict[str, Product] = {}
-
-# Registry for custom named colormaps. Each entry maps a name to a list of 256 RGBA tuples.
-# Example:
-#   "imos_sst": [(r, g, b, a), ...],  # 256 entries
-CUSTOM_COLORMAPS: dict[str, list[tuple[int, int, int, int]]] = {}

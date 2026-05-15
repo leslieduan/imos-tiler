@@ -6,7 +6,6 @@ import shutil
 import threading
 import time
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 import lz4.frame
 import pandas as pd
@@ -14,10 +13,7 @@ import xarray as xr
 from cachetools import LRUCache
 
 from constants import COORD_NAMES, Product
-
-# Both get_available_dates and load_slice must use the same timezone — dates exposed by the
-# manifest are local dates in this zone, and requests are expected to send them back unchanged.
-_LOCAL_TZ = ZoneInfo(os.environ.get("TILE_TIMEZONE", "Australia/Sydney"))
+from utils.dates import LOCAL_TZ, ts_to_local_date
 
 logger = logging.getLogger(__name__)
 
@@ -124,8 +120,8 @@ def _get_store(store_url: str) -> xr.Dataset:
 
 
 def prewarm_stores(store_urls: list[str]) -> None:
-    """it moves the one-time S3 metadata cost from the first user request to server startup,
-    where it's invisible. Also enable get_products_availability fast response on first call."""
+    """Moves the one-time S3 metadata cost from the first user request to server startup,
+    where it's invisible. Also enables get_products_availability to respond fast on first call."""
     for url in store_urls:
         threading.Thread(target=_get_store, args=(url,), daemon=True).start()
 
@@ -284,16 +280,11 @@ def evict_product_cache(product: "Product") -> None:
         logger.info("Disk cache evicted (product removed): %s", product.id)
 
 
-def _ts_to_local_date(ts) -> str:
-    """Convert a UTC numpy datetime64 or Timestamp to the local Australian date string."""
-    return pd.Timestamp(ts).tz_localize("UTC").tz_convert(_LOCAL_TZ).strftime("%Y-%m-%d")
-
-
 def get_available_dates(store_url: str) -> list[str]:
     store = _get_store(store_url)
     if "time" not in store.dims:
         return []
-    return [_ts_to_local_date(ts) for ts in store.coords["time"].values]
+    return [ts_to_local_date(ts) for ts in store.coords["time"].values]
 
 
 # Fix: cache stampede — the old code released _slice_lock immediately after a cache miss, then
@@ -342,10 +333,10 @@ def load_slice(store_url: str, date: str, variables: list[str]) -> xr.Dataset:
                 logger.warning("Disk cache read failed: %s", cache_path, exc_info=True)
 
         store = _get_store(store_url)
-        matching = [ts for ts in store.coords["time"].values if _ts_to_local_date(ts) == date]
+        matching = [ts for ts in store.coords["time"].values if ts_to_local_date(ts) == date]
         if not matching:
             raise FileNotFoundError(
-                f"No data for date {date!r}. Dates must be {_LOCAL_TZ.key} local dates "
+                f"No data for date {date!r}. Dates must be {LOCAL_TZ.key} local dates "
                 f"(as returned by the manifest endpoint), not UTC."
             )
         if len(matching) > 1:

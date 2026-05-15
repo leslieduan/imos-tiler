@@ -1,6 +1,5 @@
 import concurrent.futures
 import logging
-import math
 import os
 import threading
 from collections.abc import Callable
@@ -12,6 +11,7 @@ from cachetools import LRUCache
 from PIL import Image
 
 from constants import LOD_ZOOM_THRESHOLDS, Product
+from utils.geo import dataset_bounds, json_safe_float
 
 logger = logging.getLogger(__name__)
 
@@ -22,23 +22,13 @@ _processed_inflight: dict[tuple, concurrent.futures.Future] = {}
 _processed_lock = threading.Lock()
 
 
-def _get_bounds(ds: xr.Dataset) -> tuple[float, float, float, float]:
-    """Return (lon_min, lon_max, lat_min, lat_max)."""
-    return (
-        float(ds.lon.min().values),
-        float(ds.lon.max().values),
-        float(ds.lat.min().values),
-        float(ds.lat.max().values),
-    )
-
-
 def _resample_to_grid(ds: xr.Dataset, total_w: int, total_h: int) -> xr.Dataset:
-    # The source NetCDF grid points don't align with the target pixel positions,
-    # so we interpolate: for each of the total_w×total_h output pixels, scipy finds
+    # The source Zarr grid points don't align with the target pixel positions,
+    # so we interpolate: for each of the total_w×total_h output pixels, xarray finds
     # the surrounding source points and computes a weighted average (bilinear).
     # This covers the full LOD grid (all chunks combined), not a single tile —
     # _extract_chunk then slices the relevant chunk out of the result.
-    lon_min, lon_max, lat_min, lat_max = _get_bounds(ds)
+    lon_min, lon_max, lat_min, lat_max = dataset_bounds(ds)
     target_lons = np.linspace(lon_min, lon_max, total_w)
     target_lats = np.linspace(lat_max, lat_min, total_h)  # north → south
     result = ds.interp(lon=target_lons, lat=target_lats, method="linear")
@@ -217,11 +207,6 @@ def render_tile(
     return _to_png_bytes(img)
 
 
-def _json_float(v) -> float | None:
-    f = float(v)
-    return None if math.isnan(f) or math.isinf(f) else f
-
-
 def render_manifest(product: Product, ds: xr.Dataset) -> dict:
     lon_min_g = float(ds.lon.min())
     lon_max_g = float(ds.lon.max())
@@ -248,20 +233,20 @@ def render_manifest(product: Product, ds: xr.Dataset) -> dict:
         return {
             "bounds": bounds,
             "uRange": [
-                _json_float(ds[u_var].min(skipna=True).values),
-                _json_float(ds[u_var].max(skipna=True).values),
+                json_safe_float(ds[u_var].min(skipna=True).values),
+                json_safe_float(ds[u_var].max(skipna=True).values),
             ],
             "vRange": [
-                _json_float(ds[v_var].min(skipna=True).values),
-                _json_float(ds[v_var].max(skipna=True).values),
+                json_safe_float(ds[v_var].min(skipna=True).values),
+                json_safe_float(ds[v_var].max(skipna=True).values),
             ],
             "lods": lod_meta,
         }
     return {
         "bounds": bounds,
         "valueRange": [
-            _json_float(ds[product.variable].min(skipna=True).values),
-            _json_float(ds[product.variable].max(skipna=True).values),
+            json_safe_float(ds[product.variable].min(skipna=True).values),
+            json_safe_float(ds[product.variable].max(skipna=True).values),
         ],
         "lods": lod_meta,
     }

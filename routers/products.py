@@ -1,6 +1,4 @@
-import calendar
 import math
-from datetime import date
 
 from fastapi import APIRouter, HTTPException, Path, Query
 from fastapi.openapi.models import Example
@@ -9,6 +7,7 @@ from fastapi.responses import JSONResponse
 from constants import PRODUCTS
 from services.loader import get_available_dates, load_slice
 from services.product_store import list_products
+from utils.dates import three_months_ago
 
 router = APIRouter()
 
@@ -35,17 +34,6 @@ def _load_slice_or_404(store_url: str, date: str, variables: list[str]):
         raise HTTPException(status_code=404, detail=str(e)) from e
 
 
-def _three_months_ago() -> str:
-    today = date.today()
-    month = today.month - 3
-    year = today.year
-    if month <= 0:
-        month += 12
-        year -= 1
-    day = min(today.day, calendar.monthrange(year, month)[1])
-    return date(year, month, day).isoformat()
-
-
 @router.get(
     "/manifest",
     summary="Products availability",
@@ -70,7 +58,7 @@ def get_products_availability(
         openapi_examples={"default": Example(value="2024-12-31")},
     ),
 ):
-    effective_from = from_date or _three_months_ago()
+    effective_from = from_date or three_months_ago()
     products = {}
     for product_id, product in PRODUCTS.items():
         dates = get_available_dates(product.source_path)

@@ -4,12 +4,13 @@ import os
 from fastapi import APIRouter, Depends, HTTPException, Path, Security
 from fastapi.responses import JSONResponse
 from fastapi.security import APIKeyHeader
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from constants import CHUNK_PX, PADDING, PRODUCTS
-from services.colormap_store import register_colormap, remove_colormap
+from services.colormap_store import ColormapMode, register_colormap, remove_colormap
 from services.loader import evict_product_cache, prewarm_disk_slices
 from services.product_store import register_product, remove_product
+from utils.colors import build_categorical_lut, interpolate_colormap, parse_color
 
 _api_key_header = APIKeyHeader(name="X-Admin-Key")
 
@@ -98,8 +99,20 @@ def delete_product(product_id: str):
 
 class ColormapPayload(BaseModel):
     name: str
+    mode: ColormapMode = Field(
+        default="ramp",
+        description=(
+            "'ramp': evenly-spaced stops, linearly interpolated to 256 LUT entries. "
+            "'categorical': discrete value→color mapping; data range is derived from the entry keys."
+        ),
+    )
     entries: list[list[int]] = Field(
-        ..., description="Exactly 256 RGBA entries, each a list of 4 ints in [0, 255]."
+        ...,
+        description=(
+            "ramp mode — 2–256 color stops (hex string or [r,g,b,a] list), interpolated to 256. "
+            "categorical mode — dict mapping integer data values to colors, "
+            'e.g. {"1": "#ff0000", "2": [0, 0, 255, 255]}.'
+        ),
     )
 
     @field_validator("name")
@@ -109,15 +122,47 @@ class ColormapPayload(BaseModel):
             raise ValueError("must be non-empty with no leading/trailing whitespace")
         return v
 
-    @field_validator("entries")
+    @model_validator(mode="before")
     @classmethod
-    def entries_valid(cls, v: list[list[int]]) -> list[list[int]]:
-        if len(v) != 256:
-            raise ValueError(f"entries must have exactly 256 items, got {len(v)}")
-        for i, rgba in enumerate(v):
-            if len(rgba) != 4 or not all(0 <= c <= 255 for c in rgba):
-                raise ValueError(f"entry {i} must be [r, g, b, a] with values 0–255")
-        return v
+    def build_lut(cls, data: dict) -> dict:
+        mode = data.get("mode", "ramp")
+        raw = data.get("entries")
+        if isinstance(raw, dict) and mode != "categorical":
+            raise ValueError(
+                f'entries is a dict, which is only valid for mode="categorical" '
+                f'(current mode: {mode!r}). Set "mode": "categorical" or pass a list of colour stops.'
+            )
+        if mode != "categorical":
+            return data
+        raw = data.get("entries")
+        if not isinstance(raw, dict):
+            raise ValueError('entries must be a dict for categorical mode, e.g. {"1": "#ff0000"}')
+        categories: dict[int, list[int]] = {}
+        for k, v in raw.items():
+            try:
+                val = int(k)
+            except (ValueError, TypeError) as e:
+                raise ValueError(f"entries key {k!r} must be an integer") from e
+            categories[val] = parse_color(v, f"entries[{k!r}]")
+        data_range = (float(min(categories)), float(max(categories)))
+        data["entries"] = build_categorical_lut(categories, data_range)
+        return data
+
+    @field_validator("entries", mode="before")
+    @classmethod
+    def entries_valid(cls, v: list) -> list[list[int]]:
+        if len(v) < 2:
+            raise ValueError(f"entries must have at least 2 color stops, got {len(v)}")
+        if len(v) > 256:
+            raise ValueError(f"entries must have at most 256 items, got {len(v)}")
+        normalized: list[list[int]] = []
+        for i, entry in enumerate(v):
+            try:
+                rgba = parse_color(entry, f"entry {i}")
+            except ValueError as e:
+                raise ValueError(f"entry {i}: {e}") from e
+            normalized.append(rgba)
+        return normalized if len(normalized) == 256 else interpolate_colormap(normalized)
 
     def to_tuples(self) -> list[tuple[int, int, int, int]]:
         return [(rgba[0], rgba[1], rgba[2], rgba[3]) for rgba in self.entries]
@@ -127,11 +172,11 @@ class ColormapPayload(BaseModel):
     "/colormaps",
     status_code=201,
     summary="Register a custom colormap",
-    description="Registers a named colormap from 256 RGBA entries. Returns 409 if the name already exists.",
+    description="Registers a named colormap from 2–256 color stops, interpolated to 256 entries. Returns 409 if the name already exists.",
 )
 def add_colormap(payload: ColormapPayload):
     try:
-        register_colormap(payload.name, payload.to_tuples())
+        register_colormap(payload.name, payload.to_tuples(), payload.mode)
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
     except Exception as e:

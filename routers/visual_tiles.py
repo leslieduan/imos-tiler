@@ -2,17 +2,14 @@ from fastapi import APIRouter, HTTPException, Path, Query
 from fastapi.openapi.models import Example
 from fastapi.responses import JSONResponse, Response
 
-from services.colormap_store import list_colormaps
+from services.colormap_store import is_categorical, list_colormaps
 from services.visual_renderer import _colormap, render_bbox, render_tile
 
-from .products import _get_product_or_404, _load_slice_or_404
+from .products import _DATE_EX, _PRODUCT_EX, _get_product_or_404, _load_slice_or_404
 from .products import router as products_router
 
 router = APIRouter()
 router.include_router(products_router)
-
-_PRODUCT_EX: dict[str, Example] = {"default": Example(value="sea_level_anomaly")}
-_DATE_EX: dict[str, Example] = {"default": Example(value="2024-02-24")}
 
 
 def _parse_rescale(rescale: str | None) -> tuple[float, float] | None:
@@ -25,6 +22,16 @@ def _parse_rescale(rescale: str | None) -> tuple[float, float] | None:
         raise HTTPException(
             status_code=400, detail="rescale must be 'min,max', e.g. '-0.5,0.5'"
         ) from e
+
+
+def _require_rescale_if_categorical(
+    colormap_name: str, rescale_range: tuple[float, float] | None
+) -> None:
+    if is_categorical(colormap_name) and rescale_range is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Colormap '{colormap_name}' is categorical — rescale=min,max is required.",
+        )
 
 
 @router.get("/colormaps", summary="List available colormaps")
@@ -79,6 +86,7 @@ def get_tile(
     ds = _load_slice_or_404(product.source_path, date, [product.variable])
 
     rescale_range = _parse_rescale(rescale)
+    _require_rescale_if_categorical(colormap_name, rescale_range)
 
     try:
         png = render_tile(ds, product.variable, x, y, z, colormap_name, rescale_range)
@@ -135,6 +143,7 @@ def get_bbox(
         raise HTTPException(status_code=400, detail="bbox must be 'minx,miny,maxx,maxy'") from e
 
     rescale_range = _parse_rescale(rescale)
+    _require_rescale_if_categorical(colormap_name, rescale_range)
 
     ds = _load_slice_or_404(product.source_path, date, [product.variable])
 

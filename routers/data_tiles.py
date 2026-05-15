@@ -5,14 +5,11 @@ from fastapi.responses import JSONResponse, Response
 from services.data_renderer import render_manifest, render_tile
 from services.loader import get_lod_grids
 
-from .products import _get_product_or_404, _load_slice_or_404
+from .products import _DATE_EX, _PRODUCT_EX, _get_product_or_404, _load_slice_or_404
 from .products import router as products_router
 
 router = APIRouter()
 router.include_router(products_router)
-
-_PRODUCT_EX: dict[str, Example] = {"default": Example(value="sea_level_anomaly")}
-_DATE_EX: dict[str, Example] = {"default": Example(value="2024-02-24")}
 
 
 @router.get(

@@ -141,9 +141,9 @@ curl -X DELETE http://localhost:8000/admin/products/sea_level_anomaly \
 
 Custom colormaps are stored in `colormaps.json` and loaded on startup. Changes via the admin API take effect immediately without a restart. All supported colormap names (custom, rio-tiler built-ins, and matplotlib) can be browsed via `GET /visual_tiles/colormaps`. Names registered here can be used via `?colormap=<name>` on any visual tile request.
 
-Each colormap is exactly 256 RGBA entries (one per normalised byte value 0–255).
+Two modes are supported — see [`docs/technical.md`](docs/technical.md#colormap-modes) for full details.
 
-**Add a colormap:**
+**Ramp colormap** — 2–256 evenly-spaced stops, linearly interpolated to a 256-entry LUT. Stops can be hex strings or `[r,g,b,a]` lists:
 
 ```bash
 curl -X POST http://localhost:8000/admin/colormaps \
@@ -151,8 +151,27 @@ curl -X POST http://localhost:8000/admin/colormaps \
   -H "Content-Type: application/json" \
   -d '{
     "name": "imos_sst",
-    "entries": [[0,0,80,255], [0,40,160,255], ..., [220,240,255,255]]
+    "mode": "ramp",
+    "entries": ["#000080", "#00ffff", "#ffffff", "#ff8c00", "#8b0000"]
   }'
+```
+
+**Categorical colormap** — maps discrete integer data values to specific colours. `rescale=min,max` matching the key range is required at render time:
+
+```bash
+curl -X POST http://localhost:8000/admin/colormaps \
+  -H "X-Admin-Key: your-secret-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "land_cover",
+    "mode": "categorical",
+    "entries": {"1": "#ffff00", "2": "#0000ff", "3": "#ff0000", "4": "#000000"}
+  }'
+```
+
+```
+# Use with rescale matching the key range
+GET /visual_tiles/{product_id}/{date}/tiles/1/0/0.png?colormap=land_cover&rescale=1,4
 ```
 
 **Delete a colormap:**
@@ -161,8 +180,6 @@ curl -X POST http://localhost:8000/admin/colormaps \
 curl -X DELETE http://localhost:8000/admin/colormaps/imos_sst \
   -H "X-Admin-Key: your-secret-key"
 ```
-
-Compile-time defaults can also be added directly in `CUSTOM_COLORMAPS` in `constants.py` — these are always available regardless of `colormaps.json`.
 
 See [`docs/security.md`](docs/security.md) for how admin endpoints are secured in production.
 
