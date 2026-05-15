@@ -7,7 +7,7 @@ from constants import COLORMAPS_CONFIG_PATH
 
 ColormapMode = Literal["ramp", "categorical"]
 
-logger = logging.getLogger("services")
+logger = logging.getLogger(__name__)
 
 _config_path = Path(COLORMAPS_CONFIG_PATH)
 _custom_colormaps: dict[str, list[tuple[int, int, int, int]]] = {}

@@ -4,7 +4,7 @@ from pathlib import Path
 
 from constants import CHUNK_PX, PADDING, PRODUCTS, PRODUCTS_CONFIG_PATH, Product
 
-logger = logging.getLogger("services")
+logger = logging.getLogger(__name__)
 
 _config_path = Path(PRODUCTS_CONFIG_PATH)
 
