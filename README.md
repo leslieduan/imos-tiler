@@ -81,6 +81,7 @@ Colourised Web Mercator (XYZ) tiles — compatible with MapboxGL `raster` source
 | GET    | `/visual_tiles/{product_id}/{date}/tiles/{z}/{x}/{y}.png`         | Colourised PNG tile (Web Mercator XYZ)                                                                            |
 | GET    | `/visual_tiles/{product_id}/{date}/bbox?bbox=minx,miny,maxx,maxy` | Colourised PNG for an arbitrary bbox (EPSG:4326 degrees by default; pass `crs=EPSG:3857` for Web Mercator meters) |
 | GET    | `/visual_tiles/colormaps`                                         | All supported colormap names grouped by source (custom, rio-tiler, matplotlib)                                    |
+| GET    | `/visual_tiles/colormaps/{name}/legend`                           | Color legend PNG for a colormap (gradient bar ± tick labels)                                                      |
 
 Query parameters for tile requests:
 
@@ -172,6 +173,13 @@ curl -X POST http://localhost:8000/admin/colormaps \
 ```
 # Use with rescale matching the key range
 GET /visual_tiles/{product_id}/{date}/tiles/1/0/0.png?colormap=land_cover&rescale=1,4
+```
+
+**Color legend** — returns a PNG color bar for any colormap name returned by `GET /visual_tiles/colormaps`. Without `rescale`, only the bar is rendered. With `rescale=min,max`, tick labels are drawn at lo, mid, and hi:
+
+```
+GET /visual_tiles/colormaps/imos_sst/legend?rescale=-1,1&width=300&height=40&orientation=horizontal
+GET /visual_tiles/colormaps/imos_sst/legend?width=40&height=256&orientation=vertical
 ```
 
 **Delete a colormap:**

@@ -185,9 +185,23 @@ Colourised PNG tiles in standard Web Mercator (XYZ) — compatible with MapboxGL
 
 ```
 GET /visual_tiles/colormaps                                            → all supported colormap names
+GET /visual_tiles/colormaps/{name}/legend                             → color legend PNG for a colormap
 GET /visual_tiles/{product_id}/{date}/tiles/{z}/{x}/{y}.png           → colourised Web Mercator PNG
 GET /visual_tiles/{product_id}/{date}/bbox?bbox=minx,miny,maxx,maxy  → colourised PNG for arbitrary bbox
 ```
+
+Legend query parameters:
+
+| Query param   | Default      | Description                                                                              |
+| ------------- | ------------ | ---------------------------------------------------------------------------------------- |
+| `rescale`     | _(none)_     | Value range as `min,max`. When provided, tick labels at lo, mid, and hi are drawn.       |
+| `width`       | `256`        | Image width in pixels (10–2048)                                                          |
+| `height`      | `40`         | Image height in pixels (10–2048)                                                         |
+| `orientation` | `horizontal` | `horizontal` (bar runs left→right) or `vertical` (bar runs top→bottom, hi at top)        |
+
+Without `rescale`, only the color bar is rendered — no tick marks or labels. With `rescale`, 20 pixels alongside the bar are reserved for labels (reducing the bar to `height-20` or `width-20` depending on orientation).
+
+Categorical colormaps render discrete equal-width color blocks (one per registered category) rather than a smooth gradient. Labels, when shown, display the reconstructed integer value for each slot based on `rescale`.
 
 `z`/`x`/`y` are standard Web Mercator tile coordinates (OpenStreetMap, MapboxGL, Leaflet, etc.).
 
