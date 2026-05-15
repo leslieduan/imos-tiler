@@ -96,10 +96,39 @@ def delete_product(product_id: str):
         evict_product_cache(product)
 
 
+def _hex_to_rgba(hex_color: str) -> list[int]:
+    h = hex_color.lstrip("#")
+    if len(h) == 3:
+        h = "".join(c * 2 for c in h)
+    if len(h) == 6:
+        return [int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16), 255]
+    if len(h) == 8:
+        return [int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16), int(h[6:8], 16)]
+    raise ValueError(f"invalid hex color: {hex_color!r}")
+
+
+def _interpolate_colormap(stops: list[list[int]]) -> list[list[int]]:
+    """Linearly interpolate N evenly-spaced RGBA stops to 256 entries."""
+    import numpy as np
+
+    arr = np.array(stops, dtype=float)
+    x_stops = np.linspace(0, 1, len(stops))
+    x_out = np.linspace(0, 1, 256)
+    interpolated = np.stack([np.interp(x_out, x_stops, arr[:, c]) for c in range(4)], axis=1)
+    return np.clip(interpolated, 0, 255).round().astype(int).tolist()  # type: ignore[no-any-return]
+
+
 class ColormapPayload(BaseModel):
     name: str
     entries: list[list[int]] = Field(
-        ..., description="Exactly 256 RGBA entries, each a list of 4 ints in [0, 255]."
+        ...,
+        description=(
+            "2–256 RGBA color stops. Each entry is either a list of 4 ints [r, g, b, a] "
+            "in [0, 255], or a CSS hex string (#rgb, #rrggbb, #rrggbbaa). "
+            "Hex strings without alpha default to fully opaque (a=255). "
+            "Stops are treated as evenly spaced; fewer than 256 are linearly interpolated "
+            "to fill all 256 LUT slots."
+        ),
     )
 
     @field_validator("name")
@@ -109,15 +138,28 @@ class ColormapPayload(BaseModel):
             raise ValueError("must be non-empty with no leading/trailing whitespace")
         return v
 
-    @field_validator("entries")
+    @field_validator("entries", mode="before")
     @classmethod
-    def entries_valid(cls, v: list[list[int]]) -> list[list[int]]:
-        if len(v) != 256:
-            raise ValueError(f"entries must have exactly 256 items, got {len(v)}")
-        for i, rgba in enumerate(v):
-            if len(rgba) != 4 or not all(0 <= c <= 255 for c in rgba):
+    def entries_valid(cls, v: list) -> list[list[int]]:
+        if len(v) < 2:
+            raise ValueError(f"entries must have at least 2 color stops, got {len(v)}")
+        if len(v) > 256:
+            raise ValueError(f"entries must have at most 256 items, got {len(v)}")
+        normalized: list[list[int]] = []
+        for i, entry in enumerate(v):
+            if isinstance(entry, str):
+                try:
+                    rgba = _hex_to_rgba(entry)
+                except ValueError as e:
+                    raise ValueError(f"entry {i}: {e}") from e
+            elif isinstance(entry, list | tuple):
+                rgba = list(entry)
+            else:
+                raise ValueError(f"entry {i} must be a hex string or [r, g, b, a] list")
+            if len(rgba) != 4 or not all(isinstance(c, int) and 0 <= c <= 255 for c in rgba):
                 raise ValueError(f"entry {i} must be [r, g, b, a] with values 0–255")
-        return v
+            normalized.append(rgba)
+        return normalized if len(normalized) == 256 else _interpolate_colormap(normalized)
 
     def to_tuples(self) -> list[tuple[int, int, int, int]]:
         return [(rgba[0], rgba[1], rgba[2], rgba[3]) for rgba in self.entries]
