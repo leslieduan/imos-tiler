@@ -3,7 +3,7 @@ from fastapi.openapi.models import Example
 from fastapi.responses import JSONResponse, Response
 
 from services.colormap_store import is_categorical, list_colormaps
-from services.visual_renderer import _colormap, render_bbox, render_tile
+from services.visual_renderer import _colormap, render_bbox, render_legend, render_tile
 
 from .products import _DATE_EX, _PRODUCT_EX, _get_product_or_404, _load_slice_or_404
 from .products import router as products_router
@@ -37,6 +37,41 @@ def _require_rescale_if_categorical(
 @router.get("/colormaps", summary="List available colormaps")
 async def get_colormaps():
     return JSONResponse(content=list_colormaps())
+
+
+@router.get(
+    "/colormaps/{name}/legend",
+    summary="Color legend",
+    description=(
+        "Returns a PNG color legend for the named colormap. "
+        "The name must be one returned by GET /visual_tiles/colormaps. "
+        "If rescale=min,max is provided, tick labels at lo, mid, and hi are drawn alongside the bar. "
+        "Without rescale, only the color bar is rendered (no labels). "
+        "Categorical colormaps render discrete equal-width color blocks instead of a smooth gradient."
+    ),
+)
+def get_legend(
+    name: str,
+    rescale: str | None = Query(
+        None,
+        description="Value range as 'min,max'. When provided, tick labels are drawn at lo, mid, and hi.",
+    ),
+    width: int = Query(256, ge=10, le=2048, description="Image width in pixels."),
+    height: int = Query(40, ge=10, le=2048, description="Image height in pixels."),
+    orientation: str = Query(
+        "horizontal",
+        description="'horizontal' (color bar left→right) or 'vertical' (color bar top→bottom).",
+        pattern="^(horizontal|vertical)$",
+    ),
+):
+    try:
+        _colormap(name)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+
+    rescale_range = _parse_rescale(rescale)
+    png = render_legend(name, rescale_range, width, height, orientation)
+    return Response(content=png, media_type="image/png")
 
 
 @router.get(

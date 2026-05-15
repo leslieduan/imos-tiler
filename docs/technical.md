@@ -185,9 +185,23 @@ Colourised PNG tiles in standard Web Mercator (XYZ) — compatible with MapboxGL
 
 ```
 GET /visual_tiles/colormaps                                            → all supported colormap names
+GET /visual_tiles/colormaps/{name}/legend                             → color legend PNG for a colormap
 GET /visual_tiles/{product_id}/{date}/tiles/{z}/{x}/{y}.png           → colourised Web Mercator PNG
 GET /visual_tiles/{product_id}/{date}/bbox?bbox=minx,miny,maxx,maxy  → colourised PNG for arbitrary bbox
 ```
+
+Legend query parameters:
+
+| Query param   | Default      | Description                                                                              |
+| ------------- | ------------ | ---------------------------------------------------------------------------------------- |
+| `rescale`     | _(none)_     | Value range as `min,max`. When provided, tick labels at lo, mid, and hi are drawn.       |
+| `width`       | `256`        | Image width in pixels (10–2048)                                                          |
+| `height`      | `40`         | Image height in pixels (10–2048)                                                         |
+| `orientation` | `horizontal` | `horizontal` (bar runs left→right) or `vertical` (bar runs top→bottom, hi at top)        |
+
+Without `rescale`, only the color bar is rendered — no tick marks or labels. With `rescale`, 20 pixels alongside the bar are reserved for labels (reducing the bar to `height-20` or `width-20` depending on orientation).
+
+Categorical colormaps render discrete equal-width color blocks (one per registered category) rather than a smooth gradient. Labels, when shown, display the reconstructed integer value for each slot based on `rescale`.
 
 `z`/`x`/`y` are standard Web Mercator tile coordinates (OpenStreetMap, MapboxGL, Leaflet, etc.).
 
@@ -564,6 +578,17 @@ Each colour stop (in both modes) may be a CSS hex string (`#rgb`, `#rrggbb`, `#r
 For categorical colormaps, `rescale=min,max` is **required** at render time and must match the range of the integer keys (e.g. `?rescale=1,4`). Omitting `rescale` with a categorical colormap returns `400 Bad Request`. This is enforced because the renderer auto-rescales to the per-tile data range when `rescale` is absent, which would corrupt the LUT slot mapping.
 
 The data range for a categorical colormap is inferred from the key range (`min(keys)` → `max(keys)`) at registration time and used to place each value in the LUT. Values not covered by any key render as fully transparent.
+
+### Categorical colormaps are dataset-specific
+
+A categorical colormap is tightly coupled to a specific variable's integer encoding — equivalent to the CF convention `flag_values` + `flag_colors` pair that ncWMS reads from dataset attributes. The `entries` keys must exactly match the discrete integer values that appear in the dataset.
+
+**The server does not validate this coupling.** The colormap and product are registered independently, so applying a categorical colormap to a dataset with a different value encoding will render without error but produce silently wrong colours. For example, a colormap registered with keys `{1, 2, 3, 4}` applied to a dataset whose actual values are `{0, 1, 2, 3}` will shift every colour by one slot.
+
+Practical rules:
+- One categorical colormap = one dataset variable encoding. Do not reuse a categorical colormap across products unless they share the exact same integer values.
+- Name categorical colormaps after the dataset or variable they describe (e.g. `land_cover_classes`, `ocean_current_flag`) to make the coupling explicit.
+- Ramp colormaps are dataset-agnostic; categorical colormaps are not.
 
 ### Cache behaviour
 

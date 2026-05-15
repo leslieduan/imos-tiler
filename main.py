@@ -11,12 +11,17 @@ from fastapi.responses import JSONResponse
 from starlette.middleware.cors import CORSMiddleware
 from uvicorn.config import LOGGING_CONFIG
 
-from constants import PRODUCTS
+from constants import PRODUCTS, Product
 from routers.admin import admin_router
 from routers.data_tiles import router as data_tiles_router
 from routers.visual_tiles import router as visual_tiles_router
 from services.colormap_store import load_colormaps
-from services.loader import prewarm_disk_slices, prewarm_stores, refresh_disk_cache
+from services.loader import (
+    evict_stale_and_orphans,
+    prewarm_disk_slices,
+    prewarm_stores,
+    refresh_disk_cache,
+)
 from services.product_store import load_products
 
 logger = logging.getLogger(__name__)
@@ -33,11 +38,28 @@ LOGGING_CONFIG["loggers"]["services"] = {
 logging.config.dictConfig(LOGGING_CONFIG)
 
 
-async def _cache_refresh_loop(products: list, interval: int) -> None:
+async def _startup_cache_sync(products: list[Product]) -> None:
+    # Evict stale dates and orphan product dirs first so the cache reflects the current
+    # product/date state from the moment the server starts serving, then prewarm in
+    # parallel. Both run in threads so the event loop stays free for requests.
+    try:
+        await asyncio.to_thread(evict_stale_and_orphans, products)
+    except Exception:
+        logger.exception("Startup cache eviction failed; continuing to prewarm")
+    await asyncio.to_thread(prewarm_disk_slices, products)
+
+
+async def _cache_refresh_loop(interval: int) -> None:
     while True:
         # yields to event loop — other tasks/requests run freely during the wait
         await asyncio.sleep(interval)
-        await asyncio.to_thread(refresh_disk_cache, products)
+        # Re-read PRODUCTS each cycle so products added/removed via the admin API are reflected.
+        # Catch broadly: an unhandled exception here would kill the loop for the lifetime
+        # of the process, silently disabling all future refreshes.
+        try:
+            await asyncio.to_thread(refresh_disk_cache, list(PRODUCTS.values()))
+        except Exception:
+            logger.exception("Cache refresh cycle failed; will retry next interval")
 
 
 # Lifespan manages server startup and shutdown. Everything before yield runs on startup,
@@ -50,10 +72,6 @@ async def _cache_refresh_loop(products: list, interval: int) -> None:
 # The only blocking risk is CPU/IO-heavy work inside these tasks. That's why prewarm_disk_slices
 # and refresh_disk_cache are wrapped in asyncio.to_thread — offloading them to a thread pool
 # so the event loop is never frozen.
-#
-# We keep the orchestration (loop, sleep, scheduling) in async rather than plain threads
-# because asyncio tasks support clean cancellation via task.cancel() on shutdown.
-# Threads have no equivalent — cancellation would require flags or daemon threads and gets messy.
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     limiter = anyio.to_thread.current_default_thread_limiter()
@@ -62,17 +80,18 @@ async def lifespan(app: FastAPI):
     load_colormaps()
     store_urls = list({p.source_path for p in PRODUCTS.values()})
     prewarm_stores(store_urls)
-    products = list(PRODUCTS.values())
-    prewarm_task = asyncio.create_task(asyncio.to_thread(prewarm_disk_slices, products))
+    prewarm_task = asyncio.create_task(_startup_cache_sync(list(PRODUCTS.values())))
     interval = int(os.environ.get("CACHE_REFRESH_INTERVAL_SECONDS", 14400))
-    refresh_task = asyncio.create_task(_cache_refresh_loop(products, interval))
+    refresh_task = asyncio.create_task(_cache_refresh_loop(interval))
     yield
     for task in (prewarm_task, refresh_task):
         task.cancel()
         try:
             await task
-        except (asyncio.CancelledError, Exception):
+        except asyncio.CancelledError:
             pass
+        except Exception:
+            logger.exception("Background task exited with error")
 
 
 app = FastAPI(

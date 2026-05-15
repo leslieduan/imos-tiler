@@ -102,8 +102,12 @@ class ColormapPayload(BaseModel):
     mode: ColormapMode = Field(
         default="ramp",
         description=(
-            "'ramp': evenly-spaced stops, linearly interpolated to 256 LUT entries. "
-            "'categorical': discrete value→color mapping; data range is derived from the entry keys."
+            "'ramp': evenly-spaced stops, linearly interpolated to 256 LUT entries. Dataset-agnostic. "
+            "'categorical': discrete integer value→color mapping (equivalent to CF flag_values+flag_colors). "
+            "Dataset-specific — the entry keys must exactly match the integer values present in the dataset. "
+            "Applying a categorical colormap to a dataset with different values renders without error "
+            "but produces silently wrong colours. Name categorical colormaps after the dataset or variable "
+            "they describe to make the coupling explicit."
         ),
     )
     entries: list[list[int]] = Field(
@@ -111,7 +115,8 @@ class ColormapPayload(BaseModel):
         description=(
             "ramp mode — 2–256 color stops (hex string or [r,g,b,a] list), interpolated to 256. "
             "categorical mode — dict mapping integer data values to colors, "
-            'e.g. {"1": "#ff0000", "2": [0, 0, 255, 255]}.'
+            'e.g. {"1": "#ff0000", "2": [0, 0, 255, 255]}. '
+            "Keys must match the exact integer values in the target dataset variable."
         ),
     )
 
