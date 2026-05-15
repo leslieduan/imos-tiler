@@ -1,13 +1,14 @@
 import asyncio
 import os
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Security
 from fastapi.responses import JSONResponse
 from fastapi.security import APIKeyHeader
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from constants import CHUNK_PX, PADDING, PRODUCTS
-from services.colormap_store import register_colormap, remove_colormap
+from services.colormap_store import ColormapMode, register_colormap, remove_colormap
 from services.loader import evict_product_cache, prewarm_disk_slices
 from services.product_store import register_product, remove_product
 
@@ -118,16 +119,45 @@ def _interpolate_colormap(stops: list[list[int]]) -> list[list[int]]:
     return np.clip(interpolated, 0, 255).round().astype(int).tolist()  # type: ignore[no-any-return]
 
 
+def _parse_color(v: Any, label: str) -> list[int]:
+    if isinstance(v, str):
+        return _hex_to_rgba(v)
+    if isinstance(v, list | tuple):
+        rgba = list(v)
+        if len(rgba) != 4 or not all(isinstance(c, int) and 0 <= c <= 255 for c in rgba):
+            raise ValueError(f"{label} must be [r, g, b, a] with values 0–255")
+        return rgba
+    raise ValueError(f"{label} must be a hex string or [r, g, b, a] list")
+
+
+def _categorical_colormap(
+    categories: dict[int, list[int]], data_range: tuple[float, float]
+) -> list[list[int]]:
+    lo, hi = data_range
+    span = hi - lo or 1.0
+    lut = [[0, 0, 0, 0] for _ in range(256)]
+    for val, color in categories.items():
+        slot = round((val - lo) / span * 255)
+        if 0 <= slot <= 255:
+            lut[slot] = color
+    return lut
+
+
 class ColormapPayload(BaseModel):
     name: str
+    mode: ColormapMode = Field(
+        default="ramp",
+        description=(
+            "'ramp': evenly-spaced stops, linearly interpolated to 256 LUT entries. "
+            "'categorical': discrete value→color mapping; requires data_range."
+        ),
+    )
     entries: list[list[int]] = Field(
         ...,
         description=(
-            "2–256 RGBA color stops. Each entry is either a list of 4 ints [r, g, b, a] "
-            "in [0, 255], or a CSS hex string (#rgb, #rrggbb, #rrggbbaa). "
-            "Hex strings without alpha default to fully opaque (a=255). "
-            "Stops are treated as evenly spaced; fewer than 256 are linearly interpolated "
-            "to fill all 256 LUT slots."
+            "ramp mode — 2–256 color stops (hex string or [r,g,b,a] list), interpolated to 256. "
+            "categorical mode — dict mapping integer data values to colors, "
+            'e.g. {"1": "#ff0000", "2": [0, 0, 255, 255]}.'
         ),
     )
 
@@ -138,6 +168,25 @@ class ColormapPayload(BaseModel):
             raise ValueError("must be non-empty with no leading/trailing whitespace")
         return v
 
+    @model_validator(mode="before")
+    @classmethod
+    def build_lut(cls, data: Any) -> Any:
+        if data.get("mode") != "categorical":
+            return data
+        raw = data.get("entries")
+        if not isinstance(raw, dict):
+            raise ValueError('entries must be a dict for categorical mode, e.g. {"1": "#ff0000"}')
+        categories: dict[int, list[int]] = {}
+        for k, v in raw.items():
+            try:
+                val = int(k)
+            except (ValueError, TypeError) as e:
+                raise ValueError(f"entries key {k!r} must be an integer") from e
+            categories[val] = _parse_color(v, f"entries[{k!r}]")
+        data_range = (float(min(categories)), float(max(categories)))
+        data["entries"] = _categorical_colormap(categories, data_range)
+        return data
+
     @field_validator("entries", mode="before")
     @classmethod
     def entries_valid(cls, v: list) -> list[list[int]]:
@@ -147,17 +196,10 @@ class ColormapPayload(BaseModel):
             raise ValueError(f"entries must have at most 256 items, got {len(v)}")
         normalized: list[list[int]] = []
         for i, entry in enumerate(v):
-            if isinstance(entry, str):
-                try:
-                    rgba = _hex_to_rgba(entry)
-                except ValueError as e:
-                    raise ValueError(f"entry {i}: {e}") from e
-            elif isinstance(entry, list | tuple):
-                rgba = list(entry)
-            else:
-                raise ValueError(f"entry {i} must be a hex string or [r, g, b, a] list")
-            if len(rgba) != 4 or not all(isinstance(c, int) and 0 <= c <= 255 for c in rgba):
-                raise ValueError(f"entry {i} must be [r, g, b, a] with values 0–255")
+            try:
+                rgba = _parse_color(entry, f"entry {i}")
+            except ValueError as e:
+                raise ValueError(f"entry {i}: {e}") from e
             normalized.append(rgba)
         return normalized if len(normalized) == 256 else _interpolate_colormap(normalized)
 
@@ -173,7 +215,7 @@ class ColormapPayload(BaseModel):
 )
 def add_colormap(payload: ColormapPayload):
     try:
-        register_colormap(payload.name, payload.to_tuples())
+        register_colormap(payload.name, payload.to_tuples(), payload.mode)
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
     except Exception as e:

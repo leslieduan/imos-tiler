@@ -10,7 +10,7 @@ from rio_tiler.errors import TileOutsideBounds
 from rio_tiler.io.xarray import XarrayReader
 from rioxarray.exceptions import NoDataInBounds
 
-from constants import CUSTOM_COLORMAPS
+from services.colormap_store import get_colormap
 
 _mercator_to_wgs84 = Transformer.from_crs("EPSG:3857", "EPSG:4326", always_xy=True)
 
@@ -24,8 +24,8 @@ def _colormap(name: str) -> dict[int, tuple[int, int, int, int]]:
     Checks CUSTOM_COLORMAPS first, then rio-tiler's built-ins, then matplotlib
     so that diverging colormaps like RdBu_r are also available.
     """
-    if name in CUSTOM_COLORMAPS:
-        entries = CUSTOM_COLORMAPS[name]
+    entries = get_colormap(name)
+    if entries is not None:
         if len(entries) != 256:
             raise ValueError(
                 f"Custom colormap {name!r} must have exactly 256 entries, got {len(entries)}"
