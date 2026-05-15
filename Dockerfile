@@ -16,6 +16,7 @@ RUN uv sync --frozen --no-dev --no-install-project
 COPY main.py constants.py ./
 COPY routers/ routers/
 COPY services/ services/
+COPY utils/ utils/
 COPY docker-entrypoint.sh /docker-entrypoint.sh
 RUN chmod +x /docker-entrypoint.sh
 
