@@ -122,3 +122,10 @@ async def global_exception_handler(request: Request, exc: Exception) -> JSONResp
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+# TODO: Coordinate system and projection pipeline section in technical.md is not good, because we
+# have two different tiles systems, the data-tiles is using custom xyz tiles system, while the visual-tiles is using standard web mercator.
+# We should clarify this in the documentation, specify data-tiles is genreated in ESGF:4326 and visual-tiles is generate in Web Mercator:3857,
+# and webgl shader will reproject data-tiles from ESGF:4326 to Web Mercator:3857. While visual-tiles is already in Web Mercator:3857, so no
+# reprojection is needed, and it work well with all the map library or services that support web mercator.
