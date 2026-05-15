@@ -23,8 +23,8 @@ _processed_lock = threading.Lock()
 
 
 def _resample_to_grid(ds: xr.Dataset, total_w: int, total_h: int) -> xr.Dataset:
-    # The source NetCDF grid points don't align with the target pixel positions,
-    # so we interpolate: for each of the total_w×total_h output pixels, scipy finds
+    # The source Zarr grid points don't align with the target pixel positions,
+    # so we interpolate: for each of the total_w×total_h output pixels, xarray finds
     # the surrounding source points and computes a weighted average (bilinear).
     # This covers the full LOD grid (all chunks combined), not a single tile —
     # _extract_chunk then slices the relevant chunk out of the result.

@@ -103,7 +103,7 @@ class ColormapPayload(BaseModel):
         default="ramp",
         description=(
             "'ramp': evenly-spaced stops, linearly interpolated to 256 LUT entries. "
-            "'categorical': discrete value→color mapping; requires data_range."
+            "'categorical': discrete value→color mapping; data range is derived from the entry keys."
         ),
     )
     entries: list[list[int]] = Field(
@@ -172,7 +172,7 @@ class ColormapPayload(BaseModel):
     "/colormaps",
     status_code=201,
     summary="Register a custom colormap",
-    description="Registers a named colormap from 256 RGBA entries. Returns 409 if the name already exists.",
+    description="Registers a named colormap from 2–256 color stops, interpolated to 256 entries. Returns 409 if the name already exists.",
 )
 def add_colormap(payload: ColormapPayload):
     try:

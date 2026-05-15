@@ -21,7 +21,7 @@ TILE_SIZE = 256
 def _colormap(name: str) -> dict[int, tuple[int, int, int, int]]:
     """Return a rio-tiler colormap dict for the given name.
 
-    Checks CUSTOM_COLORMAPS first, then rio-tiler's built-ins, then matplotlib
+    Checks custom colormaps first, then rio-tiler's built-ins, then matplotlib
     so that diverging colormaps like RdBu_r are also available.
     """
     entries = get_colormap(name)
