@@ -565,6 +565,17 @@ For categorical colormaps, `rescale=min,max` is **required** at render time and 
 
 The data range for a categorical colormap is inferred from the key range (`min(keys)` → `max(keys)`) at registration time and used to place each value in the LUT. Values not covered by any key render as fully transparent.
 
+### Categorical colormaps are dataset-specific
+
+A categorical colormap is tightly coupled to a specific variable's integer encoding — equivalent to the CF convention `flag_values` + `flag_colors` pair that ncWMS reads from dataset attributes. The `entries` keys must exactly match the discrete integer values that appear in the dataset.
+
+**The server does not validate this coupling.** The colormap and product are registered independently, so applying a categorical colormap to a dataset with a different value encoding will render without error but produce silently wrong colours. For example, a colormap registered with keys `{1, 2, 3, 4}` applied to a dataset whose actual values are `{0, 1, 2, 3}` will shift every colour by one slot.
+
+Practical rules:
+- One categorical colormap = one dataset variable encoding. Do not reuse a categorical colormap across products unless they share the exact same integer values.
+- Name categorical colormaps after the dataset or variable they describe (e.g. `land_cover_classes`, `ocean_current_flag`) to make the coupling explicit.
+- Ramp colormaps are dataset-agnostic; categorical colormaps are not.
+
 ### Cache behaviour
 
 `_colormap()` in `services/visual_renderer.py` is `@lru_cache`-d (max 64 entries). The cache is cleared automatically whenever a colormap is added or deleted via the admin API — `colormap_store._reload()` calls `_colormap.cache_clear()` after every write.
