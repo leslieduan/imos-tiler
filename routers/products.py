@@ -60,7 +60,9 @@ def get_products_availability(
 ):
     effective_from = from_date or three_months_ago()
     products = {}
-    for product_id, product in PRODUCTS.items():
+    # Snapshot first: a concurrent admin reload mutating PRODUCTS during iteration
+    # would otherwise raise RuntimeError ("dictionary changed size during iteration").
+    for product_id, product in list(PRODUCTS.items()):
         dates = get_available_dates(product.source_path)
         dates = [d for d in dates if d >= effective_from]
         if to_date:

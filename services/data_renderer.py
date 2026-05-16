@@ -88,7 +88,7 @@ def _get_processed(
     product: Product, load_ds: Callable[[], xr.Dataset], lod: int, date: str
 ) -> tuple:
     """load_ds only called once per (product, date) when the processed grid is not cached yet."""
-    key = (product.source_path, date, str(product.variable), lod)
+    key = (product.source_path, date, tuple(product.variables), lod)
 
     should_compute = False
     with _processed_lock:
