@@ -3,7 +3,6 @@ import os
 from dataclasses import dataclass, field
 
 # Applied in loaders to normalise coordinate names across all products.
-# Keys that don't exist in a dataset are silently skipped.
 COORD_NAMES = {"TIME": "time", "LATITUDE": "lat", "LONGITUDE": "lon"}
 
 
@@ -16,7 +15,11 @@ class LODConfig:
     redeploying the frontend silently corrupts the rendering.
     """
 
-    # Frontend WebGL atlas slot count — at most this many LOD levels per product.
+    # Cap on LOD levels per product. The frontend packs all LODs into a single WebGL
+    # texture atlas hard-capped at 4096×4096 (~64 MB VRAM per atlas) regardless of
+    # gl.MAX_TEXTURE_SIZE. Going above 4 doesn't break rendering — the atlas falls
+    # back to LRU eviction — but causes visible tile re-upload churn as the user
+    # pans/zooms. 4 is the value tuned to fit comfortably under the cap.
     max_lods: int = 4
     # Minimum (cols, rows) for the coarsest level; levels below this are dropped.
     min_coarsest: tuple[int, int] = (2, 2)

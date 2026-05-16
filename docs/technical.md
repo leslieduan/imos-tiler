@@ -350,7 +350,7 @@ The LOD pyramid applies to **data tiles only** (visual tiles use Web Mercator zo
 
 The three LOD knobs are bundled into a single frozen-dataclass instance, `LOD = LODConfig()`. They are **not** environment variables — these values are baked into the WebGL shader on the frontend, so changing one without redeploying the frontend silently corrupts the rendering.
 
-- `LOD.max_lods = 4` — frontend WebGL atlas limit: at most 4 LOD levels per product.
+- `LOD.max_lods = 4` — cap on LOD levels per product. The frontend packs all LODs into a single WebGL texture atlas hard-capped at 4096×4096 px (≈64 MB VRAM per atlas) regardless of `gl.MAX_TEXTURE_SIZE`. Going above 4 doesn't break rendering — the atlas falls back to LRU eviction — but causes visible tile re-upload churn as the user pans or zooms. `4` is tuned to fit comfortably under the cap for current product sizes.
 - `LOD.min_coarsest = (2, 2)` — minimum (cols, rows) for the coarsest LOD level; levels below this are dropped. If all levels are filtered out (data smaller than one chunk), falls back to the native finest grid so there is always at least one LOD.
 - `LOD.zoom_thresholds: dict[int, int]` — universal map-zoom thresholds applied to all products (e.g. `{2: 4, 3: 5, 4: 6}`).
 
@@ -1014,7 +1014,25 @@ On deletion:
 
 Consolidated reference. Defaults match the application code; the Docker Compose overrides in `docker-compose.yml` use the same defaults.
 
-### Server
+### 18.1 Configuration philosophy — where does a new tunable belong?
+
+This codebase holds configuration in three places. Both env vars and code constants are evaluated once at startup, so from a "when does it take effect" perspective they are equivalent — the choice of layer is a deliberate **signal** about how a value should change, not a runtime distinction.
+
+| Layer                                                | What lives here                                                                                          | Change discipline                                                                          | Examples                                                  |
+| ---------------------------------------------------- | -------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ | --------------------------------------------------------- |
+| **Env vars** (this section)                          | Operational knobs — perf, resource limits, paths, secrets. Do **not** affect wire format or shader contract. | Rotate freely at deploy; the value itself doesn't need code review.                        | `THREAD_POOL_SIZE`, `SLICE_CACHE_SIZE`, `CACHE_DAYS`, `DISK_CACHE_PATH`, `ADMIN_API_KEY` |
+| **Code constants** (`constants.py`)                  | Wire / shader contracts — values that must stay in lockstep with the frontend or with the data encoding. | Change via PR so frontend and server stay in sync; the diff is the audit trail.            | `LOD.max_lods`, `LOD.min_coarsest`, `LOD.zoom_thresholds`, `CHUNK_PX`, `PADDING` (global defaults) |
+| **Per-product fields** (`Product` dataclass + admin) | Data characteristics that legitimately vary across products.                                             | Set per product via `POST /admin/products`; no code change needed.                         | `chunk_px`, `padding`, `variable`, `source_path`          |
+
+**The rule when adding a new tunable**: ask *who needs to be informed when the value changes?*
+
+- Only the operator → **env var**.
+- The frontend (or any wire-format consumer) needs a matching update → **code constant**, so the change goes through code review alongside the frontend change.
+- Only one product is affected → **per-product field**, exposed via the admin API.
+
+A wrong-layer choice has real costs: making `max_lods` an env var would let an ops engineer raise it to `6` thinking "more LODs = better detail", silently overflowing the WebGL atlas's 4096×4096 (≈64 MB VRAM) cap and triggering LRU tile thrashing — rendering still works, but UX degrades through re-upload churn that ops can't easily diagnose without frontend context. Making `THREAD_POOL_SIZE` a code constant would require a redeploy and PR for every perf-tuning experiment.
+
+### 18.2 Server
 
 | Variable                | Default            | Description                                                                                |
 | ----------------------- | ------------------ | ------------------------------------------------------------------------------------------ |
@@ -1023,7 +1041,7 @@ Consolidated reference. Defaults match the application code; the Docker Compose 
 | `PRODUCTS_CONFIG_PATH`  | `products.json`    | Path to the persisted product registry. Docker overrides to `data/products.json`.          |
 | `COLORMAPS_CONFIG_PATH` | `colormaps.json`   | Path to the persisted custom-colormap registry. Docker overrides to `data/colormaps.json`. |
 
-### Threading and cache sizing
+### 18.3 Threading and cache sizing
 
 | Variable               | Default | Description                                                                                                             |
 | ---------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------- |
@@ -1032,7 +1050,7 @@ Consolidated reference. Defaults match the application code; the Docker Compose 
 | `PROCESSED_CACHE_SIZE` | `50`    | LRU size for the L1 processed-grid cache. Sized as `SLICE_CACHE_SIZE × LOD.max_lods` with headroom.                         |
 | `STORE_TTL_SECONDS`    | `600`   | Stale-while-revalidate window for the Zarr store singleton.                                                             |
 
-### Disk cache (L3)
+### 18.4 Disk cache (L3)
 
 | Variable                         | Default   | Description                                                                               |
 | -------------------------------- | --------- | ----------------------------------------------------------------------------------------- |
