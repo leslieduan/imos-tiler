@@ -35,7 +35,7 @@ All paths share the same thread pool and compete for the same slots. Processed-w
 | ---------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------- |
 | `THREAD_POOL_SIZE`     | `100`   | Max concurrent requests. Raise if you observe queuing under high load.                                                                |
 | `SLICE_CACHE_SIZE`     | `10`    | Number of concurrent active `(product, date)` pairs for visual_tiles. Each satellite heatwave slice is ~61 MB.                       |
-| `PROCESSED_CACHE_SIZE` | `50`    | `SLICE_CACHE_SIZE × MAX_LODS (4)` with headroom — keeps all LOD levels warm for every date in the L2 slice cache. Each satellite LOD 4 entry is ~41 MB. |
+| `PROCESSED_CACHE_SIZE` | `50`    | `SLICE_CACHE_SIZE × LOD.max_lods (4)` with headroom — keeps all LOD levels warm for every date in the L2 slice cache. Each satellite LOD 4 entry is ~41 MB. |
 
 ### Store TTL
 

@@ -37,7 +37,7 @@ GET /data_tiles/sea_level_anomaly/2024-02-24/manifest.json    ← bounds + LOD g
 
 This is the standard tile-pyramid pattern: each coarser level halves the `(cols, rows)` of the level below it, so a higher-zoom map view fetches a higher LOD and zooming out fetches a lower one. The LOD grids are computed at server startup from each Zarr store's actual lat/lon dimensions and the fixed chunk size (`CHUNK_PX = (240, 192)`). See [`technical.md` §7](technical.md#7-lod-grid-system) for the full algorithm.
 
-The client maps map-zoom to LOD via the universal `LOD_ZOOM_THRESHOLDS` returned in each level's `zoomThreshold` field.
+The client maps map-zoom to LOD via the universal `LOD.zoom_thresholds` returned in each level's `zoomThreshold` field.
 
 ### 1.2 `x`, `y` — chunk column and row within the LOD grid
 

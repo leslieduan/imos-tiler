@@ -24,7 +24,7 @@ def test_compute_lod_grids_respects_min_coarsest():
 
 
 def test_compute_lod_grids_small_data():
-    # data smaller than chunk_px → all levels filtered by MIN_COARSEST_GRID, falls back to native finest grid
+    # data smaller than chunk_px → all levels filtered by LOD.min_coarsest, falls back to native finest grid
     grids = Product._compute_lod_grids(100, 100, (240, 192))
     assert grids == {1: (1, 1)}
 

@@ -10,7 +10,7 @@ import xarray as xr
 from cachetools import LRUCache
 from PIL import Image
 
-from constants import LOD_ZOOM_THRESHOLDS, Product
+from constants import LOD, Product
 from utils.geo import dataset_bounds, json_safe_float
 
 logger = logging.getLogger(__name__)
@@ -223,7 +223,7 @@ def render_manifest(product: Product, ds: xr.Dataset) -> dict:
                 product.chunk_px[1] + 2 * product.padding,
             ],
             "padding": product.padding,
-            **({"zoomThreshold": LOD_ZOOM_THRESHOLDS[lod]} if lod in LOD_ZOOM_THRESHOLDS else {}),
+            **({"zoomThreshold": LOD.zoom_thresholds[lod]} if lod in LOD.zoom_thresholds else {}),
         }
         for lod in product.lod_grids
     }
