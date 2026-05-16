@@ -1,5 +1,6 @@
 import concurrent.futures
 import logging
+import math
 import os
 import threading
 from collections.abc import Callable
@@ -45,7 +46,11 @@ def _normalize(arr: np.ndarray, lo: float, hi: float, out_max: int) -> np.ndarra
 def _var_range(ds: xr.Dataset, var: str) -> tuple[float, float]:
     lo = float(ds[var].min(skipna=True).values)
     hi = float(ds[var].max(skipna=True).values)
-    return lo, hi if hi != lo else lo + 1.0
+    # All-NaN slice: min/max return NaN. Fall back to a benign range so _normalize
+    # produces well-defined zeros; the ocean mask will mark every pixel transparent.
+    if math.isnan(lo) or math.isnan(hi):
+        return (0.0, 1.0)
+    return (lo, hi) if hi != lo else (lo, lo + 1.0)
 
 
 def _compute_scalar(product: Product, ds: xr.Dataset, lod: int) -> tuple[np.ndarray, np.ndarray]:
@@ -75,7 +80,7 @@ def _compute_uv(
     u_raw = ds_r[u_var].values.squeeze()
     v_raw = ds_r[v_var].values.squeeze()
 
-    ocean = (~np.isnan(u_raw)).astype(np.uint8)
+    ocean = (~(np.isnan(u_raw) | np.isnan(v_raw))).astype(np.uint8)
     return _normalize(u_raw, u_min, u_max, 255), _normalize(v_raw, v_min, v_max, 255), ocean
 
 

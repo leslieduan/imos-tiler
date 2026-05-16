@@ -41,7 +41,11 @@ def _disk_cache_path(store_url: str, date: str, variables: list[str]) -> Path | 
     base = os.environ.get("DISK_CACHE_PATH")
     if not base:
         return None
-    store_name = store_url.rstrip("/").split("/")[-1]
+    # Encode the full URL into a single directory name so two stores with the same
+    # basename from different buckets (e.g. s3://a/sla.zarr and s3://b/sla.zarr) do
+    # not collide. '%' is disallowed in S3 bucket names and effectively never used
+    # in S3 object keys, so the substitution is bijective in practice.
+    store_name = store_url.rstrip("/").replace("/", "%")
     var_str = ",".join(sorted(variables))
     return Path(base) / f"{store_name}-{var_str}" / f"{date}.pkl.lz4"
 
