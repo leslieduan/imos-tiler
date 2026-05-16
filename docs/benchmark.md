@@ -2,6 +2,8 @@
 
 ## Methodology
 
+<!-- TODO: we shoud add assumpetion, the bechmark is tested and evaluated on datasets example, each dataset repesent small or lagre one, therefore, this doc is useful -->
+
 All times are **end-to-end response times measured at the client**, covering the full round-trip:
 server processing (disk/S3 fetch → render → encode) + network transfer from server to client.
 
