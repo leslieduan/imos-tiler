@@ -5,14 +5,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-# Install dependencies
-uv sync
-
 # Run the server (development)
 uv run uvicorn main:app --reload
-
-# Add a dependency
-uv add <package>
 
 # Run tests / lint / type check
 uv run pytest
@@ -30,7 +24,7 @@ Two tile systems with different coordinate conventions — do not mix them up:
 - **Visual tiles** (`/visual_tiles`) — Web Mercator XYZ, standard MapboxGL/Leaflet convention. Rendered via rio-tiler.
 
 Key modules:
-- `routers/` — HTTP endpoints; `products.py` is shared between both tile routers
+- `routers/` — HTTP endpoints; `products.py` is mounted into both `data_tiles` and `visual_tiles` via `include_router`, so every handler there is exposed under both prefixes
 - `services/loader.py` — Zarr store singleton, L2 in-memory slice cache, L3 disk cache
 - `services/data_renderer.py` — L1 processed grid cache, PNG encoding (data tiles)
 - `services/visual_renderer.py` — Web Mercator reprojection, colormap lookup (visual tiles)
@@ -45,19 +39,14 @@ See `docs/technical.md` for full architecture, caching strategy, LOD algorithm, 
 
 API dates are **`TILE_TIMEZONE` local time** (default `Australia/Sydney`), not UTC. Zarr stores timestamps in UTC. Getting this wrong causes silent 404s.
 
-- Never hardcode a timezone string — always use `_LOCAL_TZ` from `services/loader.py`
-- `get_available_dates` and `load_slice` must always use the same `_LOCAL_TZ` value
+- Never hardcode a timezone string — always use `LOCAL_TZ` from `utils/dates.py`
+- `get_available_dates` and `load_slice` must resolve dates through the same module-level `LOCAL_TZ` — don't shadow or recompute it locally
 - Clients must round-trip dates from `/manifest` — never construct them from a local clock
 
-### Admin API
+### LOD constants are a server↔shader contract
 
-All `/admin` endpoints require the `X-Admin-Key` request header. Key is set via the `ADMIN_KEY` environment variable.
+`LODConfig` in `constants.py` (`max_lods`, `min_coarsest`, `zoom_thresholds`) is baked into the frontend WebGL shader's texture atlas layout. Changing any of these without a coordinated frontend redeploy silently corrupts rendering — no error, just wrong pixels.
 
-## Environment variables
+### Background tasks must offload heavy work
 
-| Variable | Default | Description |
-|---|---|---|
-| `TILE_TIMEZONE` | `Australia/Sydney` | IANA timezone for date conversion |
-| `ADMIN_KEY` | _(required)_ | Secret key for `/admin` endpoints |
-| `DISK_CACHE_PATH` | _(unset)_ | Absolute path for L3 disk cache; disabled if unset |
-| `CACHE_DAYS` | `30` | How many recent dates to prewarm per product |
+The lifespan in `main.py` schedules cache prewarm and refresh as `asyncio.create_task`s. Any CPU- or IO-heavy work inside them must go through `asyncio.to_thread`, or the event loop freezes and all in-flight requests stall.

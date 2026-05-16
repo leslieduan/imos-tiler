@@ -1,5 +1,9 @@
 # Performance Benchmarks
 
+> **Scope.** The figures in this document are measured against a handful of example Zarr stores that have been used during development. **They are not benchmarks of any particular production deployment** — a production deployment registers products at runtime via the admin API (see [`technical.md` §13](technical.md#13-adding-a-new-product)), and its actual product mix may differ.
+>
+> The example stores below were chosen to span the **size classes** the server is expected to handle: one **satellite-class** product (large grid, multi-chunk per slice, dominates RAM/disk in production) and two **GSLA-class** products (small grid, one chunk per slice). Numbers for a new product can be estimated by comparing its grid size and chunk layout against the closest size class here.
+
 ## Methodology
 
 All times are **end-to-end response times measured at the client**, covering the full round-trip:
@@ -7,9 +11,9 @@ server processing (disk/S3 fetch → render → encode) + network transfer from 
 
 ### Environment
 
-| Environment | Machine                   | S3 connectivity      |
-| ----------- | ------------------------- | -------------------- |
-| AWS EC2     | t3.medium, ap-southeast-2 | AWS internal network |
+| Environment | Machine                  | S3 connectivity      |
+| ----------- | ------------------------ | -------------------- |
+| AWS EC2     | t3.large, ap-southeast-2 | AWS internal network |
 
 ### Cache tiers
 
@@ -148,50 +152,10 @@ The server has a three-tier cache. Each request is served from the fastest avail
 
 ---
 
-### radar_SouthAustraliaGulfs_wind_delayed_qc_wdir
-
-|           |                                                                            |
-| --------- | -------------------------------------------------------------------------- |
-| **Store** | `s3://aodn-cloud-optimised/radar_SouthAustraliaGulfs_wind_delayed_qc.zarr` |
-
-| Dimension | Size  | Chunk | Spatial chunks needed |
-| --------- | ----- | ----- | --------------------- |
-| time      | 38129 | 100   | —                     |
-| lat       | 74    | 74    | 1                     |
-| lon       | 102   | 102   | 1                     |
-
-**Time-slice size:** ~5.9 MB — 1 S3 read (full spatial grid in a single chunk; chunk also spans 100 time steps)
-
-**Manifest**
-
-|           | AWS EC2 |
-| --------- | ------- |
-| Cold      | 205 ms  |
-| Disk warm | 100 ms  |
-
-**Tiles**
-
-|           | AWS EC2 |
-| --------- | ------- |
-| Cold      | 190 ms  |
-| Disk warm | 95 ms   |
-| Hot       | 83 ms   |
-
-**Point**
-
-|           | AWS EC2 |
-| --------- | ------- |
-| Cold      | 200 ms  |
-| Disk warm | 100 ms  |
-| Hot       | 73 ms   |
-
-> Smallest spatial grid. The full domain fits in a single tile (`lod_grids = {1: (1, 1)}`), giving the fastest cold-start of all products.
-
----
-
 ## Key observations
 
-- **Hot tiles (83–200 ms)** — S3 and disk I/O are both eliminated by the in-memory cache. Variation reflects PNG payload size.
+- **Hot tiles (150–200 ms)** — S3 and disk I/O are both eliminated by the in-memory cache. Variation reflects PNG payload size.
 - **Hot point (71–74 ms)** — consistently fast across all products; small JSON response with no PNG encoding.
-- **Disk warm (95–500 ms)** — all dates within the last 30 days are prewarmed to disk on startup. A request that misses the in-memory LRU (e.g. after a restart or cache eviction) reads from local EBS rather than S3, roughly halving cold latency and capped at 500 ms.
-- **Chunk design drives S3 cold-start time** — `satellite_austemp` requires 6 S3 reads per slice; `sea_level_anomaly`, `ocean_current`, and `radar` pack the full spatial grid into a single chunk, so one read is enough. In practice, S3 cold requests only occur for dates older than 30 days.
+- **Disk warm (155–500 ms)** — all dates within `CACHE_DAYS` (default 30) are prewarmed to disk on startup and refreshed every 4 hours. A request that misses the in-memory LRU (e.g. after a restart or cache eviction) reads from local EBS rather than S3, roughly halving cold latency and capped at ~500 ms even for the satellite-class slice.
+- **Chunk design drives S3 cold-start time** — `satellite_austemp` requires 6 S3 reads per slice (2 lat chunks × 3 lon chunks); `sea_level_anomaly` and `ocean_current` pack the full spatial grid into a single chunk, so one read is enough. In practice, S3 cold requests only occur for dates older than `CACHE_DAYS` or before startup prewarm completes.
+- **Estimating a new product** — a product whose grid is similar in size to `sea_level_anomaly` (351 × 641) but with `K` variables will land near `K × sea_level_anomaly` cold-time (UCUR + VCUR is the worked example). A new satellite-class product (~2000 × 3900) sized for `M` lat-chunks × `N` lon-chunks will scale cold time as `(M × N) / 6` relative to the satellite figures above.

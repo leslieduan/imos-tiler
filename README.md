@@ -1,6 +1,6 @@
 # titiler-project
 
-On-demand tile server for IMOS ocean data products. Tiles are generated in real time without pre-rendering. A three-tier cache — processed grids (in-memory) → slice LRU (in-memory) → slice files (disk) — absorbs cold S3 reads: disk-warm slices serve in ~30ms vs ~2s from S3. Products are managed at runtime via the admin API — no redeploy required.
+On-demand tile server for IMOS ocean data products. Tiles are generated in real time without pre-rendering. A three-tier cache — processed grids (in-memory LRU) → slice cache (in-memory LRU) → slice files (disk) — absorbs cold S3 reads: disk-warm slices serve in ~30ms vs ~2s from S3. Products are managed at runtime via the admin API (or pre-populated in `products.json` before startup) — no redeploy required.
 
 ## Setup
 
@@ -56,7 +56,7 @@ Server is available at `http://localhost:80`.
 >
 > **Always use dates from the manifest — never construct them from a local clock.** Dates are opaque keys: a client constructing a date string from their own clock may produce a value that does not exist in the manifest. Passing a UTC date directly will also 404, because satellite passes typically cross midnight UTC (e.g. a Sydney daytime pass at `2022-06-01 01:20 AEST` is `2022-05-31 15:20 UTC`).
 >
-> See [`docs/technical.md`](docs/technical.md#date-and-timezone-convention) for the full explanation.
+> See [`docs/technical.md`](docs/technical.md#9-date-timezone-and-coordinate-normalisation) for the full explanation.
 
 ## Endpoints
 
@@ -142,7 +142,7 @@ curl -X DELETE http://localhost:8000/admin/products/sea_level_anomaly \
 
 Custom colormaps are stored in `colormaps.json` and loaded on startup. Changes via the admin API take effect immediately without a restart. All supported colormap names (custom, rio-tiler built-ins, and matplotlib) can be browsed via `GET /visual_tiles/colormaps`. Names registered here can be used via `?colormap=<name>` on any visual tile request.
 
-Two modes are supported — see [`docs/technical.md`](docs/technical.md#colormap-modes) for full details.
+Two modes are supported — see [`docs/technical.md`](docs/technical.md#83-colormap-system) for full details.
 
 **Ramp colormap** — 2–256 evenly-spaced stops, linearly interpolated to a 256-entry LUT. Stops can be hex strings or `[r,g,b,a]` lists:
 
@@ -197,10 +197,10 @@ See [`docs/security.md`](docs/security.md) for how admin endpoints are secured i
 - [`docs/technical.md`](docs/technical.md) — architecture, LOD algorithm, caching strategy, PNG encoding contract
 - [`docs/cache_analysis.md`](docs/cache_analysis.md) — cache option analysis: why disk cache was chosen over Redis and EFS
 - [`docs/concurrency.md`](docs/concurrency.md) — concurrency model, capacity evaluation, thread pool and cache sizing
-- [`docs/dataset.md`](docs/dataset.md) — per-store variable/dimension/chunking reference
+- [`docs/dataset.md`](docs/dataset.md) — representative example Zarr stores (size classes, dimensions, chunking, variables) used as planning anchors
 - [`docs/security.md`](docs/security.md) — admin endpoint security, API key setup, nginx, EC2 configuration
 - [`docs/png-vs-webp-vs-bin.md`](docs/png-vs-webp-vs-bin.md) — tile format evaluation
-- [`docs/benchmark.md`](docs/benchmark.md) — response time benchmarks (local vs EC2, cold vs hot)
+- [`docs/benchmark.md`](docs/benchmark.md) — response time benchmarks on EC2 (cold / disk-warm / hot)
 - [`docs/netcdf-vs-zarr.md`](docs/netcdf-vs-zarr.md) — format comparison and IMOS product file analysis
 
 ## Development
