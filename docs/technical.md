@@ -578,7 +578,7 @@ If `lat`/`lon` are still missing after renaming, `_open_store` raises `ValueErro
 
 ## 10. Caching strategy
 
-Three-tier cache stack ordered tiles → S3: **L1 (processed grid) → L2 (in-memory slice) → L3 (disk) → S3**. Visual tiles have no L1 — requests hit L2 first. Cold S3 reads (~2s) are absorbed by disk (L3, ~30ms) and in-memory LRU (L2, <1ms). The disk cache is the primary mechanism for eliminating cold origin hits — it persists across server restarts and is pre-populated at startup.
+Three-tier cache stack ordered tiles → S3: **L1 (in-memory processed grid, LRU) → L2 (in-memory slice, LRU) → L3 (disk) → S3**. Both in-memory tiers use `cachetools.LRUCache` — when the cache reaches its configured maximum size, the **least-recently-accessed entry is evicted** to make room. Visual tiles have no L1 — requests hit L2 first. Cold S3 reads (~2 s) are absorbed by disk (L3, ~30 ms) and the in-memory LRUs (L2 / L1, < 1 ms). The disk cache is the primary mechanism for eliminating cold origin hits — it persists across server restarts and is pre-populated at startup.
 
 > Full design rationale (why disk over Redis / EFS / Fargate ephemeral): [`docs/cache_analysis.md`](cache_analysis.md).
 
@@ -599,7 +599,9 @@ Re-opening is cheap — `xr.open_zarr` reads only metadata and coordinate arrays
 
 Keyed `(source_path, date, str(variable), lod)`. Stores the resampled + normalised numpy arrays for the **full LOD grid**, not per-tile. A hit reduces per-tile work to `_extract_chunk` + PNG encode only — no S3 I/O, no resampling. The key is semantic (not object identity), so cache hits survive L2 slice evictions and disk-reloaded slices.
 
-Entry sizes for the satellite heatwave product (2000×3900): LOD 1 ~1.4 MB, LOD 2 ~3.3 MB, LOD 3 ~12 MB, LOD 4 ~41 MB. GSLA and radar products have only 1 LOD level at ~1.4 MB.
+Entry sizes for the satellite heatwave product (2000×3900): LOD 1 ~1.4 MB, LOD 2 ~3.3 MB, LOD 3 ~12 MB, LOD 4 ~41 MB. GSLA-class products have only 1 LOD level at ~1.4 MB.
+
+**Eviction.** `_processed_cache = LRUCache(maxsize=PROCESSED_CACHE_SIZE)` — when the cache is full, the **least-recently-accessed** `(product, date, lod)` entry is evicted to make room for a new one. A re-requested entry is moved to the back of the eviction queue, so dates that users actively pan/zoom over stay warm; dates that haven't been touched recently get evicted first. After eviction, the next request for that key recomputes the processed grid from the L2 slice (~tens of ms) or from L2 → disk → S3 if L2 has also evicted it.
 
 Size is controlled by `PROCESSED_CACHE_SIZE` (default `50`). Sized as `SLICE_CACHE_SIZE × LOD.max_lods` with headroom: `10 × 4 = 40`, rounded to 50. This keeps all LOD levels warm for every date in the L2 slice cache.
 
@@ -611,7 +613,9 @@ Visual tiles do not use L1 — `XarrayReader` handles its own rendering per requ
 
 Keyed `(store_url, date, variables_tuple)`. Stores a fully-computed (`.compute()`) 2-D lat×lon `xr.Dataset` slice. Sub-millisecond on hit. Keyed by `variables_tuple` so different products using the same store cache independently.
 
-Size is controlled by `SLICE_CACHE_SIZE` (default `10`). Entry size varies significantly by product: ~2 MB for GSLA (351×641), ~61 MB for the satellite heatwave products (2000×3900 float64).
+**Eviction.** `_slice_cache = LRUCache(maxsize=SLICE_CACHE_SIZE)` — when full, the **least-recently-accessed** `(store_url, date, variables)` slice is evicted. Note that L2 eviction does not invalidate the on-disk L3 copy; a subsequent request reloads it from disk in ~30 ms via `pickle.loads(lz4.frame.decompress(...))`. The "thrash" cost of an undersized L2 is therefore a one-time ~30 ms disk-warm hit per re-request, not a full ~2 s cold S3 fetch — which is why [§14.3](#143-why-the-default-slice_cache_size10-is-too-small-for-production) frames the default `SLICE_CACHE_SIZE = 10` as a performance issue, not a correctness one.
+
+Size is controlled by `SLICE_CACHE_SIZE` (default `10`). Entry size varies significantly by product: ~2 MB for a GSLA-class slice (351×641), ~61 MB for a satellite-class slice (2000×3900 float64).
 
 Primary consumers are **visual_tiles** (no L1 above it — every tile request calls `load_slice`) and **data_tiles manifest/point** (always need `ds` directly). For data_tiles tile requests, the slice is only loaded on an L1 miss; once the processed grid is warm, L2 is bypassed entirely.
 
@@ -837,7 +841,7 @@ This is why a 60-second prewarm at startup does not delay the first request by 6
 
 | Flow                            | When to use                                                                       | Effect                                                                                                                |
 | ------------------------------- | --------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| **Bootstrap** — write `products.json` before `docker-compose up` | Fresh deployment, infra-as-code, or any reproducible bootstrap (see [`ec2-manual-deploy.md`](../ec2-manual-deploy.md)). | `load_products()` reads the file into `PRODUCTS` during lifespan startup; `_startup_cache_sync` then prewarms disk for every product. |
+| **Bootstrap** — write `products.json` before `docker-compose up` | Fresh deployment, infra-as-code, or any reproducible bootstrap. | `load_products()` reads the file into `PRODUCTS` during lifespan startup; `_startup_cache_sync` then prewarms disk for every product. |
 | **Admin API** — `POST /admin/products` to the running server     | Adding or removing products without a restart in an already-deployed system.       | The admin handler appends to `products.json`, reloads `PRODUCTS`, and fires a background `prewarm_disk_slices` for the new product. |
 
 Both flows produce identical in-memory state. The bootstrap flow skips the admin-key + network round-trip but requires you to have file-system access to `data/products.json` (the path Docker bind-mounts via `PRODUCTS_CONFIG_PATH=data/products.json`). The admin-API flow works once the server is running and is the only option in environments where you cannot touch the host filesystem.
@@ -922,18 +926,26 @@ On deletion:
 
 This section quantifies how RAM and disk grow with product count, slice size, thread-pool size, and cache size. Use it when picking instance class for a new deployment or sizing a horizontal scale-out.
 
-### 14.1 Production product mix (planning baseline)
+### 14.1 Planning premise — what kinds of products do we plan for?
 
-The development environment contains four products of mixed sizes (including a small radar product). **Production is different and is the basis for all numbers below:**
+The products listed in [`docs/dataset.md`](dataset.md) are **representative examples**, not an exhaustive or fixed list. Actual production products are registered at runtime via the admin API and will vary over time, but they are expected to **stay close in shape and scale** to the examples documented there — same order of magnitude in grid size, same dtype, same regular lat/lon convention.
 
-| Class                          | Grid                | Vars | Raw / date | lz4 / date | Expected count in production |
-| ------------------------------ | ------------------- | ---- | ---------- | ---------- | ---------------------------- |
-| Satellite-class (e.g. SSTA)    | 2000 × 3900 float64 | 1    | **~61 MB** | **~18 MB** | **≥ 10**                     |
-| Sea-level-anomaly class (GSLA) | 351 × 641 float64   | 1    | ~1.7 MB    | ~0.5 MB    | 1                            |
-| Ocean-current class            | 351 × 641 float64   | 2    | ~3.4 MB    | ~1.0 MB    | 1                            |
-| Small radar                    | 74 × 102 float64    | 1    | ~0.06 MB   | ~0.02 MB   | **0** (dev-only)             |
+For capacity planning we abstract those examples into **two size classes** and treat every actual product as falling into one of them:
 
-For all planning, treat the working set as **10–20 satellite-class products plus two small products**, with `CACHE_DAYS` set anywhere from 30 up to **90 (3 months)**. Memory and disk are dominated by satellite slices; the two small products contribute < 1 % of total footprint and are ignored in the totals below.
+| Size class          | Anchored on (example in `dataset.md`) | Grid scale        | L2 slice in RAM | L1 processed (all LODs combined) | L3 disk (lz4) per date  |
+| ------------------- | -------------------------------------- | ----------------- | --------------- | -------------------------------- | ----------------------- |
+| **GSLA-class**      | sea_level_anomaly / ocean_current      | ~351 × 641        | ~2 MB / var     | ~1.4 MB (single LOD)             | ~0.5 MB / var           |
+| **Satellite-class** | satellite_austemp_heatwave_8day_ssta   | ~2000 × 3900      | ~61 MB          | ~58 MB (4 LODs, ~15 MB avg/entry) | ~18 MB                  |
+
+A real product won't match these numbers exactly — a 400 × 700 product is still GSLA-class for sizing; a 1800 × 4200 product is still satellite-class. Use the closest class as the planning anchor; a product that is meaningfully different in scale (e.g. 5000 × 10000) needs a one-off calculation from [§14.2](#142-ram-components) before fitting into the scenarios below.
+
+A production deployment is expected to be **dominated by satellite-class products** with a smaller number of GSLA-class accompaniments. `CACHE_DAYS` ranges from `30` (default) up to `90` (3-month history — the maximum the project plans to support). The three scenarios in [§14.7](#147-planning-scenarios) bracket what we expect to see in practice, each sized at all three cache windows:
+
+| Scenario       | Products                          | Phase                          |
+| -------------- | --------------------------------- | ------------------------------ |
+| **A — Initial** | 6 (2 GSLA + 4 satellite)         | Initial production deployment  |
+| **B — Steady** | 20 (6 GSLA + 14 satellite)       | Mid-term steady state          |
+| **C — Ceiling** | 50 (10 GSLA + 40 satellite)      | Long-term single-node ceiling  |
 
 ### 14.2 RAM components
 
@@ -982,85 +994,124 @@ Stampede protection (`_slice_in_flight`, `_processed_inflight`) means transient 
 
 ### 14.5 Thread pool vs cache sizing
 
-Thread-pool size and cache size are **independent knobs**:
+Thread-pool size and cache size are **independent knobs** — concrete pairings are in the scenarios in §14.7. The general goal-to-knob mapping:
 
-| Goal                                                 | Knob                                                                         |
-| ---------------------------------------------------- | ---------------------------------------------------------------------------- |
-| Serve more concurrent requests without queueing      | Raise `THREAD_POOL_SIZE` (cheap in steady RAM; raises transient ceiling)     |
-| Keep more `(product, date)` pairs hot                | Raise `SLICE_CACHE_SIZE` (and `PROCESSED_CACHE_SIZE = SLICE_CACHE_SIZE × 4`) |
-| Keep more dates available without S3 on warm restart | Raise `CACHE_DAYS` (affects disk, not RAM)                                   |
-| Shorten startup duration                             | Raise `PREWARM_WORKERS`                                                      |
+| Goal                                                 | Knob                                                                            |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------- |
+| Serve more concurrent requests without queueing      | Raise `THREAD_POOL_SIZE` (cheap in steady RAM; raises transient ceiling)        |
+| Keep more `(product, date)` pairs hot in RAM         | Raise `SLICE_CACHE_SIZE` (and `PROCESSED_CACHE_SIZE = SLICE_CACHE_SIZE × 4`)    |
+| Keep more dates available on disk without S3 reads   | Raise `CACHE_DAYS` (affects disk only, not RAM)                                 |
+| Shorten startup prewarm duration                     | Raise `PREWARM_WORKERS`                                                         |
 
-Recommended pairings for the production product mix:
+### 14.6 Disk usage formula
 
-| Production mix                       | `SLICE_CACHE_SIZE` | `PROCESSED_CACHE_SIZE` | `THREAD_POOL_SIZE` | Steady RAM (cache+base) | Peak transient |
-| ------------------------------------ | ------------------ | ---------------------- | ------------------ | ----------------------- | -------------- |
-| 10 satellite + 2 small (1 hot date)  | 12                 | 50                     | 100                | ~2 GB                   | +~6 GB worst   |
-| 10 satellite + 2 small (3 hot dates) | 30                 | 120                    | 100                | ~4 GB                   | +~6 GB worst   |
-| 20 satellite + 2 small (1 hot date)  | 22                 | 90                     | 100                | ~3 GB                   | +~6 GB worst   |
-| 20 satellite + 2 small (3 hot dates) | 60                 | 240                    | 100                | ~7.6 GB                 | +~6 GB worst   |
+After lz4 compression, disk usage per scenario follows:
 
-"Peak transient" assumes a worst-case burst of unique cold satellite slices arriving simultaneously. In practice CloudFront and stampede dedup keep this much lower; the column exists to right-size RAM with headroom rather than predict steady use.
+```
+Disk total ≈ N_satellite × CACHE_DAYS × 18 MB
+           + N_GSLA      × CACHE_DAYS × 0.5 MB  (typically < 5% of total)
+```
 
-### 14.6 Disk usage (L3 cache)
+The GSLA-class term is small enough to ignore for sizing decisions. The dominant variable is `N_satellite × CACHE_DAYS`. Pressure eviction triggers at `DISK_CACHE_LIMIT_GB × DISK_EVICTION_THRESHOLD` (default `20 × 0.85 = 17 GB`) — **the default 20 GB limit is too small for almost any production scenario** and must be raised explicitly. Eviction policy is documented in [§10.4](#104-l3--slice-cache-disk-disk_cache_path-directory).
 
-Per-product per-date footprint after lz4 compression is dominated by satellite products: **~18 MB per date per satellite product**. The two small products contribute < 1 MB per date combined and are ignored below.
+EBS gp3 storage costs $0.08/GB-month, so disk is not a cost lever — capacity-planning correctness is. Plan for ~1.5× the steady-state disk total to absorb transient writes during refresh cycles.
 
-**Approximate disk total = `N_satellite × CACHE_DAYS × 18 MB`:**
+### 14.7 Planning scenarios
 
-| Satellite products | `CACHE_DAYS = 30` | `CACHE_DAYS = 60` | `CACHE_DAYS = 90` |
-| -----------------: | ----------------: | ----------------: | ----------------: |
-|                 10 |             ~5 GB |            ~11 GB |        **~16 GB** |
-|                 15 |             ~8 GB |            ~16 GB |            ~24 GB |
-|                 20 |            ~11 GB |            ~21 GB |            ~32 GB |
-|                 30 |            ~16 GB |            ~32 GB |            ~49 GB |
+Each scenario gives the disk footprint at the three cache windows (30 / 60 / 90 days) and the recommended cache sizing and instance class. **Cache RAM is independent of `CACHE_DAYS`** — only disk usage scales with the cache window, so the cache sizing column is shown once per scenario.
 
-`DISK_CACHE_LIMIT_GB` (default 20) + `DISK_EVICTION_THRESHOLD` (default 0.85) means pressure eviction begins at 17 GB used. **At the planning baseline of 10 satellite products and `CACHE_DAYS = 90`, you are already at ~16 GB — within margin of default eviction.** Anything beyond 10 products _or_ 90 days requires raising `DISK_CACHE_LIMIT_GB` (and the underlying EBS volume) explicitly.
+For each scenario, two cache-sizing strategies are presented:
 
-Files are evicted by `(size ascending, date ascending)`. With a uniform satellite-class fleet, size order ceases to be useful — eviction effectively becomes oldest-date-first across all products, which is what you want.
+- **1 hot date / product (floor)** — the minimum that prevents constant L2 eviction across products. Suitable when traffic is concentrated on a single recent date per product.
+- **3 hot dates / product (recommended)** — absorbs users panning across recent dates without evicting a sibling product's slot. The default sizing the scenarios optimise for.
 
-**Recommended sizing:** plan for at least 1.5× the steady-state disk total to cover transient writes during refresh and uneven product growth.
+Steady RAM column = process baseline (~400 MB) + L2 cache worst-case (satellite-dominated) + L1 cache mixed-LOD typical. Add up to ~6 GB transient when `THREAD_POOL_SIZE = 100` and many distinct cold satellite slices arrive simultaneously (rare in practice due to CloudFront + stampede dedup, but the recommended instance has headroom for it).
 
-| Production target     | Steady disk | Recommended `DISK_CACHE_LIMIT_GB` | Recommended EBS volume |
-| --------------------- | ----------: | --------------------------------: | ---------------------- |
-| 10 satellite, 30 days |       ~5 GB |                                 8 | 16 GB gp3              |
-| 10 satellite, 90 days |      ~16 GB |                                24 | 32 GB gp3              |
-| 20 satellite, 90 days |      ~32 GB |                                48 | 64 GB gp3              |
-| 30 satellite, 90 days |      ~49 GB |                                72 | 100 GB gp3             |
+#### Scenario A — 6 products (2 GSLA + 4 satellite)
 
-EBS gp3 costs $0.08/GB-month, so even the 30-product / 90-day deployment is ~$8/month for storage — disk is not a cost lever, capacity-planning correctness is.
+Initial production deployment.
 
-### 14.7 Worked example — picking instance size for 10 satellite products, 90-day window
+**Disk:**
 
-Target: **10 satellite-class products + sea_level_anomaly + ocean_current**, `CACHE_DAYS = 90`, expected sustained ~50 concurrent requests, fronted by CloudFront.
+| Metric                            |  30 days |  60 days |  90 days |
+| --------------------------------- | -------: | -------: | -------: |
+| Lz4 steady total                  | ~2.2 GB  | ~4.4 GB  | ~6.6 GB  |
+| Recommended `DISK_CACHE_LIMIT_GB` |        4 |        8 |       12 |
+| EBS gp3 volume                    |     8 GB |    16 GB |    16 GB |
 
-- **Disk:** 10 × 90 × 18 MB ≈ 16 GB plus negligible small-product overhead. Set **`DISK_CACHE_LIMIT_GB = 24`** (eviction at ~20 GB, leaves headroom) on a 32 GB gp3 volume.
-- **Cache sizing:** to keep all 10 satellite products' three most recent dates warm, use **`SLICE_CACHE_SIZE = 30`**, **`PROCESSED_CACHE_SIZE = 120`**.
-- **Steady RAM:**
-  ```
-    350 MB baseline
-  +  50 MB store singletons
-  + 1.8 GB L2 (30 × 61 MB worst case)
-  + 1.8 GB L1 (mixed-LOD ~60 MB average × 30 product/date rows)
-  = ~4 GB steady
-  ```
-- **Peak RAM (cold-burst transient):** add up to ~6 GB worst-case transient with `THREAD_POOL_SIZE = 100` (rare in practice — CloudFront absorbs warm traffic, stampede dedup absorbs simultaneous duplicates).
-- **Plan for ≥ 8 GB RAM, 16 GB recommended** to absorb cold bursts comfortably. **`m6i.xlarge`** (4 vCPU, 16 GB) is a good fit; **`m6i.large`** (2 vCPU, 8 GB) is feasible only if you accept that a worst-case cold burst will swap or OOM. Lower `THREAD_POOL_SIZE` to 50 if forced onto `m6i.large`.
-- **CPU:** request handling is mostly I/O-bound (S3 + disk) with bursts of numpy/PIL work. 4 vCPU is sufficient; 8 vCPU helps only under sustained cold-traffic bursts.
-- **Prewarm:** 10 × 90 = 900 jobs at `PREWARM_WORKERS = 4` is ~10–15 minutes on cold start (S3 fetch + decompress + pickle + lz4 + write). Raise `PREWARM_WORKERS` to 8 for ~half the startup window at the cost of double the startup transient RAM (~500 MB). On warm restart (disk already populated), prewarm completes in seconds.
+**Cache and RAM** (independent of `CACHE_DAYS`):
 
-**Scaling guide:**
+| Strategy                              | `SLICE_CACHE_SIZE` | `PROCESSED_CACHE_SIZE` | Steady cache RAM | Steady total |
+| ------------------------------------- | -----------------: | ---------------------: | ---------------: | -----------: |
+| 1 hot date / product (floor)          |                  6 |                     24 |           ~0.7 GB |       ~1.1 GB |
+| **3 hot dates / product (recommended)** |               18 |                     72 |           ~2.2 GB |       ~2.6 GB |
 
-| Target                      | Instance class                                | Cache settings        | `DISK_CACHE_LIMIT_GB` |
-| --------------------------- | --------------------------------------------- | --------------------- | --------------------- |
-| 10 satellite, 30-day window | `m6i.large` (8 GB)                            | `SLICE=12 / PROC=50`  | 8                     |
-| 10 satellite, 90-day window | `m6i.xlarge` (16 GB)                          | `SLICE=30 / PROC=120` | 24                    |
-| 20 satellite, 90-day window | `m6i.2xlarge` (32 GB)                         | `SLICE=60 / PROC=240` | 48                    |
-| 30 satellite, 90-day window | `m6i.4xlarge` (64 GB) or horizontal scale-out | `SLICE=90 / PROC=360` | 72                    |
+**Recommended instance:** `m6i.xlarge` (4 vCPU, **16 GB**). Comfortably absorbs ~2.6 GB steady plus up to ~6 GB transient cold burst. `m6i.large` (8 GB) is feasible only with `THREAD_POOL_SIZE` lowered to ~30 to cap transient RAM.
 
-Horizontal scale-out is straightforward — each replica has its own L1/L2/L3 caches but reads from the same S3 stores; CloudFront fans out at the edge. Past ~30 products it is usually cheaper to add a second smaller node than to grow a single instance.
+---
 
-> Full capacity-per-request-type tables (hot/disk-warm/cold throughput per request) are in [`docs/concurrency.md`](concurrency.md).
+#### Scenario B — 20 products (6 GSLA + 14 satellite)
+
+Mid-term steady state.
+
+**Disk:**
+
+| Metric                            |  30 days |  60 days |  90 days |
+| --------------------------------- | -------: | -------: | -------: |
+| Lz4 steady total                  | ~7.7 GB  | ~15.3 GB | ~22.9 GB |
+| Recommended `DISK_CACHE_LIMIT_GB` |       12 |       24 |       36 |
+| EBS gp3 volume                    |    16 GB |    32 GB |    48 GB |
+
+**Cache and RAM:**
+
+| Strategy                              | `SLICE_CACHE_SIZE` | `PROCESSED_CACHE_SIZE` | Steady cache RAM | Steady total |
+| ------------------------------------- | -----------------: | ---------------------: | ---------------: | -----------: |
+| 1 hot date / product (floor)          |                 20 |                     80 |           ~2.4 GB |       ~2.8 GB |
+| **3 hot dates / product (recommended)** |               60 |                    240 |           ~7.3 GB |       ~7.7 GB |
+
+**Recommended instance:** `m6i.2xlarge` (8 vCPU, **32 GB**) for the recommended 3-hot-date strategy — leaves ~24 GB headroom over the ~7.7 GB steady for transient bursts and OS overhead. The 1-hot-date strategy fits on `m6i.xlarge` (16 GB) if traffic is concentrated on the latest date per product.
+
+---
+
+#### Scenario C — 50 products (10 GSLA + 40 satellite)
+
+Long-term ceiling for a single node. At this scale, **horizontal scale-out usually beats a single large node** on cost and resilience.
+
+**Disk:**
+
+| Metric                            |  30 days |  60 days |  90 days |
+| --------------------------------- | -------: | -------: | -------: |
+| Lz4 steady total                  | ~21.7 GB | ~43.5 GB | ~65.2 GB |
+| Recommended `DISK_CACHE_LIMIT_GB` |       32 |       64 |       96 |
+| EBS gp3 volume                    |    48 GB |    80 GB |   128 GB |
+
+**Cache and RAM** (single-node sizing — see scale-out note below):
+
+| Strategy                              | `SLICE_CACHE_SIZE` | `PROCESSED_CACHE_SIZE` | Steady cache RAM | Steady total |
+| ------------------------------------- | -----------------: | ---------------------: | ---------------: | -----------: |
+| 1 hot date / product (floor)          |                 50 |                    200 |           ~6.1 GB |       ~6.5 GB |
+| **3 hot dates / product (recommended)** |              150 |                    600 |          ~18.2 GB |      ~18.6 GB |
+
+**Recommended deployment options:**
+
+- **Horizontal scale-out (preferred above ~30 products):** 2–3 × `m6i.xlarge` or `m6i.2xlarge` replicas behind CloudFront. Each replica has independent L1/L2/L3 caches but reads from the same S3 stores; CloudFront fans out at the edge. Cheaper, more resilient, and avoids the very-large-instance pricing curve. Each replica is sized per Scenario B numbers.
+- **Single node:** `m6i.4xlarge` (16 vCPU, **64 GB**) for the recommended strategy, or `m6i.2xlarge` (32 GB) if 1 hot date per product is acceptable.
+
+---
+
+#### Prewarm time at startup
+
+Cold startup `prewarm_disk_slices` grows linearly with `N_satellite × CACHE_DAYS`. At `PREWARM_WORKERS = 4` and ~3–4 s per satellite slice (S3 fetch + decompress + pickle + lz4 + write):
+
+| Scenario          |  30 days |  60 days |  90 days |
+| ----------------- | -------: | -------: | -------: |
+| A (4 satellite)   |   ~2 min |   ~4 min |   ~6 min |
+| B (14 satellite)  |   ~7 min |  ~14 min |  ~20 min |
+| C (40 satellite)  |  ~20 min |  ~40 min |  ~60 min |
+
+Raise `PREWARM_WORKERS` to 8 to roughly halve startup time at the cost of ~500 MB additional transient RAM during startup. On warm restart (disk already populated), prewarm completes in seconds regardless of scenario — it just verifies files exist.
+
+> Full capacity-per-request-type tables (hot / disk-warm / cold throughput per request) are in [`docs/concurrency.md`](concurrency.md).
 
 ---
 
