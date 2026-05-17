@@ -36,8 +36,29 @@ def _disk_cache_path(store_url: str, date: str, variables: list[str]) -> Path | 
     return Path(base) / f"{store_name}-{var_str}" / f"{date}.pkl.lz4"
 
 
+def _storage_options(store_url: str) -> dict:
+    """Storage-backend options for fsspec/zarr, derived from the URL scheme.
+
+    - ``s3://`` defaults to anonymous access (IMOS's AODN buckets are public). Set
+      ``S3_ANON=false`` to let fsspec discover AWS credentials via the standard
+      chain (env vars → ``~/.aws/credentials`` → IAM role) — needed for private
+      buckets.
+    - Other schemes (``file://``, ``https://``, ``gs://``, plain paths …) pass no
+      options; fsspec / its backend picks sensible defaults.
+
+    Previously hardcoded to ``{"anon": True}``, which locked the server to public
+    S3. Per-product credential overrides could be added later via the Product
+    config; for now this env-var toggle covers the three common cases (public S3,
+    private S3, non-S3).
+    """
+    if store_url.startswith("s3://"):
+        anon = os.environ.get("S3_ANON", "true").lower() not in ("false", "0", "no")
+        return {"anon": anon}
+    return {}
+
+
 def _open_store(store_url: str) -> xr.Dataset:
-    ds = xr.open_zarr(store_url, storage_options={"anon": True})
+    ds = xr.open_zarr(store_url, storage_options=_storage_options(store_url))
     rename = {k: v for k, v in COORD_NAMES.items() if k in ds.dims or k in ds.coords}
     if rename:
         ds = ds.rename(rename)

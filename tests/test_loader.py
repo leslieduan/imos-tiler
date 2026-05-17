@@ -4,7 +4,7 @@ import xarray as xr
 
 import services.loader as loader_module
 from constants import Product
-from services.loader import _get_store, get_lod_grids
+from services.loader import _get_store, _storage_options, get_lod_grids
 
 
 def _make_ds(**dims: int) -> xr.Dataset:
@@ -69,3 +69,19 @@ def test_get_lod_grids_fast_path_skips_store(monkeypatch):
     grids = get_lod_grids(product)
     assert grids == {1: (2, 2)}
     assert not opened
+
+
+def test_storage_options_s3_defaults_anon(monkeypatch):
+    monkeypatch.delenv("S3_ANON", raising=False)
+    assert _storage_options("s3://bucket/path.zarr") == {"anon": True}
+
+
+def test_storage_options_s3_anon_disabled_via_env(monkeypatch):
+    monkeypatch.setenv("S3_ANON", "false")
+    assert _storage_options("s3://bucket/path.zarr") == {"anon": False}
+
+
+def test_storage_options_non_s3_returns_empty():
+    assert _storage_options("https://example.com/data.zarr") == {}
+    assert _storage_options("file:///tmp/data.zarr") == {}
+    assert _storage_options("/tmp/data.zarr") == {}
