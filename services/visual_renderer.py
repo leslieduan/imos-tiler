@@ -252,6 +252,19 @@ def render_bbox(
     return _encode_rgba_png(result) if result is not None else empty_png()
 
 
+@lru_cache(maxsize=128)
+def _colormap_lut(colormap_name: str) -> np.ndarray:
+    """Return the 256×4 uint8 LUT for a colormap.
+
+    Cached separately from `_colormap()` so the numpy conversion runs once per name,
+    not per legend request. Cleared together with `_colormap` when the custom
+    colormap registry is reloaded (see services.colormap_store._reload).
+    """
+    cm = _colormap(colormap_name)
+    return np.array([cm[i] for i in range(256)], dtype=np.uint8)
+
+
+@lru_cache(maxsize=256)
 def render_legend(
     colormap_name: str,
     rescale: tuple[float, float] | None = None,
@@ -266,10 +279,12 @@ def render_legend(
 
     For categorical colormaps the bar shows discrete equal-width color blocks
     (one per registered category) rather than a smooth gradient.
+
+    Memoised by full argument tuple — legend PNGs are pure functions of their args
+    and frontends typically request the same legend many times per page load.
     """
-    cm = _colormap(colormap_name)
     categorical = is_categorical(colormap_name)
-    lut = np.array([cm[i] for i in range(256)], dtype=np.uint8)
+    lut = _colormap_lut(colormap_name)
     has_labels = rescale is not None
     LABEL_PX = 20  # pixels reserved alongside the bar for tick labels
 

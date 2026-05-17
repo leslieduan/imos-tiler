@@ -98,6 +98,8 @@ def _reload(data: dict[str, list | dict]) -> None:
             _custom_colormap_modes[name] = value["mode"]
         else:
             _custom_colormaps[name] = [tuple(rgba) for rgba in value]  # type: ignore[misc]
-    from services.visual_renderer import _colormap
+    from services.visual_renderer import _colormap, _colormap_lut, render_legend
 
     _colormap.cache_clear()
+    _colormap_lut.cache_clear()
+    render_legend.cache_clear()
