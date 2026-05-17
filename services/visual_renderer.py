@@ -12,7 +12,7 @@ from rio_tiler.io.xarray import XarrayReader
 from rio_tiler.models import ImageData
 from rioxarray.exceptions import NoDataInBounds
 
-from services.colormap_store import get_colormap, is_categorical
+from services.colormap_store import get_colormap, is_categorical, on_invalidate
 
 _mercator_to_wgs84 = Transformer.from_crs("EPSG:3857", "EPSG:4326", always_xy=True)
 
@@ -383,3 +383,11 @@ def _draw_v_labels(
         lh = bbox[3] - bbox[1]
         ty = max(0, min(y - lh // 2, height - lh))
         draw.text((bar_w + 4, ty), label, fill=(0, 0, 0, 255), font=font)
+
+
+# Drop every colormap-derived LRU cache when the registry changes (admin
+# add/remove/reload). Registered here instead of inside colormap_store so the
+# dependency direction is one-way: colormap_store has no idea what's downstream.
+on_invalidate(_colormap.cache_clear)
+on_invalidate(_colormap_lut.cache_clear)
+on_invalidate(render_legend.cache_clear)

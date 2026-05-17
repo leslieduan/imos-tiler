@@ -1,5 +1,6 @@
 import json
 import logging
+from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
 
@@ -12,6 +13,18 @@ logger = logging.getLogger(__name__)
 _config_path = Path(COLORMAPS_CONFIG_PATH)
 _custom_colormaps: dict[str, list[tuple[int, int, int, int]]] = {}
 _custom_colormap_modes: dict[str, ColormapMode] = {}
+
+# Callbacks invoked whenever the registry changes. Lets downstream modules
+# (e.g. visual_renderer) clear their LUT/legend LRU caches without us importing
+# them — colormap_store would otherwise have to do a function-local import of
+# visual_renderer to break the cycle. The list is populated at downstream-module
+# import time and never trimmed; the small bounded set is fine for this app.
+_invalidation_hooks: list[Callable[[], None]] = []
+
+
+def on_invalidate(hook: Callable[[], None]) -> None:
+    """Register a callback to fire after every colormap registry change."""
+    _invalidation_hooks.append(hook)
 
 
 def get_colormap(name: str) -> list[tuple[int, int, int, int]] | None:
@@ -98,8 +111,5 @@ def _reload(data: dict[str, list | dict]) -> None:
             _custom_colormap_modes[name] = value["mode"]
         else:
             _custom_colormaps[name] = [tuple(rgba) for rgba in value]  # type: ignore[misc]
-    from services.visual_renderer import _colormap, _colormap_lut, render_legend
-
-    _colormap.cache_clear()
-    _colormap_lut.cache_clear()
-    render_legend.cache_clear()
+    for hook in _invalidation_hooks:
+        hook()
