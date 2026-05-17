@@ -207,6 +207,7 @@ See [`docs/security.md`](docs/security.md) for how admin endpoints are secured i
 
 ```bash
 uv run pytest          # run tests
+uv run pytest --cov    # run tests with coverage report
 uv run ruff check .    # lint
 uv run ruff format .   # format
 uv run mypy .          # type check
