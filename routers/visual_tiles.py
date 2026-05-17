@@ -12,6 +12,9 @@ router = APIRouter()
 router.include_router(products_router)
 
 
+_IMAGE_CACHE_HEADERS = {"Cache-Control": f"public, max-age={86400 * 30}"}
+
+
 def _parse_rescale(rescale: str | None) -> tuple[float, float] | None:
     if not rescale:
         return None
@@ -71,7 +74,7 @@ def get_legend(
 
     rescale_range = _parse_rescale(rescale)
     png = render_legend(name, rescale_range, width, height, orientation)
-    return Response(content=png, media_type="image/png")
+    return Response(content=png, media_type="image/png", headers=_IMAGE_CACHE_HEADERS)
 
 
 @router.get(
@@ -128,7 +131,7 @@ def get_tile(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
-    return Response(content=png, media_type="image/png")
+    return Response(content=png, media_type="image/png", headers=_IMAGE_CACHE_HEADERS)
 
 
 @router.get(
@@ -196,4 +199,4 @@ def get_bbox(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
-    return Response(content=png, media_type="image/png")
+    return Response(content=png, media_type="image/png", headers=_IMAGE_CACHE_HEADERS)

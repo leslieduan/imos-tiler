@@ -47,13 +47,22 @@ def _colormap(name: str) -> dict[int, tuple[int, int, int, int]]:
     }
 
 
-def empty_png() -> bytes:
-    """Fully transparent 256×256 PNG — returned for tiles outside the data extent."""
+def _build_empty_png() -> bytes:
+    """Encode a fully transparent 256×256 RGBA PNG. Called once at module load."""
     buf = io.BytesIO()
     Image.fromarray(np.zeros((TILE_SIZE, TILE_SIZE, 4), dtype=np.uint8), "RGBA").save(
         buf, format="PNG", optimize=False
     )
     return buf.getvalue()
+
+
+# Returned for tiles outside the data extent. Bytes are immutable, so a single
+# instance is safe to reuse across all responses — no need to re-encode per call.
+_EMPTY_PNG = _build_empty_png()
+
+
+def empty_png() -> bytes:
+    return _EMPTY_PNG
 
 
 def _composite_png(base: bytes, overlay: bytes) -> bytes:

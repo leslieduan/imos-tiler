@@ -11,6 +11,8 @@ from .products import router as products_router
 router = APIRouter()
 router.include_router(products_router)
 
+_TILE_CACHE_HEADERS = {"Cache-Control": f"public, max-age={86400 * 30}"}
+
 
 @router.get(
     "/{product_id}/{date}/tiles/{z}/{x}/{y}.png",
@@ -49,7 +51,7 @@ def get_tile(
         y,
         date,
     )
-    return Response(content=png_bytes, media_type="image/png")
+    return Response(content=png_bytes, media_type="image/png", headers=_TILE_CACHE_HEADERS)
 
 
 @router.get(
