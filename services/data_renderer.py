@@ -1,8 +1,6 @@
-import concurrent.futures
 import logging
 import math
 import os
-import threading
 from collections.abc import Callable
 from io import BytesIO
 
@@ -13,14 +11,14 @@ from PIL import Image
 
 from constants import LOD, Product
 from utils.geo import dataset_bounds, json_safe_float
+from utils.memoizer import Memoizer
 
 logger = logging.getLogger(__name__)
 
 
 _PROCESSED_CACHE_SIZE = int(os.environ.get("PROCESSED_CACHE_SIZE", 50))
 _processed_cache: LRUCache = LRUCache(maxsize=_PROCESSED_CACHE_SIZE)
-_processed_inflight: dict[tuple, concurrent.futures.Future] = {}
-_processed_lock = threading.Lock()
+_processed_memo: Memoizer = Memoizer(_processed_cache)
 
 
 def _resample_to_grid(ds: xr.Dataset, total_w: int, total_h: int) -> xr.Dataset:
@@ -90,49 +88,21 @@ def _get_processed(
     """load_ds only called once per (product, date) when the processed grid is not cached yet."""
     key = (product.source_path, date, tuple(product.variables), lod)
 
-    should_compute = False
-    with _processed_lock:
-        cached = _processed_cache.get(key)
-        if cached is not None:
-            return cached
-        if key in _processed_inflight:
-            future = _processed_inflight[key]
-        else:
-            future: concurrent.futures.Future = concurrent.futures.Future()
-            _processed_inflight[key] = future
-            should_compute = True
-
-    if not should_compute:
-        return future.result()
-
-    try:
+    def factory() -> tuple:
         ds = load_ds()
-        result = (
+        return (
             _compute_uv(product, ds, lod)
             if isinstance(product.variable, list)
             else _compute_scalar(product, ds, lod)
         )
-        with _processed_lock:
-            _processed_cache[key] = result
-        future.set_result(result)
-    except Exception as e:
-        future.set_exception(e)
-        raise
-    finally:
-        with _processed_lock:
-            _processed_inflight.pop(key, None)
-    return result
+
+    return _processed_memo.get_or_compute(key, factory)
 
 
 def evict_processed_cache(product: Product) -> None:
-    with _processed_lock:
-        keys_to_remove = [k for k in _processed_cache if k[0] == product.source_path]
-        for k in keys_to_remove:
-            del _processed_cache[k]
-    if keys_to_remove:
-        logger.info(
-            "Processed cache evicted %d entry/entries for: %s", len(keys_to_remove), product.id
-        )
+    removed = _processed_memo.evict_matching(lambda k: k[0] == product.source_path)
+    if removed:
+        logger.info("Processed cache evicted %d entry/entries for: %s", removed, product.id)
 
 
 def _extract_chunk(

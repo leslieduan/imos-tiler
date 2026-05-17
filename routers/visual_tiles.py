@@ -1,13 +1,10 @@
-import concurrent.futures
-import threading
-from collections.abc import Callable
-
 from fastapi import APIRouter, HTTPException, Path, Query
 from fastapi.openapi.models import Example
 from fastapi.responses import JSONResponse, Response
 
 from services.colormap_store import is_categorical, list_colormaps
 from services.visual_renderer import _colormap, render_bbox, render_legend, render_tile
+from utils.memoizer import Memoizer
 
 from .products import _DATE_EX, _PRODUCT_EX, _get_product_or_404, _load_slice_or_404
 from .products import router as products_router
@@ -18,54 +15,13 @@ router.include_router(products_router)
 
 _IMAGE_CACHE_HEADERS = {"Cache-Control": f"public, max-age={86400 * 30}"}
 
-# Concurrent-render dedup. /data_tiles already shares the rio-tiler/encoding work
-# across concurrent requests via services.data_renderer._processed_inflight; visual
-# tiles had no equivalent. On a cold cache, a busy viewport with N clients hitting
-# the same (product, date, z, x, y, colormap, rescale) tile previously ran N
-# independent XarrayReader reprojects + encodes. With this dedup the first request
-# does the work and the rest wait on the same Future.
-#
-# Sized by tile *signature*, not bytes: dict only holds at most one entry per
-# in-flight key, and entries are removed in `finally`. No unbounded growth.
-_tile_inflight: dict[tuple, "concurrent.futures.Future[bytes]"] = {}
-_tile_lock = threading.Lock()
-_bbox_inflight: dict[tuple, "concurrent.futures.Future[bytes]"] = {}
-_bbox_lock = threading.Lock()
-
-
-def _deduped(
-    key: tuple,
-    lock: threading.Lock,
-    inflight: dict[tuple, "concurrent.futures.Future[bytes]"],
-    fn: Callable[[], bytes],
-) -> bytes:
-    """Run fn() once per concurrent key; concurrent callers receive the same result.
-
-    Errors propagate to all waiters so a failed request doesn't permanently block
-    future attempts for the same key (the entry is popped in `finally`).
-    """
-    should_compute = False
-    with lock:
-        if key in inflight:
-            future = inflight[key]
-        else:
-            future = concurrent.futures.Future()
-            inflight[key] = future
-            should_compute = True
-
-    if not should_compute:
-        return future.result()
-
-    try:
-        result = fn()
-        future.set_result(result)
-    except Exception as e:
-        future.set_exception(e)
-        raise
-    finally:
-        with lock:
-            inflight.pop(key, None)
-    return result
+# Dedup-only Memoizers (cache=None): /data_tiles already shares the rio-tiler /
+# encoding work across concurrent requests via _processed_memo, visual tiles had
+# no equivalent. With these, N concurrent identical-tile requests run one render;
+# the rest block on the shared Future. No caching needed here — Cache-Control +
+# browser/CDN absorb cross-request repeats.
+_tile_memo: Memoizer = Memoizer()
+_bbox_memo: Memoizer = Memoizer()
 
 
 def _parse_rescale(rescale: str | None) -> tuple[float, float] | None:
@@ -184,7 +140,7 @@ def get_tile(
         return render_tile(ds, product.variable, x, y, z, colormap_name, rescale_range)
 
     try:
-        png = _deduped(key, _tile_lock, _tile_inflight, _do_render)
+        png = _tile_memo.get_or_compute(key, _do_render)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
@@ -266,7 +222,7 @@ def get_bbox(
         )
 
     try:
-        png = _deduped(key, _bbox_lock, _bbox_inflight, _do_render)
+        png = _bbox_memo.get_or_compute(key, _do_render)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 

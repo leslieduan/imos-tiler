@@ -14,6 +14,7 @@ from cachetools import LRUCache
 
 from constants import COORD_NAMES, Product
 from utils.dates import LOCAL_TZ, ts_to_local_date
+from utils.memoizer import Memoizer
 
 logger = logging.getLogger(__name__)
 
@@ -40,8 +41,7 @@ _lod_grids_lock = threading.Lock()
 _SLICE_CACHE_SIZE = int(os.environ.get("SLICE_CACHE_SIZE", 10))
 _CACHE_DAYS = int(os.environ.get("CACHE_DAYS", 30))
 _slice_cache: LRUCache = LRUCache(maxsize=_SLICE_CACHE_SIZE)
-_slice_lock = threading.Lock()
-_slice_in_flight: dict[tuple, concurrent.futures.Future] = {}
+_slice_memo: Memoizer = Memoizer(_slice_cache)
 
 
 def _disk_cache_path(store_url: str, date: str, variables: list[str]) -> Path | None:
@@ -356,14 +356,11 @@ def evict_product_cache(product: "Product") -> None:
     variables = product.variables
     vars_tuple = tuple(sorted(variables))
 
-    with _slice_lock:
-        keys_to_remove = [
-            k for k in _slice_cache if k[0] == product.source_path and k[2] == vars_tuple
-        ]
-        for k in keys_to_remove:
-            del _slice_cache[k]
-    if keys_to_remove:
-        logger.info("Memory cache evicted %d slice(s) for: %s", len(keys_to_remove), product.id)
+    removed = _slice_memo.evict_matching(
+        lambda k: k[0] == product.source_path and k[2] == vars_tuple
+    )
+    if removed:
+        logger.info("Memory cache evicted %d slice(s) for: %s", removed, product.id)
 
     evict_processed_cache(product)
 
@@ -380,15 +377,10 @@ def get_available_dates(store_url: str) -> list[str]:
     return sorted(index) if index else []
 
 
-# Fix: cache stampede — the old code released _slice_lock immediately after a cache miss, then
-# called .compute() outside the lock. Any request arriving during that S3 download window (up to
-# several seconds) would also see a cache miss and launch its own redundant .compute(), wasting
-# bandwidth and memory for identical data.
-# Resolution: _slice_in_flight tracks an in-progress Future per cache key. The first thread to
-# miss the cache creates the Future and does the .compute(); all other threads that arrive for the
-# same key while it is in flight skip .compute() and block on future.result() instead, receiving
-# the same result when the single download completes. Errors propagate to all waiting threads so a
-# failed request does not permanently block future attempts for the same key.
+# Concurrent identical requests share one S3 .compute() via _slice_memo: the first
+# thread to miss runs the factory, the rest block on its Future. Errors propagate
+# to all waiters and the in-flight entry is cleared, so a failed request never
+# permanently blocks subsequent attempts for the same key.
 def load_slice(store_url: str, date: str, variables: list[str]) -> xr.Dataset:
     """
     Return a fully-computed 2D (lat × lon) slice for the given store, date, and variables.
@@ -397,31 +389,11 @@ def load_slice(store_url: str, date: str, variables: list[str]) -> xr.Dataset:
     """
     cache_key = (store_url, date, tuple(sorted(variables)))
 
-    # Fast path: already cached.
-    should_compute = False
-    with _slice_lock:
-        cached = _slice_cache.get(cache_key)
-        if cached is not None:
-            return cached
-        if cache_key in _slice_in_flight:
-            future = _slice_in_flight[cache_key]
-        else:
-            future: concurrent.futures.Future = concurrent.futures.Future()
-            _slice_in_flight[cache_key] = future
-            should_compute = True
-
-    if not should_compute:
-        return future.result()
-
-    try:
+    def factory() -> xr.Dataset:
         cache_path = _disk_cache_path(store_url, date, list(variables))
         if cache_path is not None and cache_path.exists():
             try:
-                ds = pickle.loads(lz4.frame.decompress(cache_path.read_bytes()))
-                with _slice_lock:
-                    _slice_cache[cache_key] = ds
-                future.set_result(ds)
-                return ds
+                return pickle.loads(lz4.frame.decompress(cache_path.read_bytes()))
             except Exception:
                 logger.warning("Disk cache read failed: %s", cache_path, exc_info=True)
 
@@ -441,18 +413,9 @@ def load_slice(store_url: str, date: str, variables: list[str]) -> xr.Dataset:
                 store_url,
                 matching[0],
             )
-        ds = store[variables].sel(time=pd.Timestamp(matching[0])).compute()
-        with _slice_lock:
-            _slice_cache[cache_key] = ds
-        future.set_result(ds)
-    except KeyError as e:
-        exc = FileNotFoundError(f"No data found for date {date}")
-        future.set_exception(exc)
-        raise exc from e
-    except Exception as e:
-        future.set_exception(e)
-        raise
-    finally:
-        with _slice_lock:
-            _slice_in_flight.pop(cache_key, None)
-    return ds
+        try:
+            return store[variables].sel(time=pd.Timestamp(matching[0])).compute()
+        except KeyError as e:
+            raise FileNotFoundError(f"No data found for date {date}") from e
+
+    return _slice_memo.get_or_compute(cache_key, factory)
