@@ -1,37 +1,22 @@
 import math
 
-from fastapi import APIRouter, HTTPException, Path, Query
+from fastapi import APIRouter, Path, Query
 from fastapi.openapi.models import Example
 from fastapi.responses import JSONResponse
 
 from constants import PRODUCTS
-from services.loader import get_available_dates, load_slice
+from services.loader import get_available_dates
 from services.product_store import list_products
 from utils.dates import three_months_ago
 
-router = APIRouter()
+from .shared import DATE_EX, PRODUCT_EX, get_product_or_404, load_slice_or_404
 
-_PRODUCT_EX: dict[str, Example] = {"default": Example(value="sea_level_anomaly")}
-_DATE_EX: dict[str, Example] = {"default": Example(value="2024-02-24")}
+router = APIRouter()
 
 
 @router.get("/products", summary="List products")
 async def get_products():
     return JSONResponse(content=list_products())
-
-
-def _get_product_or_404(product_id: str):
-    product = PRODUCTS.get(product_id)
-    if product is None:
-        raise HTTPException(status_code=404, detail=f"Unknown product: {product_id}")
-    return product
-
-
-def _load_slice_or_404(store_url: str, date: str, variables: list[str]):
-    try:
-        return load_slice(store_url, date, variables)
-    except FileNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
 
 
 @router.get(
@@ -77,14 +62,14 @@ def get_products_availability(
     description="Returns the value(s) of all product variables at the nearest grid cell to the given lat/lon.",
 )
 def get_point(
-    product_id: str = Path(openapi_examples=_PRODUCT_EX),
-    date: str = Path(pattern=r"^\d{4}-\d{2}-\d{2}$", openapi_examples=_DATE_EX),
+    product_id: str = Path(openapi_examples=PRODUCT_EX),
+    date: str = Path(pattern=r"^\d{4}-\d{2}-\d{2}$", openapi_examples=DATE_EX),
     lat: float = Query(..., openapi_examples={"default": Example(value=-33.8)}),
     lon: float = Query(..., openapi_examples={"default": Example(value=151.2)}),
 ):
-    product = _get_product_or_404(product_id)
+    product = get_product_or_404(product_id)
     variables = product.variables
-    ds = _load_slice_or_404(product.source_path, date, variables)
+    ds = load_slice_or_404(product.source_path, date, variables)
 
     point = ds.sel(lat=lat, lon=lon, method="nearest")
 

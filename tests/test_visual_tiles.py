@@ -34,13 +34,13 @@ def test_tile_multi_variable_product_rejected():
 
 
 def test_tile_missing_date():
-    with patch("routers.products.load_slice", side_effect=FileNotFoundError("No data")):
+    with patch("routers.shared.load_slice", side_effect=FileNotFoundError("No data")):
         response = client.get("/visual_tiles/sea_level_anomaly/9999-01-01/tiles/5/0/0.png")
     assert response.status_code == 404
 
 
 def test_tile_bad_rescale():
-    with patch("routers.products.load_slice", return_value=_make_ds()):
+    with patch("routers.shared.load_slice", return_value=_make_ds()):
         response = client.get(
             "/visual_tiles/sea_level_anomaly/2024-01-01/tiles/5/0/0.png?rescale=bad"
         )
@@ -48,7 +48,7 @@ def test_tile_bad_rescale():
 
 
 def test_tile_unknown_colormap():
-    with patch("routers.products.load_slice", return_value=_make_ds()):
+    with patch("routers.shared.load_slice", return_value=_make_ds()):
         response = client.get(
             "/visual_tiles/sea_level_anomaly/2024-01-01/tiles/5/0/0.png?colormap=not_a_real_colormap"
         )
@@ -57,7 +57,7 @@ def test_tile_unknown_colormap():
 
 def test_tile_ok():
     with (
-        patch("routers.products.load_slice", return_value=_make_ds()),
+        patch("routers.shared.load_slice", return_value=_make_ds()),
         patch("routers.visual_tiles.render_tile", return_value=_PNG),
     ):
         response = client.get("/visual_tiles/sea_level_anomaly/2024-01-01/tiles/5/0/0.png")
@@ -67,7 +67,7 @@ def test_tile_ok():
 
 def test_tile_ok_with_rescale():
     with (
-        patch("routers.products.load_slice", return_value=_make_ds()),
+        patch("routers.shared.load_slice", return_value=_make_ds()),
         patch("routers.visual_tiles.render_tile", return_value=_PNG),
     ):
         response = client.get(
@@ -79,7 +79,7 @@ def test_tile_ok_with_rescale():
 def test_tile_ok_with_custom_colormap():
     custom = [(i, 0, 255 - i, 255) for i in range(256)]
     with (
-        patch("routers.products.load_slice", return_value=_make_ds()),
+        patch("routers.shared.load_slice", return_value=_make_ds()),
         patch("routers.visual_tiles.render_tile", return_value=_PNG),
         patch("services.colormap_store._custom_colormaps", {"test_ramp": custom}),
     ):

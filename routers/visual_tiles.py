@@ -6,8 +6,8 @@ from services.colormap_store import is_categorical, list_colormaps
 from services.visual_renderer import _colormap, render_bbox, render_legend, render_tile
 from utils.memoizer import Memoizer
 
-from .products import _DATE_EX, _PRODUCT_EX, _get_product_or_404, _load_slice_or_404
 from .products import router as products_router
+from .shared import DATE_EX, PRODUCT_EX, get_product_or_404, load_slice_or_404
 
 router = APIRouter()
 router.include_router(products_router)
@@ -96,8 +96,8 @@ def get_legend(
     ),
 )
 def get_tile(
-    product_id: str = Path(openapi_examples=_PRODUCT_EX),
-    date: str = Path(pattern=r"^\d{4}-\d{2}-\d{2}$", openapi_examples=_DATE_EX),
+    product_id: str = Path(openapi_examples=PRODUCT_EX),
+    date: str = Path(pattern=r"^\d{4}-\d{2}-\d{2}$", openapi_examples=DATE_EX),
     z: int = Path(openapi_examples={"default": Example(value=1)}),
     x: int = Path(openapi_examples={"default": Example(value=0)}),
     y: int = Path(openapi_examples={"default": Example(value=0)}),
@@ -116,12 +116,13 @@ def get_tile(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
-    product = _get_product_or_404(product_id)
+    product = get_product_or_404(product_id)
     if isinstance(product.variable, list):
         raise HTTPException(
             status_code=400,
             detail=f"Product '{product_id}' has multiple variables; visual tiles support single-variable products only.",
         )
+    variable: str = product.variable  # narrowed by the isinstance check above
 
     max_index = (1 << z) - 1
     if not (0 <= x <= max_index and 0 <= y <= max_index):
@@ -133,11 +134,11 @@ def get_tile(
     rescale_range = _parse_rescale(rescale)
     _require_rescale_if_categorical(colormap_name, rescale_range)
 
-    key = (product.source_path, date, product.variable, z, x, y, colormap_name, rescale_range)
+    key = (product.source_path, date, variable, z, x, y, colormap_name, rescale_range)
 
     def _do_render() -> bytes:
-        ds = _load_slice_or_404(product.source_path, date, [product.variable])
-        return render_tile(ds, product.variable, x, y, z, colormap_name, rescale_range)
+        ds = load_slice_or_404(product.source_path, date, [variable])
+        return render_tile(ds, variable, x, y, z, colormap_name, rescale_range)
 
     try:
         png = _tile_memo.get_or_compute(key, _do_render)
@@ -157,8 +158,8 @@ def get_tile(
     ),
 )
 def get_bbox(
-    product_id: str = Path(openapi_examples=_PRODUCT_EX),
-    date: str = Path(pattern=r"^\d{4}-\d{2}-\d{2}$", openapi_examples=_DATE_EX),
+    product_id: str = Path(openapi_examples=PRODUCT_EX),
+    date: str = Path(pattern=r"^\d{4}-\d{2}-\d{2}$", openapi_examples=DATE_EX),
     bbox: str = Query(
         "89.0,-60.0,180.0,10.0",
         description="Bounding box as 'minx,miny,maxx,maxy' in the CRS specified by the crs parameter.",
@@ -177,12 +178,13 @@ def get_bbox(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
-    product = _get_product_or_404(product_id)
+    product = get_product_or_404(product_id)
     if isinstance(product.variable, list):
         raise HTTPException(
             status_code=400,
             detail=f"Product '{product_id}' has multiple variables; visual tiles support single-variable products only.",
         )
+    variable: str = product.variable  # narrowed by the isinstance check above
 
     crs = crs.upper()
     if crs not in ("EPSG:4326", "EPSG:3857"):
@@ -199,7 +201,7 @@ def get_bbox(
     key = (
         product.source_path,
         date,
-        product.variable,
+        variable,
         (minx, miny, maxx, maxy),
         width,
         height,
@@ -209,10 +211,10 @@ def get_bbox(
     )
 
     def _do_render() -> bytes:
-        ds = _load_slice_or_404(product.source_path, date, [product.variable])
+        ds = load_slice_or_404(product.source_path, date, [variable])
         return render_bbox(
             ds,
-            product.variable,
+            variable,
             (minx, miny, maxx, maxy),
             width,
             height,
