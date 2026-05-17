@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Security
@@ -6,19 +7,52 @@ from fastapi.responses import JSONResponse
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from constants import CHUNK_PX, PADDING, PRODUCTS
+from constants import CHUNK_PX, PADDING, PRODUCTS, Product
 from services.colormap_store import ColormapMode, register_colormap, remove_colormap
 from services.loader import evict_product_cache, prewarm_disk_slices
 from services.product_store import register_product, remove_product
 from utils.colors import build_categorical_lut, interpolate_colormap, parse_color
 
-_api_key_header = APIKeyHeader(name="X-Admin-Key")
+logger = logging.getLogger(__name__)
+
+# Strong refs to background prewarm tasks. asyncio only holds a weak reference to
+# tasks created via create_task, so a task with no other reference can be
+# garbage-collected mid-run. Keeping it in a module-level set anchors it for the
+# lifetime of the prewarm; the done callback removes it once finished.
+_background_tasks: set[asyncio.Task] = set()
 
 
-def _require_admin_key(key: str = Security(_api_key_header)) -> None:
+def _spawn_prewarm(product: Product) -> None:
+    task = asyncio.create_task(asyncio.to_thread(prewarm_disk_slices, [product]))
+    _background_tasks.add(task)
+
+    def _on_done(t: asyncio.Task) -> None:
+        _background_tasks.discard(t)
+        if t.cancelled():
+            logger.info("Prewarm cancelled for %s", product.id)
+            return
+        exc = t.exception()
+        if exc is not None:
+            logger.exception(
+                "Prewarm failed for %s", product.id, exc_info=(type(exc), exc, exc.__traceback__)
+            )
+
+    task.add_done_callback(_on_done)
+
+
+# auto_error=False so we own the missing-key response. With auto_error=True the
+# framework returns whatever HTTP status it currently uses for a missing key
+# (today 401, historically and upstream 403) — pinning it here keeps the contract
+# stable across FastAPI/Starlette upgrades.
+_api_key_header = APIKeyHeader(name="X-Admin-Key", auto_error=False)
+
+
+def _require_admin_key(key: str | None = Security(_api_key_header)) -> None:
     expected = os.environ.get("ADMIN_API_KEY")
     if not expected:
         raise HTTPException(status_code=500, detail="ADMIN_API_KEY not configured")
+    if key is None:
+        raise HTTPException(status_code=401, detail="Missing X-Admin-Key header")
     if key != expected:
         raise HTTPException(status_code=403, detail="Invalid admin key")
 
@@ -71,7 +105,7 @@ async def add_product(payload: ProductPayload):
         raise HTTPException(status_code=409, detail=str(e)) from e
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to persist product: {e}") from e
-    asyncio.create_task(asyncio.to_thread(prewarm_disk_slices, [product]))
+    _spawn_prewarm(product)
     return JSONResponse(
         status_code=201, content={"id": product.id, "source_path": product.source_path}
     )

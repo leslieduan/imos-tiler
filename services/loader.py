@@ -27,6 +27,13 @@ _store_refreshing: set[str] = set()  # URLs with a background re-open in progres
 _store_lock = threading.Lock()
 _store_in_flight: dict[str, concurrent.futures.Future] = {}
 
+# Per-store map of {local_date: [timestamps]} derived from the time coord.
+# Computing ts_to_local_date for every timestamp is pure-Python and O(N); doing it
+# on every load_slice / get_available_dates call costs milliseconds against stores
+# with thousands of timestamps. Build once per store open, refresh in lock-step
+# with the dataset itself so date lookups stay O(1) on the hot path.
+_date_index: dict[str, dict[str, list]] = {}
+
 # Separate lock for product.lod_grids lazy initialization.
 _lod_grids_lock = threading.Lock()
 
@@ -64,12 +71,32 @@ def _open_store(store_url: str) -> xr.Dataset:
     return ds
 
 
+def _build_date_index(ds: xr.Dataset) -> dict[str, list]:
+    """Return {local_date: [timestamps]} for the dataset's time coord, or {} if missing.
+
+    Computed outside any lock so the hot path doesn't block on the O(N) conversion.
+    """
+    if "time" not in ds.dims:
+        return {}
+    index: dict[str, list] = {}
+    for ts in ds.coords["time"].values:
+        index.setdefault(ts_to_local_date(ts), []).append(ts)
+    return index
+
+
+def _publish_store(store_url: str, ds: xr.Dataset, index: dict[str, list]) -> None:
+    """Atomically replace store, opened-at timestamp, and date index for a URL."""
+    with _store_lock:
+        _stores[store_url] = ds
+        _store_opened_at[store_url] = time.monotonic()
+        _date_index[store_url] = index
+
+
 def _refresh_store_background(store_url: str) -> None:
     try:
         ds = _open_store(store_url)
-        with _store_lock:
-            _stores[store_url] = ds
-            _store_opened_at[store_url] = time.monotonic()
+        index = _build_date_index(ds)
+        _publish_store(store_url, ds, index)
         logger.info("Store refreshed: %s", store_url)
     except Exception:
         logger.exception("Background refresh failed for %s", store_url)
@@ -110,9 +137,8 @@ def _get_store(store_url: str) -> xr.Dataset:
     # First-ever open: block until complete.
     try:
         ds = _open_store(store_url)
-        with _store_lock:
-            _stores[store_url] = ds
-            _store_opened_at[store_url] = time.monotonic()
+        index = _build_date_index(ds)
+        _publish_store(store_url, ds, index)
         future.set_result(ds)
     except Exception as e:
         future.set_exception(e)
@@ -332,10 +358,10 @@ def evict_product_cache(product: "Product") -> None:
 
 
 def get_available_dates(store_url: str) -> list[str]:
-    store = _get_store(store_url)
-    if "time" not in store.dims:
-        return []
-    return [ts_to_local_date(ts) for ts in store.coords["time"].values]
+    _get_store(store_url)  # ensures _date_index[store_url] is populated
+    with _store_lock:
+        index = _date_index.get(store_url)
+    return sorted(index) if index else []
 
 
 # Fix: cache stampede — the old code released _slice_lock immediately after a cache miss, then
@@ -384,7 +410,8 @@ def load_slice(store_url: str, date: str, variables: list[str]) -> xr.Dataset:
                 logger.warning("Disk cache read failed: %s", cache_path, exc_info=True)
 
         store = _get_store(store_url)
-        matching = [ts for ts in store.coords["time"].values if ts_to_local_date(ts) == date]
+        with _store_lock:
+            matching = list(_date_index.get(store_url, {}).get(date, ()))
         if not matching:
             raise FileNotFoundError(
                 f"No data for date {date!r}. Dates must be {LOCAL_TZ.key} local dates "
