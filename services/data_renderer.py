@@ -51,50 +51,52 @@ def _var_range(ds: xr.Dataset, var: str) -> tuple[float, float]:
     return (lo, hi) if hi != lo else (lo, lo + 1.0)
 
 
-def _compute_scalar(product: Product, ds: xr.Dataset, lod: int) -> tuple[np.ndarray, np.ndarray]:
-    grid_cols, grid_rows = product.lod_grids[lod]
-    total_w = grid_cols * product.chunk_px[0]
-    total_h = grid_rows * product.chunk_px[1]
-
-    val_min, val_max = _var_range(ds, product.variable)
-    raw = _resample_to_grid(ds[[product.variable]], total_w, total_h)[
-        product.variable
-    ].values.squeeze()
-    ocean = (~np.isnan(raw)).astype(np.uint8)
-    return _normalize(raw, val_min, val_max, 16777215), ocean
-
-
-def _compute_uv(
+def _compute_processed(
     product: Product, ds: xr.Dataset, lod: int
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    u_var, v_var = product.variable
+) -> tuple[list[np.ndarray], np.ndarray]:
+    """Resample every product variable to the LOD grid and normalise.
+
+    Returns ``(normalised, ocean)`` where:
+      * ``normalised`` is one array per variable in ``product.variables`` order.
+        Scalar products (1 variable) get one ``uint32`` array normalised across
+        24 bits (R/G/B packed in render_tile). Multi-variable products (e.g. UV
+        currents, 2 variables) get one ``uint8`` array per variable, normalised
+        across 8 bits — each variable lives in its own channel.
+      * ``ocean`` is ``uint8`` (0/1), 1 where *every* variable has a valid value.
+        For multi-variable products this prevents one channel encoding a sentinel
+        zero while the mask claims valid data.
+    """
     grid_cols, grid_rows = product.lod_grids[lod]
     total_w = grid_cols * product.chunk_px[0]
     total_h = grid_rows * product.chunk_px[1]
+    variables = product.variables
 
-    u_min, u_max = _var_range(ds, u_var)
-    v_min, v_max = _var_range(ds, v_var)
-    ds_r = _resample_to_grid(ds[[u_var, v_var]], total_w, total_h)
-    u_raw = ds_r[u_var].values.squeeze()
-    v_raw = ds_r[v_var].values.squeeze()
+    ds_r = _resample_to_grid(ds[variables], total_w, total_h)
+    raw = [ds_r[v].values.squeeze() for v in variables]
 
-    ocean = (~(np.isnan(u_raw) | np.isnan(v_raw))).astype(np.uint8)
-    return _normalize(u_raw, u_min, u_max, 255), _normalize(v_raw, v_min, v_max, 255), ocean
+    invalid = np.zeros(raw[0].shape, dtype=bool)
+    for arr in raw:
+        invalid |= np.isnan(arr)
+    ocean = (~invalid).astype(np.uint8)
+
+    # Scalar: pack one value across 3 bytes (R/G/B) for sub-percent precision over the
+    # data range. Multi-variable: one byte per channel — precision drops to ~0.4%, but
+    # the frontend shader needs each channel independently addressable.
+    out_max = 16777215 if len(variables) == 1 else 255
+    normalised = [
+        _normalize(r, *_var_range(ds, v), out_max) for r, v in zip(raw, variables, strict=True)
+    ]
+    return normalised, ocean
 
 
 def _get_processed(
     product: Product, load_ds: Callable[[], xr.Dataset], lod: int, date: str
-) -> tuple:
+) -> tuple[list[np.ndarray], np.ndarray]:
     """load_ds only called once per (product, date) when the processed grid is not cached yet."""
     key = (product.source_path, date, tuple(product.variables), lod)
 
-    def factory() -> tuple:
-        ds = load_ds()
-        return (
-            _compute_uv(product, ds, lod)
-            if isinstance(product.variable, list)
-            else _compute_scalar(product, ds, lod)
-        )
+    def factory() -> tuple[list[np.ndarray], np.ndarray]:
+        return _compute_processed(product, load_ds(), lod)
 
     return _processed_memo.get_or_compute(key, factory)
 
@@ -146,38 +148,36 @@ def _to_png_bytes(img_array: np.ndarray) -> bytes:
 def render_tile(
     product: Product, load_ds: Callable[[], xr.Dataset], lod: int, cx: int, cy: int, date: str
 ) -> bytes:
+    normalised, ocean = _get_processed(product, load_ds, lod, date)
     grid_cols, grid_rows = product.lod_grids[lod]
     total_w = grid_cols * product.chunk_px[0]
     total_h = grid_rows * product.chunk_px[1]
 
-    if isinstance(product.variable, list):
-        u_norm, v_norm, ocean = _get_processed(product, load_ds, lod, date)
-        chunk_u = _extract_chunk(
-            u_norm, cx, cy, total_w, total_h, product.chunk_px, product.padding
-        )
-        chunk_v = _extract_chunk(
-            v_norm, cx, cy, total_w, total_h, product.chunk_px, product.padding
-        )
-        chunk_m = _extract_chunk(ocean, cx, cy, total_w, total_h, product.chunk_px, product.padding)
-        h, w = chunk_u.shape
-        img = np.zeros((h, w, 4), dtype=np.uint8)
-        img[:, :, 0] = chunk_u
-        img[:, :, 1] = chunk_v
-        img[:, :, 2] = chunk_m * 255
-        img[:, :, 3] = 255
-    else:
-        val_24, ocean = _get_processed(product, load_ds, lod, date)
-        chunk_24 = _extract_chunk(
-            val_24, cx, cy, total_w, total_h, product.chunk_px, product.padding
-        )
-        chunk_m = _extract_chunk(ocean, cx, cy, total_w, total_h, product.chunk_px, product.padding)
-        h, w = chunk_24.shape
-        img = np.zeros((h, w, 4), dtype=np.uint8)
-        img[:, :, 0] = (chunk_24 >> 16) & 0xFF
-        img[:, :, 1] = (chunk_24 >> 8) & 0xFF
-        img[:, :, 2] = chunk_24 & 0xFF
+    def chunk_of(arr: np.ndarray) -> np.ndarray:
+        return _extract_chunk(arr, cx, cy, total_w, total_h, product.chunk_px, product.padding)
+
+    chunks = [chunk_of(arr) for arr in normalised]
+    chunk_m = chunk_of(ocean)
+    h, w = chunk_m.shape
+    img = np.zeros((h, w, 4), dtype=np.uint8)
+
+    if len(chunks) == 1:
+        # Scalar: one 24-bit value spread across R/G/B; alpha carries the ocean mask.
+        # Force RGB to 0 for non-ocean pixels so partial PNG decoders still see a clean
+        # transparent boundary even if they ignore alpha.
+        val = chunks[0]
+        img[:, :, 0] = (val >> 16) & 0xFF
+        img[:, :, 1] = (val >> 8) & 0xFF
+        img[:, :, 2] = val & 0xFF
         img[:, :, 3] = chunk_m * 255
         img[chunk_m == 0, :3] = 0
+    else:
+        # Multi-variable (e.g. UV currents): each variable in its own channel,
+        # mask in the next channel, alpha kept opaque so the shader can use B as data.
+        img[:, :, 0] = chunks[0]
+        img[:, :, 1] = chunks[1]
+        img[:, :, 2] = chunk_m * 255
+        img[:, :, 3] = 255
 
     return _to_png_bytes(img)
 
