@@ -2,9 +2,9 @@ import numpy as np
 import pytest
 import xarray as xr
 
-import services.loader as loader_module
 from constants import Product
-from services.loader import _get_store, get_lod_grids
+from services.loader import get_lod_grids
+from services.store_registry import _storage_options, get_store, store_registry
 
 
 def _make_ds(**dims: int) -> xr.Dataset:
@@ -15,26 +15,26 @@ def _make_ds(**dims: int) -> xr.Dataset:
 
 @pytest.fixture(autouse=True)
 def clear_stores():
-    loader_module._stores.clear()
+    store_registry.clear()
     yield
-    loader_module._stores.clear()
+    store_registry.clear()
 
 
 def test_get_store_raises_when_lat_missing(monkeypatch):
     monkeypatch.setattr(xr, "open_zarr", lambda *_, **__: _make_ds(time=2, lon=10))
     with pytest.raises(ValueError, match="missing lat/lon dims"):
-        _get_store("s3://test/no_lat.zarr")
+        get_store("s3://test/no_lat.zarr")
 
 
 def test_get_store_raises_when_lon_missing(monkeypatch):
     monkeypatch.setattr(xr, "open_zarr", lambda *_, **__: _make_ds(time=2, lat=10))
     with pytest.raises(ValueError, match="missing lat/lon dims"):
-        _get_store("s3://test/no_lon.zarr")
+        get_store("s3://test/no_lon.zarr")
 
 
 def test_get_store_normalises_coord_names(monkeypatch):
     monkeypatch.setattr(xr, "open_zarr", lambda *_, **__: _make_ds(TIME=2, LATITUDE=5, LONGITUDE=8))
-    result = _get_store("s3://test/uppercase.zarr")
+    result = get_store("s3://test/uppercase.zarr")
     assert "lat" in result.dims
     assert "lon" in result.dims
     assert "time" in result.dims
@@ -45,7 +45,7 @@ def test_get_store_sortby_time(monkeypatch):
     ds = _make_ds(time=4, lat=5, lon=8)
     ds = ds.assign_coords(time=np.array([4.0, 1.0, 3.0, 2.0]))
     monkeypatch.setattr(xr, "open_zarr", lambda *_, **__: ds)
-    result = _get_store("s3://test/unsorted.zarr")
+    result = get_store("s3://test/unsorted.zarr")
     assert list(result.time.values) == sorted(result.time.values)
 
 
@@ -69,3 +69,19 @@ def test_get_lod_grids_fast_path_skips_store(monkeypatch):
     grids = get_lod_grids(product)
     assert grids == {1: (2, 2)}
     assert not opened
+
+
+def test_storage_options_s3_defaults_anon(monkeypatch):
+    monkeypatch.delenv("S3_ANON", raising=False)
+    assert _storage_options("s3://bucket/path.zarr") == {"anon": True}
+
+
+def test_storage_options_s3_anon_disabled_via_env(monkeypatch):
+    monkeypatch.setenv("S3_ANON", "false")
+    assert _storage_options("s3://bucket/path.zarr") == {"anon": False}
+
+
+def test_storage_options_non_s3_returns_empty():
+    assert _storage_options("https://example.com/data.zarr") == {}
+    assert _storage_options("file:///tmp/data.zarr") == {}
+    assert _storage_options("/tmp/data.zarr") == {}

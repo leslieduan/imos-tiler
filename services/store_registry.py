@@ -1,0 +1,175 @@
+"""Per-URL registry of long-lived xarray.Dataset handles backed by Zarr stores.
+
+Not a cache in the strict sense: handles are not evicted (the URL set is small
+and bounded by registered products), and ``ttl`` triggers a background refresh
+rather than expiry. Stale entries keep serving until the refresh completes, so
+requests never block on freshness — only the very first open per URL blocks.
+
+A per-store ``{local_date: [timestamps]}`` index is built alongside the dataset
+so ``load_slice`` / ``get_available_dates`` can resolve a local date in O(1)
+instead of converting every timestamp on the hot path.
+"""
+
+import concurrent.futures
+import logging
+import os
+import threading
+import time
+
+import xarray as xr
+
+from constants import COORD_NAMES
+from utils.dates import ts_to_local_date
+
+logger = logging.getLogger(__name__)
+
+_STORE_TTL = float(os.environ.get("STORE_TTL_SECONDS", 600))
+
+
+def _storage_options(store_url: str) -> dict:
+    """Storage-backend options for fsspec/zarr, derived from the URL scheme.
+
+    - ``s3://`` defaults to anonymous access (IMOS's AODN buckets are public). Set
+      ``S3_ANON=false`` to let fsspec discover AWS credentials via the standard
+      chain (env vars → ``~/.aws/credentials`` → IAM role) — needed for private
+      buckets.
+    - Other schemes (``file://``, ``https://``, ``gs://``, plain paths …) pass no
+      options; fsspec / its backend picks sensible defaults.
+    """
+    if store_url.startswith("s3://"):
+        anon = os.environ.get("S3_ANON", "true").lower() not in ("false", "0", "no")
+        return {"anon": anon}
+    return {}
+
+
+def _open_store(store_url: str) -> xr.Dataset:
+    ds = xr.open_zarr(store_url, storage_options=_storage_options(store_url))
+    rename = {k: v for k, v in COORD_NAMES.items() if k in ds.dims or k in ds.coords}
+    if rename:
+        ds = ds.rename(rename)
+    if "lat" not in ds.dims or "lon" not in ds.dims:
+        raise ValueError(
+            f"Store {store_url!r} missing lat/lon dims after rename (found: {list(ds.dims)})"
+        )
+    if "time" in ds.dims:
+        ds = ds.sortby("time")
+    return ds
+
+
+def _build_date_index(ds: xr.Dataset) -> dict[str, list]:
+    """Return {local_date: [timestamps]} for the dataset's time coord, or {} if missing."""
+    if "time" not in ds.dims:
+        return {}
+    index: dict[str, list] = {}
+    for ts in ds.coords["time"].values:
+        index.setdefault(ts_to_local_date(ts), []).append(ts)
+    return index
+
+
+class StoreRegistry:
+    """See module docstring for the design.
+
+    Concurrent first-time opens of the *same* URL share one ``xr.open_zarr`` call
+    via a per-URL ``concurrent.futures.Future``; opens of *different* URLs run in
+    parallel (the original implementation serialised them under a single global
+    lock until this pattern was introduced).
+    """
+
+    def __init__(self, ttl: float) -> None:
+        self._ttl = ttl
+        self._stores: dict[str, xr.Dataset] = {}
+        self._opened_at: dict[str, float] = {}
+        self._refreshing: set[str] = set()
+        self._in_flight: dict[str, concurrent.futures.Future] = {}
+        self._date_index: dict[str, dict[str, list]] = {}
+        self._lock = threading.Lock()
+
+    def get(self, store_url: str) -> xr.Dataset:
+        """Return the dataset for ``store_url``, opening it on first request."""
+        should_open = False
+        with self._lock:
+            if store_url in self._stores:
+                if time.monotonic() - self._opened_at[store_url] < self._ttl:
+                    return self._stores[store_url]
+                # TTL expired — return stale store and trigger a background refresh.
+                if store_url not in self._refreshing:
+                    self._refreshing.add(store_url)
+                    threading.Thread(
+                        target=self._refresh_background, args=(store_url,), daemon=True
+                    ).start()
+                return self._stores[store_url]
+            if store_url in self._in_flight:
+                future = self._in_flight[store_url]
+            else:
+                future = concurrent.futures.Future()
+                self._in_flight[store_url] = future
+                should_open = True
+
+        if not should_open:
+            return future.result()
+
+        try:
+            ds = _open_store(store_url)
+            index = _build_date_index(ds)
+            self._publish(store_url, ds, index)
+            future.set_result(ds)
+        except Exception as e:
+            future.set_exception(e)
+            raise
+        finally:
+            with self._lock:
+                self._in_flight.pop(store_url, None)
+        return ds
+
+    def date_index(self, store_url: str) -> dict[str, list]:
+        """Return the {local_date: [timestamps]} map for ``store_url`` (or empty dict)."""
+        with self._lock:
+            return self._date_index.get(store_url, {})
+
+    def prewarm(self, store_urls: list[str]) -> None:
+        """Start an open per URL in a daemon thread.
+
+        Moves the one-time S3 metadata cost from the first user request to server
+        startup, and lets get_products_availability respond fast on first call.
+        """
+        for url in store_urls:
+            threading.Thread(target=self.get, args=(url,), daemon=True).start()
+
+    def clear(self) -> None:
+        """Drop all cached state. Intended for tests."""
+        with self._lock:
+            self._stores.clear()
+            self._opened_at.clear()
+            self._refreshing.clear()
+            self._in_flight.clear()
+            self._date_index.clear()
+
+    def _publish(self, store_url: str, ds: xr.Dataset, index: dict[str, list]) -> None:
+        """Atomically replace store, opened-at timestamp, and date index for a URL."""
+        with self._lock:
+            self._stores[store_url] = ds
+            self._opened_at[store_url] = time.monotonic()
+            self._date_index[store_url] = index
+
+    def _refresh_background(self, store_url: str) -> None:
+        try:
+            ds = _open_store(store_url)
+            index = _build_date_index(ds)
+            self._publish(store_url, ds, index)
+            logger.info("Store refreshed: %s", store_url)
+        except Exception:
+            logger.exception("Background refresh failed for %s", store_url)
+        finally:
+            with self._lock:
+                self._refreshing.discard(store_url)
+
+
+store_registry = StoreRegistry(_STORE_TTL)
+
+
+def get_store(store_url: str) -> xr.Dataset:
+    return store_registry.get(store_url)
+
+
+def prewarm_stores(store_urls: list[str]) -> None:
+    store_registry.prewarm(store_urls)

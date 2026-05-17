@@ -5,11 +5,13 @@ from fastapi.responses import JSONResponse, Response
 from services.data_renderer import render_manifest, render_tile
 from services.loader import get_lod_grids
 
-from .products import _DATE_EX, _PRODUCT_EX, _get_product_or_404, _load_slice_or_404
 from .products import router as products_router
+from .shared import DATE_EX, PRODUCT_EX, get_product_or_404, load_slice_or_404
 
 router = APIRouter()
 router.include_router(products_router)
+
+_TILE_CACHE_HEADERS = {"Cache-Control": f"public, max-age={86400 * 30}"}
 
 
 @router.get(
@@ -22,13 +24,13 @@ router.include_router(products_router)
     ),
 )
 def get_tile(
-    product_id: str = Path(openapi_examples=_PRODUCT_EX),
-    date: str = Path(pattern=r"^\d{4}-\d{2}-\d{2}$", openapi_examples=_DATE_EX),
+    product_id: str = Path(openapi_examples=PRODUCT_EX),
+    date: str = Path(pattern=r"^\d{4}-\d{2}-\d{2}$", openapi_examples=DATE_EX),
     z: int = Path(openapi_examples={"default": Example(value=1)}),
     x: int = Path(openapi_examples={"default": Example(value=0)}),
     y: int = Path(openapi_examples={"default": Example(value=0)}),
 ):
-    product = _get_product_or_404(product_id)
+    product = get_product_or_404(product_id)
     lod_grids = get_lod_grids(product)
 
     if z not in lod_grids:
@@ -43,13 +45,13 @@ def get_tile(
     variables = product.variables
     png_bytes = render_tile(
         product,
-        lambda: _load_slice_or_404(product.source_path, date, variables),
+        lambda: load_slice_or_404(product.source_path, date, variables),
         z,
         x,
         y,
         date,
     )
-    return Response(content=png_bytes, media_type="image/png")
+    return Response(content=png_bytes, media_type="image/png", headers=_TILE_CACHE_HEADERS)
 
 
 @router.get(
@@ -61,11 +63,11 @@ def get_tile(
     ),
 )
 def get_manifest(
-    product_id: str = Path(openapi_examples=_PRODUCT_EX),
-    date: str = Path(pattern=r"^\d{4}-\d{2}-\d{2}$", openapi_examples=_DATE_EX),
+    product_id: str = Path(openapi_examples=PRODUCT_EX),
+    date: str = Path(pattern=r"^\d{4}-\d{2}-\d{2}$", openapi_examples=DATE_EX),
 ):
-    product = _get_product_or_404(product_id)
+    product = get_product_or_404(product_id)
     get_lod_grids(product)
     variables = product.variables
-    ds = _load_slice_or_404(product.source_path, date, variables)
+    ds = load_slice_or_404(product.source_path, date, variables)
     return JSONResponse(content=render_manifest(product, ds))

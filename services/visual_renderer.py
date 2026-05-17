@@ -1,70 +1,45 @@
-import io
-from functools import lru_cache
+"""Web Mercator tile and bbox rendering for the visual_tiles router.
+
+Resamples a 2-D scalar field through rio-tiler's XarrayReader, applies a
+colormap LUT from [[colormap_lookup]], and encodes as PNG or WebP. The
+antimeridian split in `_to_scalar_parts` is the one non-obvious bit — regional
+grids that cross 180° E (e.g. GSLA 57–185°E) are split into two segments so
+each fits inside rio_tiler's strict ±180 bound; the parts are composited as
+numpy arrays before the single image encode.
+"""
 
 import numpy as np
 import xarray as xr
-from PIL import Image, ImageDraw, ImageFont
 from pyproj import Transformer
-from rio_tiler.colormap import cmap as _rio_cmap
+from rio_tiler.colormap import apply_cmap
 from rio_tiler.errors import TileOutsideBounds
 from rio_tiler.io.xarray import XarrayReader
+from rio_tiler.models import ImageData
 from rioxarray.exceptions import NoDataInBounds
 
-from services.colormap_store import get_colormap, is_categorical
+from services.colormap_lookup import resolve_colormap
+from utils.image import ImageFormat, empty_tile, encode_rgba
 
 _mercator_to_wgs84 = Transformer.from_crs("EPSG:3857", "EPSG:4326", always_xy=True)
 
-TILE_SIZE = 256
 
+def _img_to_rgba(img: ImageData, cm: dict[int, tuple[int, int, int, int]]) -> np.ndarray:
+    """Apply colormap + data mask to a rescaled ImageData, returning an (H, W, 4) RGBA array.
 
-@lru_cache(maxsize=64)
-def _colormap(name: str) -> dict[int, tuple[int, int, int, int]]:
-    """Return a rio-tiler colormap dict for the given name.
-
-    Checks custom colormaps first, then rio-tiler's built-ins, then matplotlib
-    so that diverging colormaps like RdBu_r are also available.
+    Mirrors what ImageData.render() does internally but stops before the PNG encode.
+    Used so the antimeridian composite path can merge numpy arrays directly and encode
+    only once at the end — previously each part was encoded to PNG, then re-decoded,
+    composited, and re-encoded.
     """
-    entries = get_colormap(name)
-    if entries is not None:
-        if len(entries) != 256:
-            raise ValueError(
-                f"Custom colormap {name!r} must have exactly 256 entries, got {len(entries)}"
-            )
-        return {i: entries[i] for i in range(256)}
-    try:
-        return _rio_cmap.get(name)
-    except Exception:
-        pass
-    import matplotlib
-
-    try:
-        cm = matplotlib.colormaps[name]
-    except KeyError as exc:
-        raise ValueError(f"Unknown colormap: {name!r}") from exc
-    rgba = (cm(np.linspace(0, 1, 256)) * 255).astype(np.uint8)
-    return {
-        i: (int(rgba[i, 0]), int(rgba[i, 1]), int(rgba[i, 2]), int(rgba[i, 3])) for i in range(256)
-    }
-
-
-def empty_png() -> bytes:
-    """Fully transparent 256×256 PNG — returned for tiles outside the data extent."""
-    buf = io.BytesIO()
-    Image.fromarray(np.zeros((TILE_SIZE, TILE_SIZE, 4), dtype=np.uint8), "RGBA").save(
-        buf, format="PNG", optimize=False
-    )
-    return buf.getvalue()
-
-
-def _composite_png(base: bytes, overlay: bytes) -> bytes:
-    """Merge two same-size RGBA PNGs: non-transparent overlay pixels replace base pixels."""
-    base_arr = np.array(Image.open(io.BytesIO(base)).convert("RGBA"))
-    over_arr = np.array(Image.open(io.BytesIO(overlay)).convert("RGBA"))
-    mask = over_arr[..., 3] > 0
-    base_arr[mask] = over_arr[mask]
-    buf = io.BytesIO()
-    Image.fromarray(base_arr, "RGBA").save(buf, format="PNG", optimize=False)
-    return buf.getvalue()
+    rgb, cmap_alpha = apply_cmap(img.data, cm)  # rgb: (3, H, W), cmap_alpha: (H, W)
+    rgba = np.empty((rgb.shape[1], rgb.shape[2], 4), dtype=np.uint8)
+    rgba[..., 0] = rgb[0]
+    rgba[..., 1] = rgb[1]
+    rgba[..., 2] = rgb[2]
+    # Combine the colormap's own alpha (e.g. transparent categories) with the
+    # ImageData mask (which marks NaN / out-of-extent pixels). Both are uint8 0/255.
+    rgba[..., 3] = np.minimum(cmap_alpha, img.mask.astype(np.uint8))
+    return rgba
 
 
 def _apply_crs(da: xr.DataArray) -> xr.DataArray:
@@ -142,19 +117,20 @@ def render_tile(
     z: int,
     colormap_name: str = "viridis",
     rescale: tuple[float, float] | None = None,
+    fmt: ImageFormat = "png",
 ) -> bytes:
-    """Return a 256×256 Web Mercator PNG tile.
+    """Return a 256×256 Web Mercator tile encoded as ``fmt``.
 
     Returns a fully transparent tile for tiles outside the data extent.
     """
     parts = _to_scalar_parts(ds, variable)
     vrange = _rescale_range(parts, rescale)
     if vrange is None:
-        return empty_png()
+        return empty_tile(fmt)
     vmin, vmax = vrange
     span = vmax - vmin or 1.0
-    cm = _colormap(colormap_name)
-    result: bytes | None = None
+    cm = resolve_colormap(colormap_name)
+    result: np.ndarray | None = None
 
     for da in parts:
         try:
@@ -163,10 +139,14 @@ def render_tile(
         except TileOutsideBounds:
             continue
         img.rescale(in_range=[(vmin, vmin + span)])
-        rendered = img.render(img_format="PNG", colormap=cm)
-        result = rendered if result is None else _composite_png(result, rendered)
+        rgba = _img_to_rgba(img, cm)
+        if result is None:
+            result = rgba
+        else:
+            mask = rgba[..., 3] > 0
+            result[mask] = rgba[mask]
 
-    return result or empty_png()
+    return encode_rgba(result, fmt) if result is not None else empty_tile(fmt)
 
 
 def render_bbox(
@@ -178,8 +158,9 @@ def render_bbox(
     colormap_name: str = "viridis",
     rescale: tuple[float, float] | None = None,
     crs: str = "EPSG:4326",
+    fmt: ImageFormat = "png",
 ) -> bytes:
-    """Return a PNG image for an arbitrary bbox.
+    """Return an image for an arbitrary bbox encoded as ``fmt``.
 
     bbox must be (minx, miny, maxx, maxy) in the given crs ('EPSG:4326' degrees or 'EPSG:3857' meters).
     Returns a fully transparent tile when the bbox does not intersect the data.
@@ -187,10 +168,10 @@ def render_bbox(
     parts = _to_scalar_parts(ds, variable)
     vrange = _rescale_range(parts, rescale)
     if vrange is None:
-        return empty_png()
+        return empty_tile(fmt)
     vmin, vmax = vrange
     span = vmax - vmin or 1.0
-    cm = _colormap(colormap_name)
+    cm = resolve_colormap(colormap_name)
 
     minx, miny, maxx, maxy = bbox
     if crs == "EPSG:3857":
@@ -199,7 +180,7 @@ def render_bbox(
     else:
         lon_min, lat_min, lon_max, lat_max = minx, miny, maxx, maxy
 
-    result: bytes | None = None
+    result: np.ndarray | None = None
 
     for da in parts:
         try:
@@ -213,125 +194,11 @@ def render_bbox(
         except (TileOutsideBounds, NoDataInBounds):
             continue
         img.rescale(in_range=[(vmin, vmin + span)])
-        rendered = img.render(img_format="PNG", colormap=cm)
-        result = rendered if result is None else _composite_png(result, rendered)
+        rgba = _img_to_rgba(img, cm)
+        if result is None:
+            result = rgba
+        else:
+            mask = rgba[..., 3] > 0
+            result[mask] = rgba[mask]
 
-    return result or empty_png()
-
-
-def render_legend(
-    colormap_name: str,
-    rescale: tuple[float, float] | None = None,
-    width: int = 256,
-    height: int = 40,
-    orientation: str = "horizontal",
-) -> bytes:
-    """Render a linear color legend PNG for the given colormap.
-
-    The color bar fills the image. If rescale=(lo, hi) is provided, tick labels
-    at lo, midpoint, and hi are drawn alongside the bar.
-
-    For categorical colormaps the bar shows discrete equal-width color blocks
-    (one per registered category) rather than a smooth gradient.
-    """
-    cm = _colormap(colormap_name)
-    categorical = is_categorical(colormap_name)
-    lut = np.array([cm[i] for i in range(256)], dtype=np.uint8)
-    has_labels = rescale is not None
-    LABEL_PX = 20  # pixels reserved alongside the bar for tick labels
-
-    if orientation == "horizontal":
-        bar_h = max(1, height - LABEL_PX) if has_labels else height
-        bar_w = width
-        bar = _build_colorbar(lut, categorical, bar_w, bar_h, vertical=False)
-        canvas = np.zeros((height, width, 4), dtype=np.uint8)
-        canvas[:bar_h, :] = bar
-        if has_labels:
-            canvas[bar_h:, :] = [255, 255, 255, 255]
-        img = Image.fromarray(canvas, "RGBA")
-        if has_labels:
-            _draw_h_labels(img, rescale, bar_h, width)  # type: ignore[arg-type]
-    else:
-        bar_w = max(1, width - LABEL_PX) if has_labels else width
-        bar_h = height
-        bar = _build_colorbar(lut, categorical, bar_w, bar_h, vertical=True)
-        canvas = np.zeros((height, width, 4), dtype=np.uint8)
-        canvas[:, :bar_w] = bar
-        if has_labels:
-            canvas[:, bar_w:] = [255, 255, 255, 255]
-        img = Image.fromarray(canvas, "RGBA")
-        if has_labels:
-            _draw_v_labels(img, rescale, bar_w, height)  # type: ignore[arg-type]
-
-    buf = io.BytesIO()
-    img.save(buf, format="PNG", optimize=False)
-    return buf.getvalue()
-
-
-def _build_colorbar(
-    lut: np.ndarray,
-    categorical: bool,
-    bar_w: int,
-    bar_h: int,
-    vertical: bool,
-) -> np.ndarray:
-    """Return a (bar_h, bar_w, 4) uint8 color bar array."""
-    bar = np.zeros((bar_h, bar_w, 4), dtype=np.uint8)
-    if categorical:
-        active = [lut[i] for i in range(256) if lut[i, 3] > 0]
-        n = len(active)
-        if n:
-            dim = bar_h if vertical else bar_w
-            for idx, color in enumerate(active):
-                d0 = idx * dim // n
-                d1 = (idx + 1) * dim // n if idx < n - 1 else dim
-                if vertical:
-                    bar[d0:d1, :] = color
-                else:
-                    bar[:, d0:d1] = color
-    elif vertical:
-        indices = np.round(np.linspace(255, 0, bar_h)).astype(int)
-        bar[:] = lut[indices][:, np.newaxis, :]
-    else:
-        indices = np.round(np.linspace(0, 255, bar_w)).astype(int)
-        bar[:] = lut[indices][np.newaxis, :, :]
-    return bar
-
-
-def _draw_h_labels(
-    img: Image.Image,
-    rescale: tuple[float, float],
-    bar_h: int,
-    width: int,
-) -> None:
-    draw = ImageDraw.Draw(img)
-    font = ImageFont.load_default(size=11)
-    lo, hi = rescale
-    ticks = [(lo, 0), ((lo + hi) / 2, width // 2), (hi, width - 1)]
-    for val, x in ticks:
-        draw.line([(x, bar_h), (x, bar_h + 3)], fill=(80, 80, 80, 255))
-        label = f"{val:.4g}"
-        bbox = font.getbbox(label)
-        lw = bbox[2] - bbox[0]
-        tx = max(0, min(x - lw // 2, width - lw))
-        draw.text((tx, bar_h + 4), label, fill=(0, 0, 0, 255), font=font)
-
-
-def _draw_v_labels(
-    img: Image.Image,
-    rescale: tuple[float, float],
-    bar_w: int,
-    height: int,
-) -> None:
-    draw = ImageDraw.Draw(img)
-    font = ImageFont.load_default(size=11)
-    lo, hi = rescale
-    # vertical: top = hi, bottom = lo
-    ticks = [(hi, 0), ((lo + hi) / 2, height // 2), (lo, height - 1)]
-    for val, y in ticks:
-        draw.line([(bar_w, y), (bar_w + 3, y)], fill=(80, 80, 80, 255))
-        label = f"{val:.4g}"
-        bbox = font.getbbox(label)
-        lh = bbox[3] - bbox[1]
-        ty = max(0, min(y - lh // 2, height - lh))
-        draw.text((bar_w + 4, ty), label, fill=(0, 0, 0, 255), font=font)
+    return encode_rgba(result, fmt) if result is not None else empty_tile(fmt)

@@ -14,6 +14,10 @@ services:
       - COLORMAPS_CONFIG_PATH=data/colormaps.json
       - TILE_TIMEZONE=${TILE_TIMEZONE:-Australia/Sydney}
       - STORE_TTL_SECONDS=${STORE_TTL_SECONDS:-600}
+      # S3_ANON=true (default) uses anonymous access for s3:// URLs — correct for IMOS's
+      # public AODN buckets. Set false to let fsspec discover AWS credentials for private
+      # buckets via env vars, ~/.aws/credentials, or IAM role.
+      - S3_ANON=${S3_ANON:-true}
       - THREAD_POOL_SIZE=${THREAD_POOL_SIZE:-100}
       - SLICE_CACHE_SIZE=${SLICE_CACHE_SIZE:-10}
       - PROCESSED_CACHE_SIZE=${PROCESSED_CACHE_SIZE:-50}

@@ -10,15 +10,22 @@ _config_path = Path(PRODUCTS_CONFIG_PATH)
 
 
 def load_products() -> None:
-    """Read products.json from disk into PRODUCTS. Called once on startup."""
+    """Read products.json from disk into PRODUCTS. Called on startup and after admin mutations.
+
+    Updates PRODUCTS in place without ever exposing an empty state to concurrent readers:
+    additions/updates are applied first, then removals. A reader that races a reload sees
+    either the previous set, the new set, or a transient with stale entries still
+    present — never an empty dict. This avoids 404s on /manifest during admin reloads.
+    """
     if not _config_path.exists():
         logger.info("No products.json found — starting with empty product list")
         return
     entries: list[dict] = json.loads(_config_path.read_text())
-    PRODUCTS.clear()
-    for entry in entries:
-        product = _from_dict(entry)
-        PRODUCTS[product.id] = product
+    new = {entry["id"]: _from_dict(entry) for entry in entries}
+    for product_id, product in new.items():
+        PRODUCTS[product_id] = product
+    for stale_id in [k for k in PRODUCTS if k not in new]:
+        del PRODUCTS[stale_id]
     logger.info("Loaded %d product(s) from %s", len(PRODUCTS), _config_path)
 
 
