@@ -18,30 +18,9 @@ from utils.memoizer import Memoizer
 
 logger = logging.getLogger(__name__)
 
-# Dataset stores opened once per URL and reused across requests.
-# After STORE_TTL_SECONDS the stale store is served immediately while a background thread
-# re-opens it — requests never block waiting for a refresh, only for the initial open.
 _STORE_TTL = float(os.environ.get("STORE_TTL_SECONDS", 600))
-_stores: dict[str, xr.Dataset] = {}
-_store_opened_at: dict[str, float] = {}
-_store_refreshing: set[str] = set()  # URLs with a background re-open in progress
-_store_lock = threading.Lock()
-_store_in_flight: dict[str, concurrent.futures.Future] = {}
-
-# Per-store map of {local_date: [timestamps]} derived from the time coord.
-# Computing ts_to_local_date for every timestamp is pure-Python and O(N); doing it
-# on every load_slice / get_available_dates call costs milliseconds against stores
-# with thousands of timestamps. Build once per store open, refresh in lock-step
-# with the dataset itself so date lookups stay O(1) on the hot path.
-_date_index: dict[str, dict[str, list]] = {}
-
-# Separate lock for product.lod_grids lazy initialization.
-_lod_grids_lock = threading.Lock()
-
 _SLICE_CACHE_SIZE = int(os.environ.get("SLICE_CACHE_SIZE", 10))
 _CACHE_DAYS = int(os.environ.get("CACHE_DAYS", 30))
-_slice_cache: LRUCache = LRUCache(maxsize=_SLICE_CACHE_SIZE)
-_slice_memo: Memoizer = Memoizer(_slice_cache)
 
 
 def _disk_cache_path(store_url: str, date: str, variables: list[str]) -> Path | None:
@@ -72,10 +51,7 @@ def _open_store(store_url: str) -> xr.Dataset:
 
 
 def _build_date_index(ds: xr.Dataset) -> dict[str, list]:
-    """Return {local_date: [timestamps]} for the dataset's time coord, or {} if missing.
-
-    Computed outside any lock so the hot path doesn't block on the O(N) conversion.
-    """
+    """Return {local_date: [timestamps]} for the dataset's time coord, or {} if missing."""
     if "time" not in ds.dims:
         return {}
     index: dict[str, list] = {}
@@ -84,76 +60,129 @@ def _build_date_index(ds: xr.Dataset) -> dict[str, list]:
     return index
 
 
-def _publish_store(store_url: str, ds: xr.Dataset, index: dict[str, list]) -> None:
-    """Atomically replace store, opened-at timestamp, and date index for a URL."""
-    with _store_lock:
-        _stores[store_url] = ds
-        _store_opened_at[store_url] = time.monotonic()
-        _date_index[store_url] = index
+class StoreRegistry:
+    """Per-URL registry of long-lived Zarr dataset handles with stale-while-revalidate.
+
+    Not a cache in the strict sense: handles are not evicted (the URL set is small
+    and bounded by registered products), and ``ttl`` triggers a background refresh
+    rather than expiry. Stale entries keep serving until the refresh completes, so
+    requests never block on freshness — only the very first open per URL blocks.
+
+    Concurrent first-time opens of the *same* URL share one ``xr.open_zarr`` call
+    via a per-URL ``concurrent.futures.Future``; opens of *different* URLs run in
+    parallel (the original implementation serialised them under a single global
+    lock until this pattern was introduced).
+
+    A per-store ``{local_date: [timestamps]}`` index is built alongside the dataset
+    so ``load_slice`` / ``get_available_dates`` can resolve a local date in O(1)
+    instead of converting every timestamp on the hot path.
+    """
+
+    def __init__(self, ttl: float) -> None:
+        self._ttl = ttl
+        self._stores: dict[str, xr.Dataset] = {}
+        self._opened_at: dict[str, float] = {}
+        self._refreshing: set[str] = set()
+        self._in_flight: dict[str, concurrent.futures.Future] = {}
+        self._date_index: dict[str, dict[str, list]] = {}
+        self._lock = threading.Lock()
+
+    def get(self, store_url: str) -> xr.Dataset:
+        """Return the dataset for ``store_url``, opening it on first request."""
+        should_open = False
+        with self._lock:
+            if store_url in self._stores:
+                if time.monotonic() - self._opened_at[store_url] < self._ttl:
+                    return self._stores[store_url]
+                # TTL expired — return stale store and trigger a background refresh.
+                if store_url not in self._refreshing:
+                    self._refreshing.add(store_url)
+                    threading.Thread(
+                        target=self._refresh_background, args=(store_url,), daemon=True
+                    ).start()
+                return self._stores[store_url]
+            if store_url in self._in_flight:
+                future = self._in_flight[store_url]
+            else:
+                future = concurrent.futures.Future()
+                self._in_flight[store_url] = future
+                should_open = True
+
+        if not should_open:
+            return future.result()
+
+        try:
+            ds = _open_store(store_url)
+            index = _build_date_index(ds)
+            self._publish(store_url, ds, index)
+            future.set_result(ds)
+        except Exception as e:
+            future.set_exception(e)
+            raise
+        finally:
+            with self._lock:
+                self._in_flight.pop(store_url, None)
+        return ds
+
+    def date_index(self, store_url: str) -> dict[str, list]:
+        """Return the {local_date: [timestamps]} map for ``store_url`` (or empty dict)."""
+        with self._lock:
+            return self._date_index.get(store_url, {})
+
+    def prewarm(self, store_urls: list[str]) -> None:
+        """Start an open per URL in a daemon thread.
+
+        Moves the one-time S3 metadata cost from the first user request to server
+        startup, and lets get_products_availability respond fast on first call.
+        """
+        for url in store_urls:
+            threading.Thread(target=self.get, args=(url,), daemon=True).start()
+
+    def clear(self) -> None:
+        """Drop all cached state. Intended for tests."""
+        with self._lock:
+            self._stores.clear()
+            self._opened_at.clear()
+            self._refreshing.clear()
+            self._in_flight.clear()
+            self._date_index.clear()
+
+    def _publish(self, store_url: str, ds: xr.Dataset, index: dict[str, list]) -> None:
+        """Atomically replace store, opened-at timestamp, and date index for a URL."""
+        with self._lock:
+            self._stores[store_url] = ds
+            self._opened_at[store_url] = time.monotonic()
+            self._date_index[store_url] = index
+
+    def _refresh_background(self, store_url: str) -> None:
+        try:
+            ds = _open_store(store_url)
+            index = _build_date_index(ds)
+            self._publish(store_url, ds, index)
+            logger.info("Store refreshed: %s", store_url)
+        except Exception:
+            logger.exception("Background refresh failed for %s", store_url)
+        finally:
+            with self._lock:
+                self._refreshing.discard(store_url)
 
 
-def _refresh_store_background(store_url: str) -> None:
-    try:
-        ds = _open_store(store_url)
-        index = _build_date_index(ds)
-        _publish_store(store_url, ds, index)
-        logger.info("Store refreshed: %s", store_url)
-    except Exception:
-        logger.exception("Background refresh failed for %s", store_url)
-    finally:
-        with _store_lock:
-            _store_refreshing.discard(store_url)
+_store_registry = StoreRegistry(_STORE_TTL)
 
 
-# Fix: serialised store opens under _store_lock meant two requests for *different* store URLs
-# arriving before either had finished opening would block each other unnecessarily — the second
-# request had to wait for the first store's full xr.open_zarr() even though they were unrelated.
-# Resolution: replace the single global lock with a per-URL Future in _store_in_flight. The first
-# thread to request a URL creates the Future and does the open; any other thread requesting the
-# same URL concurrently waits on that same Future instead of blocking all other URLs too.
 def _get_store(store_url: str) -> xr.Dataset:
-    should_open = False
-    with _store_lock:
-        if store_url in _stores:
-            if time.monotonic() - _store_opened_at[store_url] < _STORE_TTL:
-                return _stores[store_url]
-            # TTL expired — return stale store and trigger a background refresh.
-            if store_url not in _store_refreshing:
-                _store_refreshing.add(store_url)
-                threading.Thread(
-                    target=_refresh_store_background, args=(store_url,), daemon=True
-                ).start()
-            return _stores[store_url]
-        if store_url in _store_in_flight:
-            future = _store_in_flight[store_url]
-        else:
-            future: concurrent.futures.Future = concurrent.futures.Future()
-            _store_in_flight[store_url] = future
-            should_open = True
-
-    if not should_open:
-        return future.result()
-
-    # First-ever open: block until complete.
-    try:
-        ds = _open_store(store_url)
-        index = _build_date_index(ds)
-        _publish_store(store_url, ds, index)
-        future.set_result(ds)
-    except Exception as e:
-        future.set_exception(e)
-        raise
-    finally:
-        with _store_lock:
-            _store_in_flight.pop(store_url, None)
-    return ds
+    return _store_registry.get(store_url)
 
 
 def prewarm_stores(store_urls: list[str]) -> None:
-    """Moves the one-time S3 metadata cost from the first user request to server startup,
-    where it's invisible. Also enables get_products_availability to respond fast on first call."""
-    for url in store_urls:
-        threading.Thread(target=_get_store, args=(url,), daemon=True).start()
+    _store_registry.prewarm(store_urls)
+
+
+# Separate lock for product.lod_grids lazy initialization (unrelated to store state).
+_lod_grids_lock = threading.Lock()
+
+_slice_cache: LRUCache = LRUCache(maxsize=_SLICE_CACHE_SIZE)
+_slice_memo: Memoizer = Memoizer(_slice_cache)
 
 
 def get_lod_grids(product: Product) -> dict[int, tuple[int, int]]:
@@ -371,9 +400,8 @@ def evict_product_cache(product: "Product") -> None:
 
 
 def get_available_dates(store_url: str) -> list[str]:
-    _get_store(store_url)  # ensures _date_index[store_url] is populated
-    with _store_lock:
-        index = _date_index.get(store_url)
+    _get_store(store_url)  # ensures the date index for this URL is populated
+    index = _store_registry.date_index(store_url)
     return sorted(index) if index else []
 
 
@@ -398,8 +426,7 @@ def load_slice(store_url: str, date: str, variables: list[str]) -> xr.Dataset:
                 logger.warning("Disk cache read failed: %s", cache_path, exc_info=True)
 
         store = _get_store(store_url)
-        with _store_lock:
-            matching = list(_date_index.get(store_url, {}).get(date, ()))
+        matching = list(_store_registry.date_index(store_url).get(date, ()))
         if not matching:
             raise FileNotFoundError(
                 f"No data for date {date!r}. Dates must be {LOCAL_TZ.key} local dates "

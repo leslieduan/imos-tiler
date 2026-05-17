@@ -15,11 +15,9 @@ def _make_ds(**dims: int) -> xr.Dataset:
 
 @pytest.fixture(autouse=True)
 def clear_stores():
-    loader_module._stores.clear()
-    loader_module._date_index.clear()
+    loader_module._store_registry.clear()
     yield
-    loader_module._stores.clear()
-    loader_module._date_index.clear()
+    loader_module._store_registry.clear()
 
 
 def test_get_store_raises_when_lat_missing(monkeypatch):
