@@ -81,7 +81,7 @@ def test_tile_ok_with_custom_colormap():
     with (
         patch("routers.shared.load_slice", return_value=_make_ds()),
         patch("routers.visual_tiles.render_tile", return_value=_PNG),
-        patch("services.colormap_store._custom_colormaps", {"test_ramp": custom}),
+        patch("services.colormap_config._custom_colormaps", {"test_ramp": custom}),
     ):
         response = client.get(
             "/visual_tiles/sea_level_anomaly/2024-01-01/tiles/5/0/0.png?colormap=test_ramp"

@@ -2,16 +2,15 @@ import logging
 import math
 import os
 from collections.abc import Callable
-from io import BytesIO
 
 import numpy as np
 import xarray as xr
 from cachetools import LRUCache
-from PIL import Image
 
 from constants import LOD, Product
 from utils.geo import dataset_bounds, json_safe_float
 from utils.memoizer import Memoizer
+from utils.png import encode_rgba
 
 logger = logging.getLogger(__name__)
 
@@ -138,13 +137,6 @@ def _extract_chunk(
     return chunk
 
 
-def _to_png_bytes(img_array: np.ndarray) -> bytes:
-    buf = BytesIO()
-    # optimize=False: RGBA bytes must be written exactly as-is for shader decoding
-    Image.fromarray(img_array, "RGBA").save(buf, format="PNG", optimize=False)
-    return buf.getvalue()
-
-
 def render_tile(
     product: Product, load_ds: Callable[[], xr.Dataset], lod: int, cx: int, cy: int, date: str
 ) -> bytes:
@@ -179,7 +171,7 @@ def render_tile(
         img[:, :, 2] = chunk_m * 255
         img[:, :, 3] = 255
 
-    return _to_png_bytes(img)
+    return encode_rgba(img)
 
 
 def render_manifest(product: Product, ds: xr.Dataset) -> dict:

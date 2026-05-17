@@ -15,14 +15,14 @@ from constants import PRODUCTS, Product
 from routers.admin import admin_router
 from routers.data_tiles import router as data_tiles_router
 from routers.visual_tiles import router as visual_tiles_router
-from services.colormap_store import load_colormaps
-from services.loader import (
+from services.colormap_config import load_colormaps
+from services.disk_cache import (
     evict_stale_and_orphans,
     prewarm_disk_slices,
-    prewarm_stores,
     refresh_disk_cache,
 )
-from services.product_store import load_products
+from services.product_config import load_products
+from services.store_registry import prewarm_stores
 
 logger = logging.getLogger(__name__)
 

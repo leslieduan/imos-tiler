@@ -2,8 +2,10 @@ from fastapi import APIRouter, HTTPException, Path, Query
 from fastapi.openapi.models import Example
 from fastapi.responses import JSONResponse, Response
 
-from services.colormap_store import is_categorical, list_colormaps
-from services.visual_renderer import _colormap, render_bbox, render_legend, render_tile
+from services.colormap_config import is_categorical, list_colormaps
+from services.colormap_lookup import resolve_colormap
+from services.legend_renderer import render_legend
+from services.visual_renderer import render_bbox, render_tile
 from utils.memoizer import Memoizer
 
 from .products import router as products_router
@@ -77,7 +79,7 @@ def get_legend(
     ),
 ):
     try:
-        _colormap(name)
+        resolve_colormap(name)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
 
@@ -112,7 +114,7 @@ def get_tile(
     ),
 ):
     try:
-        _colormap(colormap_name)
+        resolve_colormap(colormap_name)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
@@ -174,7 +176,7 @@ def get_bbox(
     ),
 ):
     try:
-        _colormap(colormap_name)
+        resolve_colormap(colormap_name)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 

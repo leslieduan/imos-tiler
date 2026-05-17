@@ -87,33 +87,33 @@ Zarr eliminates this: metadata is one `.zmetadata` HTTP request, and variable ch
                    ▼                                       ▼
 ┌────────────────────────────────────┐  ┌────────────────────────────────────┐
 │          Tile Routers              │  │             /admin                 │
-│  /data_tiles  ·  /visual_tiles     │  │           admin.py                 │
-│       products.py  (shared)        │  │          X-Admin-Key               │
-│  /products · /manifest · /point    │  │                                    │
+│  /data_tiles  ·  /visual_tiles     │  │  routers/admin/{auth,products,     │
+│       products.py  (shared)        │  │              colormaps}.py         │
+│  /products · /manifest · /point    │  │          X-Admin-Key               │
 └──────────────────┬─────────────────┘  └────────────────────────────────────┘
                    │
                    ├───────────────────────────────────────┐
                    │                                       │
                    ▼                                       ▼
 ┌────────────────────────────────────┐  ┌────────────────────────────────────┐
-│        data_renderer.py            │  │       visual_renderer.py           │
-│   EPSG:4326 (Plate Carrée)         │  │   EPSG:4326 → EPSG:3857            │
-│   L1 Processed grid cache          │  │   XarrayReader  (rio-tiler)        │
-│   PNG encode for WebGL shader      │  │   Colormap LUT + PNG encode        │
+│        data_renderer.py            │  │  visual_renderer.py                │
+│   EPSG:4326 (Plate Carrée)         │  │  + colormap_lookup.py              │
+│   L1 Processed grid cache          │  │  + legend_renderer.py              │
+│   PNG encode for WebGL shader      │  │  EPSG:4326 → EPSG:3857 + LUT       │
 └──────────────────┬─────────────────┘  └──────────────────┬─────────────────┘
                    │ L1 miss                               │ every request
                    └──────────────────┬────────────────────┘
                                       ▼
 ┌────────────────────────────────────────────────────────────────────────────┐
-│                              loader.py                                     │
-│   Store singleton                   L2 Slice cache (in-memory LRU)         │
-│   (stale-while-revalidate)          keyed (url, date, vars)                │
+│            loader.py  +  store_registry.py                                 │
+│   StoreRegistry (stale-while-revalidate)    L2 Slice cache (in-memory LRU) │
+│   load_slice / get_available_dates          keyed (url, date, vars)        │
 └────────────────────────────────────────────────────────────────────────────┘
                                       │ L2 miss
                                       ▼
 ┌────────────────────────────────────────────────────────────────────────────┐
 │                           L3  Disk cache                                   │
-│                   .pkl.lz4 per date  ·  DISK_CACHE_PATH                    │
+│       disk_cache.py  ·  .pkl.lz4 per date  ·  DISK_CACHE_PATH              │
 └────────────────────────────────────────────────────────────────────────────┘
                                       │ L3 miss
                                       ▼
@@ -169,19 +169,30 @@ titiler-project/
     security.md                  ← admin endpoint protection (key + nginx + EC2 security group)
   routers/
     data_tiles.py                ← /data_tiles — raw value-encoded RGBA tiles for WebGL
-    visual_tiles.py              ← /visual_tiles — colourised Web Mercator XYZ tiles + bbox
+    visual_tiles.py              ← /visual_tiles — colourised Web Mercator XYZ tiles + bbox + colormap listing/legend
     products.py                  ← shared: /products, /manifest, /{id}/{date}/point — included by both tile routers
-    admin.py                     ← /admin — product and colormap management (key-protected)
+    shared.py                    ← shared router helpers (PRODUCT_EX/DATE_EX examples, get_product_or_404, load_slice_or_404)
+    admin/                       ← /admin — product and colormap management (key-protected, package)
+      __init__.py                ← assembles admin_router and applies require_admin_key
+      auth.py                    ← X-Admin-Key dependency
+      products.py                ← POST/DELETE /admin/products
+      colormaps.py               ← POST/DELETE /admin/colormaps
   services/
-    loader.py                    ← Zarr store singleton + L2 slice cache + L3 disk cache + LOD grid lazy init
+    store_registry.py            ← Zarr store singleton (stale-while-revalidate) + per-URL date index
+    disk_cache.py                ← L3 disk cache lifecycle: path, read/write, prewarm, refresh, eviction
+    loader.py                    ← load_slice (L2 LRU) + get_available_dates + get_lod_grids + evict_product_cache
     data_renderer.py             ← processed grid cache + chunk extract + PNG encode (data tiles)
-    visual_renderer.py           ← Web Mercator render + bbox render + colormap lookup + legend (visual tiles)
-    product_store.py             ← products.json read/write + in-memory PRODUCTS dict management
-    colormap_store.py            ← colormaps.json read/write + in-memory colormap registry + ColormapMode type
+    visual_renderer.py           ← Web Mercator tile/bbox render (visual tiles)
+    colormap_lookup.py           ← resolve_colormap()/colormap_lut() — custom→rio-tiler→matplotlib fallback chain
+    legend_renderer.py           ← render_legend() — color bar + tick labels
+    colormap_config.py           ← colormaps.json read/write + in-memory colormap registry + ColormapMode type + invalidation hooks
+    product_config.py            ← products.json read/write + in-memory PRODUCTS dict management
   utils/
     dates.py                     ← LOCAL_TZ + ts_to_local_date + three_months_ago
     geo.py                       ← dataset_bounds + json_safe_float
     colors.py                    ← hex parsing + ramp/categorical LUT builders
+    memoizer.py                  ← shared dedup+cache helper used by load_slice, processed cache, visual-tile dedup
+    png.py                       ← encode_rgba() + EMPTY_RGBA_TILE — shared PNG encoder for both renderers
 ```
 
 `products.json` and `colormaps.json` default to the project root in local dev. In Docker (`docker-compose.yml`), they are overridden to `data/products.json` and `data/colormaps.json`, backed by a `./data` host volume. The L3 disk-cache directory is set via `DISK_CACHE_PATH` (default: unset in local dev; `/app/slice_cache` in Docker, backed by a `./slice_cache` host volume).
@@ -467,7 +478,7 @@ An unrecognised name returns `400 Bad Request`.
 }
 ```
 
-**Custom colormaps.** Registered via `POST /admin/colormaps` and persisted in `colormaps.json`. Loaded on startup by `load_colormaps()` in `services/colormap_store.py` and take effect immediately without a server restart. All colormap state lives in `colormap_store.py` — no other module holds it directly.
+**Custom colormaps.** Registered via `POST /admin/colormaps` and persisted in `colormaps.json`. Loaded on startup by `load_colormaps()` in `services/colormap_config.py` and take effect immediately without a server restart. All colormap state lives in `colormap_config.py` — no other module holds it directly. Runtime lookup (custom → rio-tiler → matplotlib fallback) is implemented in a separate module, `services/colormap_lookup.py`, which subscribes to `colormap_config`'s invalidation hooks to clear its LRU caches whenever the registry changes.
 
 All colormaps are stored internally as **256-entry RGBA LUTs** (one tuple per normalised byte value, where 0 = data minimum and 255 = data maximum after `rescale`). The `POST /admin/colormaps` payload normalises the input to this format at registration time.
 
@@ -514,7 +525,7 @@ Practical rules:
 - Name categorical colormaps after the dataset or variable they describe (e.g. `land_cover_classes`, `ocean_current_flag`) to make the coupling explicit.
 - Ramp colormaps are dataset-agnostic; categorical colormaps are not.
 
-**Cache behaviour.** `_colormap()` in `services/visual_renderer.py` is `@lru_cache`-d (max 64 entries). The cache is cleared automatically whenever a colormap is added or deleted via the admin API — `colormap_store._reload()` calls `_colormap.cache_clear()` after every write.
+**Cache behaviour.** `resolve_colormap()` in `services/colormap_lookup.py` is `@lru_cache`-d (max 64 entries); its companion `colormap_lut()` (max 128 entries) caches the numpy LUT used by the legend renderer. The caches are cleared automatically whenever a colormap is added or deleted via the admin API — `colormap_config._reload()` invokes the registered invalidation hooks, which include `resolve_colormap.cache_clear()`, `colormap_lut.cache_clear()`, and `render_legend.cache_clear()`.
 
 ---
 
@@ -568,7 +579,7 @@ The current API is day-granularity only. If a store has sub-daily resolution, mu
 
 ### 9.5 Coordinate name normalisation
 
-On store open, `_open_store` in `services/loader.py` applies `COORD_NAMES = {"TIME": "time", "LATITUDE": "lat", "LONGITUDE": "lon"}` to rename any uppercase coordinate names to lowercase. This happens once per store URL and is cached on the singleton. All downstream code (renderer, manifest, point endpoint) can assume `lat`/`lon`/`time` regardless of what the store uses natively.
+On store open, `_open_store` in `services/store_registry.py` applies `COORD_NAMES = {"TIME": "time", "LATITUDE": "lat", "LONGITUDE": "lon"}` to rename any uppercase coordinate names to lowercase. This happens once per store URL and is cached on the singleton. All downstream code (renderer, manifest, point endpoint) can assume `lat`/`lon`/`time` regardless of what the store uses natively.
 
 If `lat`/`lon` are still missing after renaming, `_open_store` raises `ValueError` with a clear message rather than failing deeper in the pipeline.
 
@@ -582,7 +593,7 @@ Three-tier cache stack ordered tiles → S3: **L1 (in-memory processed grid, LRU
 
 > Full design rationale (why disk over Redis / EFS / Fargate ephemeral): [`docs/cache_analysis.md`](cache_analysis.md).
 
-### 10.1 Store singleton (`services/loader.py`, `_stores`)
+### 10.1 Store singleton (`services/store_registry.py`, `StoreRegistry`)
 
 Caches the open Zarr store handle (lazy, metadata only). Shared across all products that point at the same store URL.
 
@@ -590,10 +601,12 @@ Uses a **stale-while-revalidate** strategy to pick up newly appended time steps 
 
 - **Startup** — `prewarm_stores` opens every registered store in background daemon threads so the cache is warm before the first request arrives.
 - **Within TTL** — the cached store is returned immediately (sub-millisecond).
-- **After TTL** (`STORE_TTL_SECONDS`, default `600`) — the stale store is returned immediately for the current request, and a single background daemon thread calls `_refresh_store_background` to re-open it. `_store_refreshing` prevents duplicate refresh threads for the same URL.
-- **First-ever open** — the request blocks until `xr.open_zarr` completes; concurrent requests for the same URL wait on the same `concurrent.futures.Future` rather than each opening independently. The Future is keyed per-URL in `_store_in_flight`, so opens of _different_ URLs proceed in parallel.
+- **After TTL** (`STORE_TTL_SECONDS`, default `600`) — the stale store is returned immediately for the current request, and a single background daemon thread calls `StoreRegistry._refresh_background` to re-open it. The `StoreRegistry._refreshing` set prevents duplicate refresh threads for the same URL.
+- **First-ever open** — the request blocks until `xr.open_zarr` completes; concurrent requests for the same URL wait on the same `concurrent.futures.Future` rather than each opening independently. The Future is keyed per-URL in `StoreRegistry._in_flight`, so opens of _different_ URLs proceed in parallel.
 
 Re-opening is cheap — `xr.open_zarr` reads only metadata and coordinate arrays (`time`, `lat`, `lon`), no data chunks. In-flight `load_slice` calls hold a direct Python reference to the old dataset object and complete normally. `_slice_cache` and `_processed_cache` entries for existing dates remain valid and unaffected.
+
+Alongside the dataset, the registry builds a per-URL `{local_date: [timestamps]}` index (`_build_date_index`) so `load_slice` / `get_available_dates` can resolve a local date in O(1) instead of converting every timestamp on the hot path.
 
 ### 10.2 L1 — Processed grid cache (`services/data_renderer.py`, `_processed_cache`)
 
@@ -646,18 +659,19 @@ Enabled by setting `DISK_CACHE_PATH` (e.g. `/app/slice_cache`). If unset, disk c
 
 - _Stale dates_ — `evict_stale_and_orphans` (and the refresh cycle) deletes `.pkl.lz4` files whose dates are no longer in the `CACHE_DAYS` window for any registered product.
 - _Orphan product directories_ — `evict_stale_and_orphans` removes any sub-directory under `DISK_CACHE_PATH` whose name does not correspond to a currently-registered product. This is what makes runtime product deletion safe: leftover disk slices from removed products are cleaned up automatically on the next refresh (and at startup).
-- _Disk pressure_ — `_evict_disk_if_needed` (run at the start of each refresh cycle) removes files when total usage exceeds `DISK_EVICTION_THRESHOLD × DISK_CACHE_LIMIT_GB`. Files are sorted `(size ascending, date ascending)` — small + old files are evicted first, keeping the large satellite slices that would be most expensive to re-fetch.
+- _Disk pressure_ — `_evict_if_over_threshold` in `services/disk_cache.py` (run at the start of each refresh cycle) removes files when total usage exceeds `DISK_EVICTION_THRESHOLD × DISK_CACHE_LIMIT_GB`. Files are sorted `(size ascending, date ascending)` — small + old files are evicted first, keeping the large satellite slices that would be most expensive to re-fetch.
 - _Explicit product deletion_ — `evict_product_cache` (called by `DELETE /admin/products/{id}`) removes the product's disk directory via `shutil.rmtree` and purges matching entries from the L2 in-memory cache immediately.
 
 Disk eviction never invalidates L2 in-memory entries — the in-memory data is still valid and serves requests until it falls out of the LRU naturally.
 
 ### 10.5 Stampede protection
 
-All three layers use `concurrent.futures.Future` to deduplicate concurrent misses on the same key:
+All three layers use `concurrent.futures.Future` to deduplicate concurrent misses on the same key. The slice and processed-grid layers use the shared `Memoizer` helper (`utils/memoizer.py`), which packages the "check cache → create Future → wait → publish → cleanup" pattern in one place. The store layer keeps its own per-URL Future map inside `StoreRegistry` because it layers TTL + stale-while-revalidate on top of dedup, which the generic helper deliberately does not model.
 
-- `_store_in_flight` — store opens.
-- `_slice_in_flight` — slice loads (`load_slice`).
-- `_processed_inflight` — processed grid computation (`_get_processed`).
+- `StoreRegistry._in_flight` — store opens.
+- `_slice_memo` (Memoizer over `_slice_cache`) — slice loads (`load_slice`).
+- `_processed_memo` (Memoizer over `_processed_cache`) — processed grid computation (`_get_processed`).
+- `_tile_memo` / `_bbox_memo` (Memoizers with `cache=None`) — dedup-only protection in front of the visual-tile renderer.
 
 The first thread to miss the cache creates the Future and does the work; all other threads arriving for the same key block on `future.result()` and receive the same result when the single computation completes. Errors propagate to all waiting threads so a failed request does not permanently block future attempts for the same key. See [`docs/concurrency.md`](concurrency.md) for capacity implications.
 
@@ -705,7 +719,7 @@ Wraps `_startup_cache_sync(products)`, which does two sequential phases off the 
 
    This ensures the disk cache reflects the current product/date state from the moment the server starts serving, not just after the first refresh cycle.
 
-2. **`prewarm_disk_slices(products)`** — for each `(product, date)` pair in the last `CACHE_DAYS` dates, calls `load_slice`. Disk-cached pairs return instantly; missing ones are fetched from S3 and written to disk. Parallelised across `PREWARM_WORKERS` workers (default `4`) using a `ThreadPoolExecutor`. The pool's `__exit__` calls `shutdown(wait=True)` so the function returns only after every job has finished.
+2. **`prewarm_disk_slices(products)`** — for each `(product, date)` pair in the last `CACHE_DAYS` dates, calls `load_slice`. Disk-cached pairs return instantly; missing ones are fetched from S3 and written to disk. Parallelised across `PREWARM_WORKERS` workers (default `8`) using a `ThreadPoolExecutor`. The pool's `__exit__` calls `shutdown(wait=True)` so the function returns only after every job has finished.
 
 If eviction fails for any reason it is logged and prewarm proceeds anyway — partial cache is better than no cache.
 
@@ -744,7 +758,7 @@ Default interval is `CACHE_REFRESH_INTERVAL_SECONDS = 14400` (4 hours). In stead
 | Trigger                     | Action                                                                                       | Mechanism                                                                |
 | --------------------------- | -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
 | `prewarm_stores` at startup | Open each unique Zarr store URL (metadata only) so first requests don't pay the cost         | One `threading.Thread(daemon=True)` per URL                              |
-| Store TTL expiry            | Re-open Zarr store in the background to pick up new timestamps; stale store served meanwhile | `_refresh_store_background` via `threading.Thread`                       |
+| Store TTL expiry            | Re-open Zarr store in the background to pick up new timestamps; stale store served meanwhile | `StoreRegistry._refresh_background` via `threading.Thread`               |
 | `POST /admin/products`      | Prewarm the disk cache for the newly registered product                                      | `asyncio.create_task(asyncio.to_thread(prewarm_disk_slices, [product]))` |
 | `DELETE /admin/products`    | Evict the product's in-memory L1/L2 entries and remove its disk directory                    | Synchronous on the request thread (fast — file delete + dict pop)        |
 
@@ -795,7 +809,7 @@ The pool has `THREAD_POOL_SIZE` slots (default 100). Each in-flight sync request
 - **I/O releases the GIL** — `xarray`'s S3 fetch is mostly `urllib3`/`botocore` socket I/O. While one thread waits on S3, others can run.
 - **numpy/PIL release the GIL during their C-level work** — resampling, normalisation, and PNG encoding all benefit from real parallelism.
 
-Stampede protection (`_slice_in_flight`, `_processed_inflight`, `_store_in_flight`) means that if 10 requests arrive for the same cold key, only 1 thread does the work; the other 9 hold their slots blocked on the Future. This caps peak unique work and peak RAM, but the held slots do count toward `THREAD_POOL_SIZE`. See [`docs/concurrency.md`](concurrency.md) for the full capacity analysis.
+Stampede protection (`_slice_memo`, `_processed_memo`, `StoreRegistry._in_flight`) means that if 10 requests arrive for the same cold key, only 1 thread does the work; the other 9 hold their slots blocked on the Future. This caps peak unique work and peak RAM, but the held slots do count toward `THREAD_POOL_SIZE`. See [`docs/concurrency.md`](concurrency.md) for the full capacity analysis.
 
 ### 12.3 Background tasks run on the event loop and offload work via `asyncio.to_thread`
 
@@ -837,7 +851,7 @@ This is why a 60-second prewarm at startup does not delay the first request by 6
 
 ## 13. Adding a new product
 
-`products.json` is the single source of truth for the product list. The server reads it once on startup (`load_products()` in `services/product_store.py`) and exposes a runtime admin API that reads and writes the same file. Two equivalent flows:
+`products.json` is the single source of truth for the product list. The server reads it once on startup (`load_products()` in `services/product_config.py`) and exposes a runtime admin API that reads and writes the same file. Two equivalent flows:
 
 | Flow                            | When to use                                                                       | Effect                                                                                                                |
 | ------------------------------- | --------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
@@ -862,7 +876,7 @@ EOF
 docker-compose up --build
 ```
 
-The schema mirrors the admin-API payload (`ProductPayload` in `routers/admin.py`). `chunk_px` and `padding` are optional — omit them to inherit `CHUNK_PX = (240, 192)` and `PADDING = 1` from `constants.py`.
+The schema mirrors the admin-API payload (`ProductPayload` in `routers/admin/products.py`). `chunk_px` and `padding` are optional — omit them to inherit `CHUNK_PX = (240, 192)` and `PADDING = 1` from `constants.py`.
 
 ### 13.2 Admin-API flow
 
@@ -987,10 +1001,10 @@ Memory cost of these recommendations: ~2.7 GB and ~3.9 GB steady respectively, b
 | Add a satellite-class product and raise `SLICE_CACHE_SIZE +1` | + ~61 MB L2, + ~58 MB L1 (one full row of LODs).                                                                                        |
 | Raise `SLICE_CACHE_SIZE` by N (satellite worst case)          | + `N × 61 MB` L2, + `N × ~58 MB` L1.                                                                                                    |
 | Raise `THREAD_POOL_SIZE`                                      | No direct steady RAM growth (~1 MB stack/thread). Higher _unique_ concurrent cold misses can spike transient RAM by `(N_cold) × 61 MB`. |
-| Raise `PREWARM_WORKERS`                                       | Startup-only spike of `PREWARM_WORKERS × 61 MB`. Default 4 ≈ 250 MB.                                                                    |
+| Raise `PREWARM_WORKERS`                                       | Startup-only spike of `PREWARM_WORKERS × 61 MB`. Default 8 ≈ 500 MB.                                                                    |
 | Raise `CACHE_DAYS` (e.g. 30 → 90)                             | **No effect on RAM** — only affects disk. L2/L1 sizes are bounded by their LRU sizes regardless of how many dates are on disk.          |
 
-Stampede protection (`_slice_in_flight`, `_processed_inflight`) means transient RAM scales with **unique cold keys in flight**, not `THREAD_POOL_SIZE`. But under truly mixed cold traffic (different `(product, date)` pairs from many users at once), the cap is `min(THREAD_POOL_SIZE, distinct_keys) × 61 MB`. With `THREAD_POOL_SIZE = 100` and a perfect-storm spread across many products and dates, that ceiling is **~6 GB** — short-lived but real. Provision RAM accordingly or lower `THREAD_POOL_SIZE`.
+Stampede protection (`_slice_memo`, `_processed_memo`) means transient RAM scales with **unique cold keys in flight**, not `THREAD_POOL_SIZE`. But under truly mixed cold traffic (different `(product, date)` pairs from many users at once), the cap is `min(THREAD_POOL_SIZE, distinct_keys) × 61 MB`. With `THREAD_POOL_SIZE = 100` and a perfect-storm spread across many products and dates, that ceiling is **~6 GB** — short-lived but real. Provision RAM accordingly or lower `THREAD_POOL_SIZE`.
 
 ### 14.5 Thread pool vs cache sizing
 
@@ -1101,15 +1115,15 @@ Long-term ceiling for a single node. At this scale, **horizontal scale-out usual
 
 #### Prewarm time at startup
 
-Cold startup `prewarm_disk_slices` grows linearly with `N_satellite × CACHE_DAYS`. At `PREWARM_WORKERS = 4` and ~3–4 s per satellite slice (S3 fetch + decompress + pickle + lz4 + write):
+Cold startup `prewarm_disk_slices` grows linearly with `N_satellite × CACHE_DAYS`. At the default `PREWARM_WORKERS = 8` and ~3–4 s per satellite slice (S3 fetch + decompress + pickle + lz4 + write):
 
 | Scenario          |  30 days |  60 days |  90 days |
 | ----------------- | -------: | -------: | -------: |
-| A (4 satellite)   |   ~2 min |   ~4 min |   ~6 min |
-| B (14 satellite)  |   ~7 min |  ~14 min |  ~20 min |
-| C (40 satellite)  |  ~20 min |  ~40 min |  ~60 min |
+| A (4 satellite)   |   ~1 min |   ~2 min |   ~3 min |
+| B (14 satellite)  |   ~3 min |   ~7 min |  ~10 min |
+| C (40 satellite)  |  ~10 min |  ~20 min |  ~30 min |
 
-Raise `PREWARM_WORKERS` to 8 to roughly halve startup time at the cost of ~500 MB additional transient RAM during startup. On warm restart (disk already populated), prewarm completes in seconds regardless of scenario — it just verifies files exist.
+Raise `PREWARM_WORKERS` further (e.g. 12–16) to halve startup again at the cost of more transient RAM and S3 bandwidth contention. On warm restart (disk already populated), prewarm completes in seconds regardless of scenario — it just verifies files exist.
 
 > Full capacity-per-request-type tables (hot / disk-warm / cold throughput per request) are in [`docs/concurrency.md`](concurrency.md).
 
@@ -1163,7 +1177,7 @@ A wrong-layer choice has real costs: making `max_lods` an env var would let an o
 | `DISK_CACHE_LIMIT_GB`            | `20`      | Maximum total disk usage before pressure-based eviction runs.                             |
 | `DISK_EVICTION_THRESHOLD`        | `0.85`    | Fraction of limit at which pressure eviction triggers (0.0–1.0).                          |
 | `CACHE_DAYS`                     | `30`      | How many recent dates per product to keep on disk; dates outside this window are evicted. |
-| `PREWARM_WORKERS`                | `4`       | Thread-pool size used during the startup disk prewarm.                                    |
+| `PREWARM_WORKERS`                | `8`       | Thread-pool size used during the startup disk prewarm (and the per-product prewarm fired by `POST /admin/products`). |
 | `CACHE_REFRESH_INTERVAL_SECONDS` | `14400`   | Period (seconds) between background refresh cycles. Default 4 hours.                      |
 
 See `docker-compose.yml` for the production wiring of these variables, and [`docs/security.md`](security.md) for how `ADMIN_API_KEY` interacts with nginx and the EC2 security group.

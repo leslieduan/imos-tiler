@@ -6,7 +6,7 @@ from fastapi.responses import JSONResponse
 
 from constants import PRODUCTS
 from services.loader import get_available_dates
-from services.product_store import list_products
+from services.product_config import list_products
 from utils.dates import three_months_ago
 
 from .shared import DATE_EX, PRODUCT_EX, get_product_or_404, load_slice_or_404

@@ -1,209 +1,45 @@
-import concurrent.futures
+"""In-memory slice loading and cross-cutting product cache eviction.
+
+Three responsibilities:
+  * ``load_slice`` — return a fully-computed 2-D slice for a (store, date,
+    variables) tuple. Cached in an LRU (L2); checks the L3 disk cache before
+    falling through to S3. Concurrent identical requests share one compute via
+    the slice Memoizer.
+  * ``get_available_dates`` / ``get_lod_grids`` — small store-aware accessors
+    used by routers; both touch the store registry on first call.
+  * ``evict_product_cache`` — fan-out eviction across every layer (L2 slices,
+    L1 processed grids, L3 disk dir) when a product is deregistered.
+
+Long-lived store handles and disk-cache lifecycle live in their own modules
+([[store_registry]], [[disk_cache]]).
+"""
+
 import logging
 import os
-import pickle
-import shutil
 import threading
-import time
-from pathlib import Path
 
-import lz4.frame
 import pandas as pd
 import xarray as xr
 from cachetools import LRUCache
 
-from constants import COORD_NAMES, Product
-from utils.dates import LOCAL_TZ, ts_to_local_date
+from constants import Product
+from services.disk_cache import (
+    disk_cache_path,
+    evict_product_dir,
+    read_slice_from_disk,
+)
+from services.store_registry import get_store, store_registry
+from utils.dates import LOCAL_TZ
 from utils.memoizer import Memoizer
 
 logger = logging.getLogger(__name__)
 
-_STORE_TTL = float(os.environ.get("STORE_TTL_SECONDS", 600))
 _SLICE_CACHE_SIZE = int(os.environ.get("SLICE_CACHE_SIZE", 10))
-_CACHE_DAYS = int(os.environ.get("CACHE_DAYS", 30))
-
-
-def _disk_cache_path(store_url: str, date: str, variables: list[str]) -> Path | None:
-    base = os.environ.get("DISK_CACHE_PATH")
-    if not base:
-        return None
-    # Encode the full URL into a single directory name so two stores with the same
-    # basename from different buckets (e.g. s3://a/sla.zarr and s3://b/sla.zarr) do
-    # not collide. '%' is disallowed in S3 bucket names and effectively never used
-    # in S3 object keys, so the substitution is bijective in practice.
-    store_name = store_url.rstrip("/").replace("/", "%")
-    var_str = ",".join(sorted(variables))
-    return Path(base) / f"{store_name}-{var_str}" / f"{date}.pkl.lz4"
-
-
-def _storage_options(store_url: str) -> dict:
-    """Storage-backend options for fsspec/zarr, derived from the URL scheme.
-
-    - ``s3://`` defaults to anonymous access (IMOS's AODN buckets are public). Set
-      ``S3_ANON=false`` to let fsspec discover AWS credentials via the standard
-      chain (env vars → ``~/.aws/credentials`` → IAM role) — needed for private
-      buckets.
-    - Other schemes (``file://``, ``https://``, ``gs://``, plain paths …) pass no
-      options; fsspec / its backend picks sensible defaults.
-
-    Previously hardcoded to ``{"anon": True}``, which locked the server to public
-    S3. Per-product credential overrides could be added later via the Product
-    config; for now this env-var toggle covers the three common cases (public S3,
-    private S3, non-S3).
-    """
-    if store_url.startswith("s3://"):
-        anon = os.environ.get("S3_ANON", "true").lower() not in ("false", "0", "no")
-        return {"anon": anon}
-    return {}
-
-
-def _open_store(store_url: str) -> xr.Dataset:
-    ds = xr.open_zarr(store_url, storage_options=_storage_options(store_url))
-    rename = {k: v for k, v in COORD_NAMES.items() if k in ds.dims or k in ds.coords}
-    if rename:
-        ds = ds.rename(rename)
-    if "lat" not in ds.dims or "lon" not in ds.dims:
-        raise ValueError(
-            f"Store {store_url!r} missing lat/lon dims after rename (found: {list(ds.dims)})"
-        )
-    if "time" in ds.dims:
-        ds = ds.sortby("time")
-    return ds
-
-
-def _build_date_index(ds: xr.Dataset) -> dict[str, list]:
-    """Return {local_date: [timestamps]} for the dataset's time coord, or {} if missing."""
-    if "time" not in ds.dims:
-        return {}
-    index: dict[str, list] = {}
-    for ts in ds.coords["time"].values:
-        index.setdefault(ts_to_local_date(ts), []).append(ts)
-    return index
-
-
-class StoreRegistry:
-    """Per-URL registry of long-lived Zarr dataset handles with stale-while-revalidate.
-
-    Not a cache in the strict sense: handles are not evicted (the URL set is small
-    and bounded by registered products), and ``ttl`` triggers a background refresh
-    rather than expiry. Stale entries keep serving until the refresh completes, so
-    requests never block on freshness — only the very first open per URL blocks.
-
-    Concurrent first-time opens of the *same* URL share one ``xr.open_zarr`` call
-    via a per-URL ``concurrent.futures.Future``; opens of *different* URLs run in
-    parallel (the original implementation serialised them under a single global
-    lock until this pattern was introduced).
-
-    A per-store ``{local_date: [timestamps]}`` index is built alongside the dataset
-    so ``load_slice`` / ``get_available_dates`` can resolve a local date in O(1)
-    instead of converting every timestamp on the hot path.
-    """
-
-    def __init__(self, ttl: float) -> None:
-        self._ttl = ttl
-        self._stores: dict[str, xr.Dataset] = {}
-        self._opened_at: dict[str, float] = {}
-        self._refreshing: set[str] = set()
-        self._in_flight: dict[str, concurrent.futures.Future] = {}
-        self._date_index: dict[str, dict[str, list]] = {}
-        self._lock = threading.Lock()
-
-    def get(self, store_url: str) -> xr.Dataset:
-        """Return the dataset for ``store_url``, opening it on first request."""
-        should_open = False
-        with self._lock:
-            if store_url in self._stores:
-                if time.monotonic() - self._opened_at[store_url] < self._ttl:
-                    return self._stores[store_url]
-                # TTL expired — return stale store and trigger a background refresh.
-                if store_url not in self._refreshing:
-                    self._refreshing.add(store_url)
-                    threading.Thread(
-                        target=self._refresh_background, args=(store_url,), daemon=True
-                    ).start()
-                return self._stores[store_url]
-            if store_url in self._in_flight:
-                future = self._in_flight[store_url]
-            else:
-                future = concurrent.futures.Future()
-                self._in_flight[store_url] = future
-                should_open = True
-
-        if not should_open:
-            return future.result()
-
-        try:
-            ds = _open_store(store_url)
-            index = _build_date_index(ds)
-            self._publish(store_url, ds, index)
-            future.set_result(ds)
-        except Exception as e:
-            future.set_exception(e)
-            raise
-        finally:
-            with self._lock:
-                self._in_flight.pop(store_url, None)
-        return ds
-
-    def date_index(self, store_url: str) -> dict[str, list]:
-        """Return the {local_date: [timestamps]} map for ``store_url`` (or empty dict)."""
-        with self._lock:
-            return self._date_index.get(store_url, {})
-
-    def prewarm(self, store_urls: list[str]) -> None:
-        """Start an open per URL in a daemon thread.
-
-        Moves the one-time S3 metadata cost from the first user request to server
-        startup, and lets get_products_availability respond fast on first call.
-        """
-        for url in store_urls:
-            threading.Thread(target=self.get, args=(url,), daemon=True).start()
-
-    def clear(self) -> None:
-        """Drop all cached state. Intended for tests."""
-        with self._lock:
-            self._stores.clear()
-            self._opened_at.clear()
-            self._refreshing.clear()
-            self._in_flight.clear()
-            self._date_index.clear()
-
-    def _publish(self, store_url: str, ds: xr.Dataset, index: dict[str, list]) -> None:
-        """Atomically replace store, opened-at timestamp, and date index for a URL."""
-        with self._lock:
-            self._stores[store_url] = ds
-            self._opened_at[store_url] = time.monotonic()
-            self._date_index[store_url] = index
-
-    def _refresh_background(self, store_url: str) -> None:
-        try:
-            ds = _open_store(store_url)
-            index = _build_date_index(ds)
-            self._publish(store_url, ds, index)
-            logger.info("Store refreshed: %s", store_url)
-        except Exception:
-            logger.exception("Background refresh failed for %s", store_url)
-        finally:
-            with self._lock:
-                self._refreshing.discard(store_url)
-
-
-_store_registry = StoreRegistry(_STORE_TTL)
-
-
-def _get_store(store_url: str) -> xr.Dataset:
-    return _store_registry.get(store_url)
-
-
-def prewarm_stores(store_urls: list[str]) -> None:
-    _store_registry.prewarm(store_urls)
-
+_slice_cache: LRUCache = LRUCache(maxsize=_SLICE_CACHE_SIZE)
+_slice_memo: Memoizer = Memoizer(_slice_cache)
 
 # Separate lock for product.lod_grids lazy initialization (unrelated to store state).
 _lod_grids_lock = threading.Lock()
-
-_slice_cache: LRUCache = LRUCache(maxsize=_SLICE_CACHE_SIZE)
-_slice_memo: Memoizer = Memoizer(_slice_cache)
 
 
 def get_lod_grids(product: Product) -> dict[int, tuple[int, int]]:
@@ -219,7 +55,7 @@ def get_lod_grids(product: Product) -> dict[int, tuple[int, int]]:
         if product.lod_grids:
             return product.lod_grids
 
-        store = _get_store(product.source_path)
+        store = get_store(product.source_path)
         data_height = store.sizes["lat"]
         data_width = store.sizes["lon"]
         product.apply_computed_lod_grids(data_width, data_height)
@@ -227,202 +63,9 @@ def get_lod_grids(product: Product) -> dict[int, tuple[int, int]]:
     return product.lod_grids
 
 
-# Serialises disk-pressure evictions. Without this, concurrent prewarm workers
-# could each scan the cache, decide to evict the same files, and either race on
-# unlink or over-evict. Holding the lock around scan+evict keeps the decision
-# consistent and bounds the eviction pass to one thread at a time.
-_evict_lock = threading.Lock()
-
-
-def _evict_disk_if_needed() -> None:
-    base = os.environ.get("DISK_CACHE_PATH")
-    if not base:
-        return
-    limit_bytes = int(os.environ.get("DISK_CACHE_LIMIT_GB", 20)) * 1024**3
-    threshold = int(limit_bytes * float(os.environ.get("DISK_EVICTION_THRESHOLD", 0.85)))
-
-    with _evict_lock:
-        all_files = list(Path(base).rglob("*.pkl.lz4"))
-        if not all_files:
-            return
-        total = sum(f.stat().st_size for f in all_files)
-        if total <= threshold:
-            return
-
-        # Sort: smallest file first, oldest date first within same size.
-        # Small-grid products are cheap to re-fetch from S3; evict them before large ones.
-        entries = sorted(all_files, key=lambda f: (f.stat().st_size, f.name.split(".")[0]))
-
-        for f in entries:
-            if total <= threshold:
-                break
-            size = f.stat().st_size
-            f.unlink(missing_ok=True)
-            total -= size
-            logger.info("Disk evicted (pressure): %s (%d KB)", f, size // 1024)
-
-
-def _write_slice_to_disk(cache_path: Path, ds: xr.Dataset) -> None:
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    cache_path.write_bytes(lz4.frame.compress(pickle.dumps(ds)))
-
-
-def _prewarm_one(product: Product, date: str, variables: list[str]) -> None:
-    try:
-        cache_path = _disk_cache_path(product.source_path, date, variables)
-        if cache_path is not None and cache_path.exists():
-            return
-        ds = load_slice(product.source_path, date, variables)
-        if cache_path is not None:
-            _write_slice_to_disk(cache_path, ds)
-            logger.info("Disk prewarm written (S3): %s / %s", product.id, date)
-    except FileNotFoundError:
-        pass  # date in time index but nearest match is a different local day — not cacheable
-    except Exception:
-        logger.warning("Disk prewarm failed: %s / %s", product.id, date, exc_info=True)
-
-
-def prewarm_disk_slices(products: list[Product]) -> None:
-    """Populate L2 from disk on startup; write to disk for any dates not yet cached.
-
-    Parallelises across (product, date) pairs — PREWARM_WORKERS controls concurrency
-    (default 4). Cold S3 reads for different keys run concurrently; _slice_in_flight
-    deduplicates any accidental overlap on the same key.
-    """
-    if not os.environ.get("DISK_CACHE_PATH"):
-        return
-
-    jobs: list[tuple[Product, str, list[str]]] = []
-    for product in products:
-        variables = product.variables
-        try:
-            dates = get_available_dates(product.source_path)[-_CACHE_DAYS:]
-        except Exception:
-            logger.warning("Prewarm: could not get dates for %s", product.id, exc_info=True)
-            continue
-        jobs.extend((product, date, variables) for date in dates)
-
-    max_workers = int(os.environ.get("PREWARM_WORKERS", 4))
-    with concurrent.futures.ThreadPoolExecutor(
-        max_workers=max_workers, thread_name_prefix="prewarm"
-    ) as pool:
-        for p, d, v in jobs:
-            pool.submit(_prewarm_one, p, d, v)
-        # pool.__exit__ calls shutdown(wait=True) — all jobs complete before returning
-
-    _evict_disk_if_needed()
-
-
-def evict_stale_and_orphans(products: list[Product]) -> None:
-    """Remove cached dates outside each product's window and cache dirs for unknown products.
-
-    Callers MUST pass the full set of currently registered products. Anything not in
-    `products` is treated as orphaned and removed — passing a single-product list (as
-    admin POST does) would wipe every other product's cache.
-    """
-    if not os.environ.get("DISK_CACHE_PATH"):
-        return
-    _evict_disk_if_needed()
-
-    for product in products:
-        variables = product.variables
-        try:
-            target_dates = set(get_available_dates(product.source_path)[-_CACHE_DAYS:])
-        except Exception:
-            logger.warning("Evict: could not get dates for %s", product.id, exc_info=True)
-            continue
-
-        _p = _disk_cache_path(product.source_path, "", variables)
-        if _p is None:
-            continue
-        cache_dir = _p.parent
-        if not cache_dir.exists():
-            continue
-        cached_dates = {f.name.split(".")[0] for f in cache_dir.glob("*.pkl.lz4")}
-
-        for date in sorted(cached_dates - target_dates):
-            p = _disk_cache_path(product.source_path, date, variables)
-            if p is not None and p.exists():
-                p.unlink()
-                logger.info("Disk cache evicted (stale): %s / %s", product.id, date)
-
-    # Remove cache dirs for products no longer registered
-    base = os.environ.get("DISK_CACHE_PATH")
-    base_path = Path(base) if base else None
-    if base_path and base_path.exists():
-        known_dirs = set()
-        for product in products:
-            _p = _disk_cache_path(product.source_path, "", product.variables)
-            if _p is not None:
-                known_dirs.add(_p.parent.name)
-        for entry in base_path.iterdir():
-            if entry.is_dir() and entry.name not in known_dirs:
-                shutil.rmtree(entry, ignore_errors=True)
-                logger.info("Disk cache evicted (orphaned product): %s", entry.name)
-
-
-def refresh_disk_cache(products: list[Product]) -> None:
-    """Add newly available dates to disk cache; evict dates outside each product's window.
-
-    Callers MUST pass the full set of currently registered products — see
-    [[evict_stale_and_orphans]] for why.
-    """
-    if not os.environ.get("DISK_CACHE_PATH"):
-        return
-    evict_stale_and_orphans(products)
-
-    for product in products:
-        variables = product.variables
-        try:
-            target_dates = set(get_available_dates(product.source_path)[-_CACHE_DAYS:])
-        except Exception:
-            logger.warning("Refresh: could not get dates for %s", product.id, exc_info=True)
-            continue
-
-        _p = _disk_cache_path(product.source_path, "", variables)
-        if _p is None:
-            continue
-        cache_dir = _p.parent
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        cached_dates = {f.name.split(".")[0] for f in cache_dir.glob("*.pkl.lz4")}
-
-        for date in sorted(target_dates - cached_dates):
-            try:
-                ds = load_slice(product.source_path, date, variables)
-                p = _disk_cache_path(product.source_path, date, variables)
-                if p is not None:
-                    _write_slice_to_disk(p, ds)
-                    logger.info("Disk cache added: %s / %s", product.id, date)
-            except Exception:
-                logger.warning("Disk cache add failed: %s / %s", product.id, date, exc_info=True)
-
-    _evict_disk_if_needed()
-
-
-def evict_product_cache(product: "Product") -> None:
-    """Remove all in-memory and disk cache entries for a deleted product."""
-    from services.data_renderer import evict_processed_cache
-
-    variables = product.variables
-    vars_tuple = tuple(sorted(variables))
-
-    removed = _slice_memo.evict_matching(
-        lambda k: k[0] == product.source_path and k[2] == vars_tuple
-    )
-    if removed:
-        logger.info("Memory cache evicted %d slice(s) for: %s", removed, product.id)
-
-    evict_processed_cache(product)
-
-    _p = _disk_cache_path(product.source_path, "", variables)
-    if _p is not None and _p.parent.exists():
-        shutil.rmtree(_p.parent, ignore_errors=True)
-        logger.info("Disk cache evicted (product removed): %s", product.id)
-
-
 def get_available_dates(store_url: str) -> list[str]:
-    _get_store(store_url)  # ensures the date index for this URL is populated
-    index = _store_registry.date_index(store_url)
+    get_store(store_url)  # ensures the date index for this URL is populated
+    index = store_registry.date_index(store_url)
     return sorted(index) if index else []
 
 
@@ -434,20 +77,19 @@ def load_slice(store_url: str, date: str, variables: list[str]) -> xr.Dataset:
     """
     Return a fully-computed 2D (lat × lon) slice for the given store, date, and variables.
     Uses nearest-match on time so callers don't need to ask exact timestamps.
-    Coordinate names are already normalised by _get_store.
+    Coordinate names are already normalised by the store registry.
     """
     cache_key = (store_url, date, tuple(sorted(variables)))
 
     def factory() -> xr.Dataset:
-        cache_path = _disk_cache_path(store_url, date, list(variables))
+        cache_path = disk_cache_path(store_url, date, list(variables))
         if cache_path is not None and cache_path.exists():
-            try:
-                return pickle.loads(lz4.frame.decompress(cache_path.read_bytes()))
-            except Exception:
-                logger.warning("Disk cache read failed: %s", cache_path, exc_info=True)
+            cached = read_slice_from_disk(cache_path)
+            if cached is not None:
+                return cached
 
-        store = _get_store(store_url)
-        matching = list(_store_registry.date_index(store_url).get(date, ()))
+        store = get_store(store_url)
+        matching = list(store_registry.date_index(store_url).get(date, ()))
         if not matching:
             raise FileNotFoundError(
                 f"No data for date {date!r}. Dates must be {LOCAL_TZ.key} local dates "
@@ -467,3 +109,19 @@ def load_slice(store_url: str, date: str, variables: list[str]) -> xr.Dataset:
             raise FileNotFoundError(f"No data found for date {date}") from e
 
     return _slice_memo.get_or_compute(cache_key, factory)
+
+
+def evict_product_cache(product: Product) -> None:
+    """Remove all in-memory and disk cache entries for a deleted product."""
+    from services.data_renderer import evict_processed_cache
+
+    vars_tuple = tuple(sorted(product.variables))
+
+    removed = _slice_memo.evict_matching(
+        lambda k: k[0] == product.source_path and k[2] == vars_tuple
+    )
+    if removed:
+        logger.info("Memory cache evicted %d slice(s) for: %s", removed, product.id)
+
+    evict_processed_cache(product)
+    evict_product_dir(product)
