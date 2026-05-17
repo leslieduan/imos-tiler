@@ -5,9 +5,11 @@ import numpy as np
 import xarray as xr
 from PIL import Image, ImageDraw, ImageFont
 from pyproj import Transformer
+from rio_tiler.colormap import apply_cmap
 from rio_tiler.colormap import cmap as _rio_cmap
 from rio_tiler.errors import TileOutsideBounds
 from rio_tiler.io.xarray import XarrayReader
+from rio_tiler.models import ImageData
 from rioxarray.exceptions import NoDataInBounds
 
 from services.colormap_store import get_colormap, is_categorical
@@ -65,14 +67,28 @@ def empty_png() -> bytes:
     return _EMPTY_PNG
 
 
-def _composite_png(base: bytes, overlay: bytes) -> bytes:
-    """Merge two same-size RGBA PNGs: non-transparent overlay pixels replace base pixels."""
-    base_arr = np.array(Image.open(io.BytesIO(base)).convert("RGBA"))
-    over_arr = np.array(Image.open(io.BytesIO(overlay)).convert("RGBA"))
-    mask = over_arr[..., 3] > 0
-    base_arr[mask] = over_arr[mask]
+def _img_to_rgba(img: ImageData, cm: dict[int, tuple[int, int, int, int]]) -> np.ndarray:
+    """Apply colormap + data mask to a rescaled ImageData, returning an (H, W, 4) RGBA array.
+
+    Mirrors what ImageData.render() does internally but stops before the PNG encode.
+    Used so the antimeridian composite path can merge numpy arrays directly and encode
+    only once at the end — previously each part was encoded to PNG, then re-decoded,
+    composited, and re-encoded.
+    """
+    rgb, cmap_alpha = apply_cmap(img.data, cm)  # rgb: (3, H, W), cmap_alpha: (H, W)
+    rgba = np.empty((rgb.shape[1], rgb.shape[2], 4), dtype=np.uint8)
+    rgba[..., 0] = rgb[0]
+    rgba[..., 1] = rgb[1]
+    rgba[..., 2] = rgb[2]
+    # Combine the colormap's own alpha (e.g. transparent categories) with the
+    # ImageData mask (which marks NaN / out-of-extent pixels). Both are uint8 0/255.
+    rgba[..., 3] = np.minimum(cmap_alpha, img.mask.astype(np.uint8))
+    return rgba
+
+
+def _encode_rgba_png(rgba: np.ndarray) -> bytes:
     buf = io.BytesIO()
-    Image.fromarray(base_arr, "RGBA").save(buf, format="PNG", optimize=False)
+    Image.fromarray(rgba, "RGBA").save(buf, format="PNG", optimize=False)
     return buf.getvalue()
 
 
@@ -163,7 +179,7 @@ def render_tile(
     vmin, vmax = vrange
     span = vmax - vmin or 1.0
     cm = _colormap(colormap_name)
-    result: bytes | None = None
+    result: np.ndarray | None = None
 
     for da in parts:
         try:
@@ -172,10 +188,14 @@ def render_tile(
         except TileOutsideBounds:
             continue
         img.rescale(in_range=[(vmin, vmin + span)])
-        rendered = img.render(img_format="PNG", colormap=cm)
-        result = rendered if result is None else _composite_png(result, rendered)
+        rgba = _img_to_rgba(img, cm)
+        if result is None:
+            result = rgba
+        else:
+            mask = rgba[..., 3] > 0
+            result[mask] = rgba[mask]
 
-    return result or empty_png()
+    return _encode_rgba_png(result) if result is not None else empty_png()
 
 
 def render_bbox(
@@ -208,7 +228,7 @@ def render_bbox(
     else:
         lon_min, lat_min, lon_max, lat_max = minx, miny, maxx, maxy
 
-    result: bytes | None = None
+    result: np.ndarray | None = None
 
     for da in parts:
         try:
@@ -222,10 +242,14 @@ def render_bbox(
         except (TileOutsideBounds, NoDataInBounds):
             continue
         img.rescale(in_range=[(vmin, vmin + span)])
-        rendered = img.render(img_format="PNG", colormap=cm)
-        result = rendered if result is None else _composite_png(result, rendered)
+        rgba = _img_to_rgba(img, cm)
+        if result is None:
+            result = rgba
+        else:
+            mask = rgba[..., 3] > 0
+            result[mask] = rgba[mask]
 
-    return result or empty_png()
+    return _encode_rgba_png(result) if result is not None else empty_png()
 
 
 def render_legend(
