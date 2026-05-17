@@ -177,6 +177,13 @@ def get_lod_grids(product: Product) -> dict[int, tuple[int, int]]:
     return product.lod_grids
 
 
+# Serialises disk-pressure evictions. Without this, concurrent prewarm workers
+# could each scan the cache, decide to evict the same files, and either race on
+# unlink or over-evict. Holding the lock around scan+evict keeps the decision
+# consistent and bounds the eviction pass to one thread at a time.
+_evict_lock = threading.Lock()
+
+
 def _evict_disk_if_needed() -> None:
     base = os.environ.get("DISK_CACHE_PATH")
     if not base:
@@ -184,24 +191,30 @@ def _evict_disk_if_needed() -> None:
     limit_bytes = int(os.environ.get("DISK_CACHE_LIMIT_GB", 20)) * 1024**3
     threshold = int(limit_bytes * float(os.environ.get("DISK_EVICTION_THRESHOLD", 0.85)))
 
-    all_files = list(Path(base).rglob("*.pkl.lz4"))
-    if not all_files:
-        return
-    total = sum(f.stat().st_size for f in all_files)
-    if total <= threshold:
-        return
-
-    # Sort: smallest file first, oldest date first within same size.
-    # Small-grid products are cheap to re-fetch from S3; evict them before large ones.
-    entries = sorted(all_files, key=lambda f: (f.stat().st_size, f.name.split(".")[0]))
-
-    for f in entries:
+    with _evict_lock:
+        all_files = list(Path(base).rglob("*.pkl.lz4"))
+        if not all_files:
+            return
+        total = sum(f.stat().st_size for f in all_files)
         if total <= threshold:
-            break
-        size = f.stat().st_size
-        f.unlink(missing_ok=True)
-        total -= size
-        logger.info("Disk evicted (pressure): %s (%d KB)", f, size // 1024)
+            return
+
+        # Sort: smallest file first, oldest date first within same size.
+        # Small-grid products are cheap to re-fetch from S3; evict them before large ones.
+        entries = sorted(all_files, key=lambda f: (f.stat().st_size, f.name.split(".")[0]))
+
+        for f in entries:
+            if total <= threshold:
+                break
+            size = f.stat().st_size
+            f.unlink(missing_ok=True)
+            total -= size
+            logger.info("Disk evicted (pressure): %s (%d KB)", f, size // 1024)
+
+
+def _write_slice_to_disk(cache_path: Path, ds: xr.Dataset) -> None:
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_bytes(lz4.frame.compress(pickle.dumps(ds)))
 
 
 def _prewarm_one(product: Product, date: str, variables: list[str]) -> None:
@@ -211,8 +224,7 @@ def _prewarm_one(product: Product, date: str, variables: list[str]) -> None:
             return
         ds = load_slice(product.source_path, date, variables)
         if cache_path is not None:
-            cache_path.parent.mkdir(parents=True, exist_ok=True)
-            cache_path.write_bytes(lz4.frame.compress(pickle.dumps(ds)))
+            _write_slice_to_disk(cache_path, ds)
             logger.info("Disk prewarm written (S3): %s / %s", product.id, date)
     except FileNotFoundError:
         pass  # date in time index but nearest match is a different local day — not cacheable
@@ -247,6 +259,8 @@ def prewarm_disk_slices(products: list[Product]) -> None:
         for p, d, v in jobs:
             pool.submit(_prewarm_one, p, d, v)
         # pool.__exit__ calls shutdown(wait=True) — all jobs complete before returning
+
+    _evict_disk_if_needed()
 
 
 def evict_stale_and_orphans(products: list[Product]) -> None:
@@ -327,10 +341,12 @@ def refresh_disk_cache(products: list[Product]) -> None:
                 ds = load_slice(product.source_path, date, variables)
                 p = _disk_cache_path(product.source_path, date, variables)
                 if p is not None:
-                    p.write_bytes(lz4.frame.compress(pickle.dumps(ds)))
+                    _write_slice_to_disk(p, ds)
                     logger.info("Disk cache added: %s / %s", product.id, date)
             except Exception:
                 logger.warning("Disk cache add failed: %s / %s", product.id, date, exc_info=True)
+
+    _evict_disk_if_needed()
 
 
 def evict_product_cache(product: "Product") -> None:
