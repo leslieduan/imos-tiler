@@ -78,10 +78,10 @@ Colourised Web Mercator (XYZ) tiles — compatible with MapboxGL `raster` source
 
 | Method | Path                                                              | Description                                                                                                       |
 | ------ | ----------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| GET    | `/visual_tiles/{product_id}/{date}/tiles/{z}/{x}/{y}.png`         | Colourised PNG tile (Web Mercator XYZ)                                                                            |
-| GET    | `/visual_tiles/{product_id}/{date}/bbox?bbox=minx,miny,maxx,maxy` | Colourised PNG for an arbitrary bbox (EPSG:4326 degrees by default; pass `crs=EPSG:3857` for Web Mercator meters) |
-| GET    | `/visual_tiles/colormaps`                                         | All supported colormap names grouped by source (custom, rio-tiler, matplotlib)                                    |
-| GET    | `/visual_tiles/colormaps/{name}/legend`                           | Color legend PNG for a colormap (gradient bar ± tick labels)                                                      |
+| GET    | `/visual_tiles/{product_id}/{date}/tiles/{z}/{x}/{y}.{ext}`         | Colourised tile (Web Mercator XYZ). `ext` is `png` (lossless) or `webp` (lossy, ~50% smaller). Categorical colormaps must use `.png`. |
+| GET    | `/visual_tiles/{product_id}/{date}/bbox.{ext}?bbox=minx,miny,maxx,maxy` | Colourised image for an arbitrary bbox (EPSG:4326 degrees by default; pass `crs=EPSG:3857` for Web Mercator meters). `ext` is `png` or `webp`. |
+| GET    | `/visual_tiles/colormaps`                                           | All supported colormap names grouped by source (custom, rio-tiler, matplotlib)                                    |
+| GET    | `/visual_tiles/colormaps/{name}/legend`                             | Color legend PNG for a colormap (gradient bar ± tick labels)                                                      |
 
 Query parameters for tile requests:
 

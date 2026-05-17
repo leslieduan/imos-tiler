@@ -136,7 +136,7 @@ disk warm      → get_lod_grids (already set) → _get_processed miss → load_
 S3 cold        → get_lod_grids (already set) → _get_processed miss → load_slice (S3 .compute(), ~2s) → resample → cache → _extract_chunk → PNG encode
 ```
 
-**Visual tiles** (`/visual_tiles/{product_id}/{date}/tiles/{z}/{x}/{y}.png` or `/bbox`)
+**Visual tiles** (`/visual_tiles/{product_id}/{date}/tiles/{z}/{x}/{y}.{ext}` or `/bbox.{ext}` — `ext ∈ {png, webp}`)
 
 No L1 cache. Every request calls `load_slice`, then `XarrayReader` reprojects to Web Mercator.
 
@@ -182,7 +182,7 @@ titiler-project/
     disk_cache.py                ← L3 disk cache lifecycle: path, read/write, prewarm, refresh, eviction
     loader.py                    ← load_slice (L2 LRU) + get_available_dates + get_lod_grids + evict_product_cache
     data_renderer.py             ← processed grid cache + chunk extract + PNG encode (data tiles)
-    visual_renderer.py           ← Web Mercator tile/bbox render (visual tiles)
+    visual_renderer.py           ← Web Mercator tile/bbox render (visual tiles) — encodes PNG or WebP
     colormap_lookup.py           ← resolve_colormap()/colormap_lut() — custom→rio-tiler→matplotlib fallback chain
     legend_renderer.py           ← render_legend() — color bar + tick labels
     colormap_config.py           ← colormaps.json read/write + in-memory colormap registry + ColormapMode type + invalidation hooks
@@ -192,7 +192,7 @@ titiler-project/
     geo.py                       ← dataset_bounds + json_safe_float
     colors.py                    ← hex parsing + ramp/categorical LUT builders
     memoizer.py                  ← shared dedup+cache helper used by load_slice, processed cache, visual-tile dedup
-    png.py                       ← encode_rgba() + EMPTY_RGBA_TILE — shared PNG encoder for both renderers
+    image.py                     ← encode_rgba(arr, fmt) + empty_tile(fmt) + media_type(fmt) — PNG/WebP encoders shared by both renderers
 ```
 
 `products.json` and `colormaps.json` default to the project root in local dev. In Docker (`docker-compose.yml`), they are overridden to `data/products.json` and `data/colormaps.json`, backed by a `./data` host volume. The L3 disk-cache directory is set via `DISK_CACHE_PATH` (default: unset in local dev; `/app/slice_cache` in Docker, backed by a `./slice_cache` host volume).
@@ -253,7 +253,7 @@ The manifest returns geographic bounds (`lonMin`, `lonMax`, `latMin`, `latMax`) 
 
 Because the output PNG is already in Web Mercator, visual tiles work directly with any map library that consumes XYZ Web Mercator tiles — MapboxGL `raster` sources, Leaflet, OpenLayers, Mapbox `{bbox-epsg-3857}` raster placeholders, etc. **No client-side reprojection is required.**
 
-The `/bbox` endpoint follows the same pipeline using `reader.part(...)`; it accepts the bbox in either EPSG:4326 or EPSG:3857 (controlled by `?crs=`) and produces a Web Mercator PNG.
+The `/bbox.{ext}` endpoint follows the same pipeline using `reader.part(...)`; it accepts the bbox in either EPSG:4326 or EPSG:3857 (controlled by `?crs=`) and produces a Web Mercator image in the requested format.
 
 ### 5.4 Frontend integration
 
@@ -324,8 +324,8 @@ Colourised PNG tiles in standard Web Mercator (XYZ). Single-variable products on
 ```
 GET /visual_tiles/colormaps                                            → all supported colormap names
 GET /visual_tiles/colormaps/{name}/legend                              → color legend PNG for a colormap
-GET /visual_tiles/{product_id}/{date}/tiles/{z}/{x}/{y}.png            → colourised Web Mercator PNG
-GET /visual_tiles/{product_id}/{date}/bbox?bbox=minx,miny,maxx,maxy   → colourised PNG for arbitrary bbox
+GET /visual_tiles/{product_id}/{date}/tiles/{z}/{x}/{y}.{ext}            → colourised Web Mercator image (.png or .webp)
+GET /visual_tiles/{product_id}/{date}/bbox.{ext}?bbox=minx,miny,maxx,maxy → colourised image for arbitrary bbox (.png or .webp)
 ```
 
 **Legend query parameters:**
@@ -526,6 +526,30 @@ Practical rules:
 - Ramp colormaps are dataset-agnostic; categorical colormaps are not.
 
 **Cache behaviour.** `resolve_colormap()` in `services/colormap_lookup.py` is `@lru_cache`-d (max 64 entries); its companion `colormap_lut()` (max 128 entries) caches the numpy LUT used by the legend renderer. The caches are cleared automatically whenever a colormap is added or deleted via the admin API — `colormap_config._reload()` invokes the registered invalidation hooks, which include `resolve_colormap.cache_clear()`, `colormap_lut.cache_clear()`, and `render_legend.cache_clear()`.
+
+### 8.4 Output format (PNG vs WebP)
+
+The tile and bbox endpoints take the output format as a `.{ext}` path-param suffix:
+
+```
+GET /visual_tiles/{id}/{date}/tiles/{z}/{x}/{y}.png   → image/png
+GET /visual_tiles/{id}/{date}/tiles/{z}/{x}/{y}.webp  → image/webp
+GET /visual_tiles/{id}/{date}/bbox.png?bbox=...       → image/png
+GET /visual_tiles/{id}/{date}/bbox.webp?bbox=...      → image/webp
+```
+
+Why both formats:
+
+- **PNG** is lossless; the only safe choice for categorical colormaps (hard colour boundaries) and the default everywhere else for backward compatibility.
+- **WebP (lossy, q=85)** is typically 40–70% smaller than PNG for smooth colour ramps — the common visual-tile case. Encode time is comparable to PNG (lossy WebP is fast; lossless WebP is the slow one and is not exposed here). The visual quality difference is imperceptible for ocean-render output.
+
+**Categorical colormaps reject `.webp`** with HTTP 400. Lossy compression introduces ringing/blocking around the discrete colour transitions that define a categorical map, which would silently corrupt the rendered classes. The router uses `is_categorical(colormap_name)` to gate this in `_reject_webp_for_categorical`.
+
+**Format choice is per-URL, not per-request.** Each `.{ext}` is a distinct path, so CDNs/browsers cache PNG and WebP independently with no `Vary` header gymnastics. Implementation lives in `utils/image.py` (`encode_rgba`, `empty_tile`, `media_type`) so adding another format (e.g. JXL) is one branch.
+
+The legend endpoint stays PNG-only — it's cached aggressively via `@lru_cache(maxsize=256)` and served with 30-day `Cache-Control`, so the per-byte win from WebP is not worth the API complexity for an image whose bytes ship from cache forever after the first encode.
+
+The full format-evaluation history (including why **data tiles** cannot use WebP — lossy corrupts uint24 data, lossless is 115× slower than PNG) is in [`docs/png-vs-webp-vs-bin.md`](png-vs-webp-vs-bin.md).
 
 ---
 
@@ -783,7 +807,7 @@ The server combines an **asyncio event loop** (for FastAPI/Uvicorn request multi
 Look at the route definitions in `routers/`:
 
 ```python
-@router.get("/{product_id}/{date}/tiles/{z}/{x}/{y}.png")
+@router.get("/{product_id}/{date}/tiles/{z}/{x}/{y}.{ext}")
 def get_tile(...):
     ...
 ```

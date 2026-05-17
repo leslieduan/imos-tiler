@@ -6,6 +6,7 @@ from services.colormap_config import is_categorical, list_colormaps
 from services.colormap_lookup import resolve_colormap
 from services.legend_renderer import render_legend
 from services.visual_renderer import render_bbox, render_tile
+from utils.image import ImageFormat, media_type
 from utils.memoizer import Memoizer
 
 from .products import router as products_router
@@ -45,6 +46,20 @@ def _require_rescale_if_categorical(
         raise HTTPException(
             status_code=400,
             detail=f"Colormap '{colormap_name}' is categorical — rescale=min,max is required.",
+        )
+
+
+def _reject_webp_for_categorical(colormap_name: str, fmt: ImageFormat) -> None:
+    # Lossy WebP introduces ringing/blocking around the hard colour boundaries
+    # of a categorical colormap. PNG (or a lossless WebP, not currently exposed)
+    # is the only safe choice — fail loud rather than serve a corrupted legend.
+    if fmt == "webp" and is_categorical(colormap_name):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Colormap '{colormap_name}' is categorical and cannot be encoded as WebP "
+                "(lossy compression corrupts the discrete colour boundaries). Use .png."
+            ),
         )
 
 
@@ -89,12 +104,13 @@ def get_legend(
 
 
 @router.get(
-    "/{product_id}/{date}/tiles/{z}/{x}/{y}.png",
+    "/{product_id}/{date}/tiles/{z}/{x}/{y}.{ext}",
     summary="Visualisation raster tile",
     description=(
-        "Standard Web Mercator (XYZ) tile rendered as a colourised PNG. "
+        "Standard Web Mercator (XYZ) tile rendered as a colourised PNG or WebP. "
         "Compatible with MapboxGL `raster` sources and any slippy-map library. "
-        "Tiles outside the product extent return transparent PNGs."
+        "Tiles outside the product extent return transparent images. "
+        "WebP is rejected for categorical colormaps because lossy compression corrupts the discrete colour boundaries."
     ),
 )
 def get_tile(
@@ -103,6 +119,10 @@ def get_tile(
     z: int = Path(openapi_examples={"default": Example(value=1)}),
     x: int = Path(openapi_examples={"default": Example(value=0)}),
     y: int = Path(openapi_examples={"default": Example(value=0)}),
+    ext: ImageFormat = Path(
+        pattern="^(png|webp)$",
+        description="Output image format — 'png' (lossless) or 'webp' (lossy, ~50% smaller).",
+    ),
     colormap_name: str = Query(
         "viridis",
         alias="colormap",
@@ -135,33 +155,39 @@ def get_tile(
 
     rescale_range = _parse_rescale(rescale)
     _require_rescale_if_categorical(colormap_name, rescale_range)
+    _reject_webp_for_categorical(colormap_name, ext)
 
-    key = (product.source_path, date, variable, z, x, y, colormap_name, rescale_range)
+    key = (product.source_path, date, variable, z, x, y, colormap_name, rescale_range, ext)
 
     def _do_render() -> bytes:
         ds = load_slice_or_404(product.source_path, date, [variable])
-        return render_tile(ds, variable, x, y, z, colormap_name, rescale_range)
+        return render_tile(ds, variable, x, y, z, colormap_name, rescale_range, fmt=ext)
 
     try:
-        png = _tile_memo.get_or_compute(key, _do_render)
+        body = _tile_memo.get_or_compute(key, _do_render)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
-    return Response(content=png, media_type="image/png", headers=_IMAGE_CACHE_HEADERS)
+    return Response(content=body, media_type=media_type(ext), headers=_IMAGE_CACHE_HEADERS)
 
 
 @router.get(
-    "/{product_id}/{date}/bbox",
+    "/{product_id}/{date}/bbox.{ext}",
     summary="Visualisation tile by bbox",
     description=(
-        "Renders a colourised PNG for an arbitrary bounding box. "
+        "Renders a colourised PNG or WebP for an arbitrary bounding box. "
         "Accepts EPSG:4326 geographic coordinates (degrees, default) or EPSG:3857 Web Mercator (meters) via the crs parameter. "
-        "Compatible with Mapbox GL raster sources using the {bbox-epsg-3857} placeholder (pass crs=EPSG:3857)."
+        "Compatible with Mapbox GL raster sources using the {bbox-epsg-3857} placeholder (pass crs=EPSG:3857). "
+        "WebP is rejected for categorical colormaps because lossy compression corrupts the discrete colour boundaries."
     ),
 )
 def get_bbox(
     product_id: str = Path(openapi_examples=PRODUCT_EX),
     date: str = Path(pattern=r"^\d{4}-\d{2}-\d{2}$", openapi_examples=DATE_EX),
+    ext: ImageFormat = Path(
+        pattern="^(png|webp)$",
+        description="Output image format — 'png' (lossless) or 'webp' (lossy, ~50% smaller).",
+    ),
     bbox: str = Query(
         "89.0,-60.0,180.0,10.0",
         description="Bounding box as 'minx,miny,maxx,maxy' in the CRS specified by the crs parameter.",
@@ -199,6 +225,7 @@ def get_bbox(
 
     rescale_range = _parse_rescale(rescale)
     _require_rescale_if_categorical(colormap_name, rescale_range)
+    _reject_webp_for_categorical(colormap_name, ext)
 
     key = (
         product.source_path,
@@ -210,6 +237,7 @@ def get_bbox(
         crs,
         colormap_name,
         rescale_range,
+        ext,
     )
 
     def _do_render() -> bytes:
@@ -223,11 +251,12 @@ def get_bbox(
             colormap_name,
             rescale_range,
             crs=crs,
+            fmt=ext,
         )
 
     try:
-        png = _bbox_memo.get_or_compute(key, _do_render)
+        body = _bbox_memo.get_or_compute(key, _do_render)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
-    return Response(content=png, media_type="image/png", headers=_IMAGE_CACHE_HEADERS)
+    return Response(content=body, media_type=media_type(ext), headers=_IMAGE_CACHE_HEADERS)

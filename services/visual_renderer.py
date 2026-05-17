@@ -1,11 +1,11 @@
 """Web Mercator tile and bbox rendering for the visual_tiles router.
 
 Resamples a 2-D scalar field through rio-tiler's XarrayReader, applies a
-colormap LUT from [[colormap_lookup]], and encodes a PNG. The antimeridian split
-in `_to_scalar_parts` is the one non-obvious bit — regional grids that cross
-180° E (e.g. GSLA 57–185°E) are split into two segments so each fits inside
-rio_tiler's strict ±180 bound; the parts are composited as numpy arrays before
-the single PNG encode.
+colormap LUT from [[colormap_lookup]], and encodes as PNG or WebP. The
+antimeridian split in `_to_scalar_parts` is the one non-obvious bit — regional
+grids that cross 180° E (e.g. GSLA 57–185°E) are split into two segments so
+each fits inside rio_tiler's strict ±180 bound; the parts are composited as
+numpy arrays before the single image encode.
 """
 
 import numpy as np
@@ -18,13 +18,9 @@ from rio_tiler.models import ImageData
 from rioxarray.exceptions import NoDataInBounds
 
 from services.colormap_lookup import resolve_colormap
-from utils.png import EMPTY_RGBA_TILE, encode_rgba
+from utils.image import ImageFormat, empty_tile, encode_rgba
 
 _mercator_to_wgs84 = Transformer.from_crs("EPSG:3857", "EPSG:4326", always_xy=True)
-
-
-def empty_png() -> bytes:
-    return EMPTY_RGBA_TILE
 
 
 def _img_to_rgba(img: ImageData, cm: dict[int, tuple[int, int, int, int]]) -> np.ndarray:
@@ -121,15 +117,16 @@ def render_tile(
     z: int,
     colormap_name: str = "viridis",
     rescale: tuple[float, float] | None = None,
+    fmt: ImageFormat = "png",
 ) -> bytes:
-    """Return a 256×256 Web Mercator PNG tile.
+    """Return a 256×256 Web Mercator tile encoded as ``fmt``.
 
     Returns a fully transparent tile for tiles outside the data extent.
     """
     parts = _to_scalar_parts(ds, variable)
     vrange = _rescale_range(parts, rescale)
     if vrange is None:
-        return empty_png()
+        return empty_tile(fmt)
     vmin, vmax = vrange
     span = vmax - vmin or 1.0
     cm = resolve_colormap(colormap_name)
@@ -149,7 +146,7 @@ def render_tile(
             mask = rgba[..., 3] > 0
             result[mask] = rgba[mask]
 
-    return encode_rgba(result) if result is not None else empty_png()
+    return encode_rgba(result, fmt) if result is not None else empty_tile(fmt)
 
 
 def render_bbox(
@@ -161,8 +158,9 @@ def render_bbox(
     colormap_name: str = "viridis",
     rescale: tuple[float, float] | None = None,
     crs: str = "EPSG:4326",
+    fmt: ImageFormat = "png",
 ) -> bytes:
-    """Return a PNG image for an arbitrary bbox.
+    """Return an image for an arbitrary bbox encoded as ``fmt``.
 
     bbox must be (minx, miny, maxx, maxy) in the given crs ('EPSG:4326' degrees or 'EPSG:3857' meters).
     Returns a fully transparent tile when the bbox does not intersect the data.
@@ -170,7 +168,7 @@ def render_bbox(
     parts = _to_scalar_parts(ds, variable)
     vrange = _rescale_range(parts, rescale)
     if vrange is None:
-        return empty_png()
+        return empty_tile(fmt)
     vmin, vmax = vrange
     span = vmax - vmin or 1.0
     cm = resolve_colormap(colormap_name)
@@ -203,4 +201,4 @@ def render_bbox(
             mask = rgba[..., 3] > 0
             result[mask] = rgba[mask]
 
-    return encode_rgba(result) if result is not None else empty_png()
+    return encode_rgba(result, fmt) if result is not None else empty_tile(fmt)

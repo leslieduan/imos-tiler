@@ -87,3 +87,60 @@ def test_tile_ok_with_custom_colormap():
             "/visual_tiles/sea_level_anomaly/2024-01-01/tiles/5/0/0.png?colormap=test_ramp"
         )
     assert response.status_code == 200
+
+
+_WEBP = b"RIFF\x00\x00\x00\x00WEBP"
+
+
+def test_tile_webp_ok():
+    with (
+        patch("routers.shared.load_slice", return_value=_make_ds()),
+        patch("routers.visual_tiles.render_tile", return_value=_WEBP),
+    ):
+        response = client.get("/visual_tiles/sea_level_anomaly/2024-01-01/tiles/5/0/0.webp")
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/webp"
+
+
+def test_tile_unknown_extension_rejected():
+    response = client.get("/visual_tiles/sea_level_anomaly/2024-01-01/tiles/5/0/0.jpg")
+    assert response.status_code == 422
+
+
+def test_tile_webp_rejected_for_categorical_colormap():
+    categorical = [(0, 0, 0, 0)] * 256
+    with (
+        patch("routers.shared.load_slice", return_value=_make_ds()),
+        patch("services.colormap_config._custom_colormaps", {"cat_map": categorical}),
+        patch("services.colormap_config._custom_colormap_modes", {"cat_map": "categorical"}),
+    ):
+        response = client.get(
+            "/visual_tiles/sea_level_anomaly/2024-01-01/tiles/5/0/0.webp?colormap=cat_map&rescale=1,4"
+        )
+    assert response.status_code == 400
+    assert "categorical" in response.json()["detail"].lower()
+
+
+def test_bbox_png_ok():
+    with (
+        patch("routers.shared.load_slice", return_value=_make_ds()),
+        patch("routers.visual_tiles.render_bbox", return_value=_PNG),
+    ):
+        response = client.get("/visual_tiles/sea_level_anomaly/2024-01-01/bbox.png")
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/png"
+
+
+def test_bbox_webp_ok():
+    with (
+        patch("routers.shared.load_slice", return_value=_make_ds()),
+        patch("routers.visual_tiles.render_bbox", return_value=_WEBP),
+    ):
+        response = client.get("/visual_tiles/sea_level_anomaly/2024-01-01/bbox.webp")
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/webp"
+
+
+def test_bbox_legacy_url_without_extension_returns_404():
+    response = client.get("/visual_tiles/sea_level_anomaly/2024-01-01/bbox")
+    assert response.status_code == 404

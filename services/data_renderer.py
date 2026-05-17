@@ -9,8 +9,8 @@ from cachetools import LRUCache
 
 from constants import LOD, Product
 from utils.geo import dataset_bounds, json_safe_float
+from utils.image import encode_rgba
 from utils.memoizer import Memoizer
-from utils.png import encode_rgba
 
 logger = logging.getLogger(__name__)
 
