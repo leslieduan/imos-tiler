@@ -264,8 +264,7 @@ def test_animation_native_resolution_used_when_both_dims_omitted():
         patch_render,
     ):
         response = client.get(
-            "/visual_tiles/sea_level_anomaly/2024-01-01/2024-01-01/animation.apng"
-            "?bbox=57,-70,180,0"
+            "/visual_tiles/sea_level_anomaly/2024-01-01/2024-01-01/animation.apng?bbox=57,-70,180,0"
         )
     assert response.status_code == 200
     assert captured["wh"] == (640, 350)
