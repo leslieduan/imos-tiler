@@ -112,6 +112,41 @@ def load_slice(store_url: str, date: str, variables: list[str]) -> xr.Dataset:
     return _slice_memo.get_or_compute(cache_key, factory)
 
 
+def load_slice_uncached(store_url: str, date: str, variables: list[str]) -> xr.Dataset:
+    """Return a 2-D slice without touching the L2 in-memory cache.
+
+    Reads from the L3 disk cache if present, otherwise pulls directly from the
+    Zarr store. Never writes to L3 — animation requests can span dates outside
+    the prewarmed window, and we don't want a rare endpoint to pollute the
+    shared disk cache or evict another product's hot slices.
+    """
+    cache_path = disk_cache_path(store_url, date, list(variables))
+    if cache_path is not None and cache_path.exists():
+        cached = read_slice_from_disk(cache_path)
+        if cached is not None:
+            return cached
+
+    store = get_store(store_url)
+    index = store_registry.date_index(store_url)
+    matching = list(index.get(date, ()))
+    if not matching:
+        latest = max(index) if index else None
+        hint = f" Latest available date is {latest!r}." if latest else " No dates are available."
+        raise FileNotFoundError(f"No data for date {date!r}.{hint}")
+    if len(matching) > 1:
+        logger.warning(
+            "Multiple timestamps (%d) map to date %r in %s; using first: %s",
+            len(matching),
+            date,
+            store_url,
+            matching[0],
+        )
+    try:
+        return store[variables].sel(time=pd.Timestamp(matching[0])).compute()
+    except KeyError as e:
+        raise FileNotFoundError(f"No data found for date {date}") from e
+
+
 def slice_memo_stats() -> dict:
     """In-flight + LRU stats for the L2 slice memoizer. Used by /admin/cache."""
     return {

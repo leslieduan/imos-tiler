@@ -18,7 +18,13 @@ from rio_tiler.models import ImageData
 from rioxarray.exceptions import NoDataInBounds
 
 from services.colormap_lookup import resolve_colormap
-from utils.image import ImageFormat, empty_tile, encode_rgba
+from utils.image import (
+    AnimatedFormat,
+    ImageFormat,
+    empty_tile,
+    encode_rgba,
+    encode_rgba_animation,
+)
 
 _mercator_to_wgs84 = Transformer.from_crs("EPSG:3857", "EPSG:4326", always_xy=True)
 
@@ -149,6 +155,54 @@ def render_tile(
     return encode_rgba(result, fmt) if result is not None else empty_tile(fmt)
 
 
+def _bbox_to_wgs84(
+    bbox: tuple[float, float, float, float], crs: str
+) -> tuple[float, float, float, float]:
+    minx, miny, maxx, maxy = bbox
+    if crs == "EPSG:3857":
+        lon_min, lat_min = _mercator_to_wgs84.transform(minx, miny)
+        lon_max, lat_max = _mercator_to_wgs84.transform(maxx, maxy)
+        return lon_min, lat_min, lon_max, lat_max
+    return minx, miny, maxx, maxy
+
+
+def _bbox_parts_to_rgba(
+    parts: list[xr.DataArray],
+    bbox_wgs84: tuple[float, float, float, float],
+    width: int,
+    height: int,
+    vmin: float,
+    span: float,
+    cm: dict[int, tuple[int, int, int, int]],
+) -> np.ndarray | None:
+    """Resample each antimeridian-split part into the bbox, composite, return RGBA.
+
+    Returns None when the bbox intersects none of the parts (caller decides whether
+    to emit a transparent placeholder or skip).
+    """
+    lon_min, lat_min, lon_max, lat_max = bbox_wgs84
+    result: np.ndarray | None = None
+    for da in parts:
+        try:
+            with XarrayReader(da) as reader:
+                img = reader.part(
+                    (lon_min, lat_min, lon_max, lat_max),
+                    width=width,
+                    height=height,
+                    reproject_method="bilinear",
+                )
+        except (TileOutsideBounds, NoDataInBounds):
+            continue
+        img.rescale(in_range=[(vmin, vmin + span)])
+        rgba = _img_to_rgba(img, cm)
+        if result is None:
+            result = rgba
+        else:
+            mask = rgba[..., 3] > 0
+            result[mask] = rgba[mask]
+    return result
+
+
 def render_bbox(
     ds: xr.Dataset,
     variable: str,
@@ -172,33 +226,56 @@ def render_bbox(
     vmin, vmax = vrange
     span = vmax - vmin or 1.0
     cm = resolve_colormap(colormap_name)
+    bbox_wgs84 = _bbox_to_wgs84(bbox, crs)
 
-    minx, miny, maxx, maxy = bbox
-    if crs == "EPSG:3857":
-        lon_min, lat_min = _mercator_to_wgs84.transform(minx, miny)
-        lon_max, lat_max = _mercator_to_wgs84.transform(maxx, maxy)
-    else:
-        lon_min, lat_min, lon_max, lat_max = minx, miny, maxx, maxy
-
-    result: np.ndarray | None = None
-
-    for da in parts:
-        try:
-            with XarrayReader(da) as reader:
-                img = reader.part(
-                    (lon_min, lat_min, lon_max, lat_max),
-                    width=width,
-                    height=height,
-                    reproject_method="bilinear",
-                )
-        except (TileOutsideBounds, NoDataInBounds):
-            continue
-        img.rescale(in_range=[(vmin, vmin + span)])
-        rgba = _img_to_rgba(img, cm)
-        if result is None:
-            result = rgba
-        else:
-            mask = rgba[..., 3] > 0
-            result[mask] = rgba[mask]
-
+    result = _bbox_parts_to_rgba(parts, bbox_wgs84, width, height, vmin, span, cm)
     return encode_rgba(result, fmt) if result is not None else empty_tile(fmt)
+
+
+def render_bbox_animation(
+    datasets: list[xr.Dataset],
+    variable: str,
+    bbox: tuple[float, float, float, float],
+    width: int,
+    height: int,
+    colormap_name: str = "viridis",
+    rescale: tuple[float, float] | None = None,
+    crs: str = "EPSG:4326",
+    fmt: AnimatedFormat = "webp",
+    duration_ms: int = 200,
+) -> bytes:
+    """Render the same bbox across ``datasets`` and assemble as an animated image.
+
+    When ``rescale`` is None, vmin/vmax is computed across the union of every frame's
+    data so the colour ramp stays stable from frame to frame; computing it per-frame
+    causes flicker in low-variance areas.
+    Frames whose data does not intersect the bbox are emitted as fully transparent
+    so timing stays aligned with the date sequence.
+    """
+    if not datasets:
+        raise ValueError("render_bbox_animation requires at least one dataset")
+
+    parts_per_frame = [_to_scalar_parts(ds, variable) for ds in datasets]
+
+    if rescale is not None:
+        vmin, vmax = rescale
+    else:
+        all_parts = [p for parts in parts_per_frame for p in parts]
+        vrange = _rescale_range(all_parts, None)
+        if vrange is None:
+            empty = np.zeros((height, width, 4), dtype=np.uint8)
+            return encode_rgba_animation([empty] * len(datasets), fmt, duration_ms)
+        vmin, vmax = vrange
+
+    span = vmax - vmin or 1.0
+    cm = resolve_colormap(colormap_name)
+    bbox_wgs84 = _bbox_to_wgs84(bbox, crs)
+
+    frames: list[np.ndarray] = []
+    for parts in parts_per_frame:
+        rgba = _bbox_parts_to_rgba(parts, bbox_wgs84, width, height, vmin, span, cm)
+        if rgba is None:
+            rgba = np.zeros((height, width, 4), dtype=np.uint8)
+        frames.append(rgba)
+
+    return encode_rgba_animation(frames, fmt, duration_ms)
