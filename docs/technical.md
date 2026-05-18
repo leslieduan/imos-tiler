@@ -338,7 +338,14 @@ GET /{prefix}/{product_id}/point?lat=&lon=&from=&to=             → variable va
 }
 ```
 
-`from`/`to` follow the same defaults as `/manifest` (3 months before today / unbounded). The handler is `async def` and fans the per-date `load_slice` calls out via `asyncio.gather(asyncio.to_thread(...))` so total latency is ~max(per-date) instead of the serial sum; concurrent identical requests still share one compute through the L2 slice memoizer. Empty range → `200` with `series: []` (not `404`). Response is `Cache-Control: public, max-age=300, must-revalidate` (not immutable) because an unbounded `to` picks up new dates as they land.
+`from`/`to` follow the same defaults as `/manifest` (3 months before today / unbounded). The handler is `async def` and fans the per-date `load_slice` calls out via `asyncio.gather(asyncio.to_thread(...))` so total latency is ~max(per-date) instead of the serial sum; concurrent identical requests still share one compute through the L2 slice memoizer. Empty range → `200` with `series: []` (not `404`).
+
+**Cache headers — revalidate, not immutable.** This endpoint emits `Cache-Control: public, max-age=300, must-revalidate` (the same `_REVALIDATE_HEADERS` used by `/manifest`), whereas the single-date `/{product_id}/{date}/point` form uses `IMMUTABLE_CACHE_HEADERS` (`max-age=31536000, immutable`). The reason is that the time-series response is **not truly content-addressed by its URL**:
+
+- `to` is optional. When the client omits `to` (or sets it past the latest available date), the response includes "every available date from `from` onwards". New dates landing on the Zarr store after the response is cached would silently change what the URL *should* return — pinning a year-long immutable copy in browser/CDN caches would serve stale results.
+- `/manifest` has the same shape and uses the same headers — both endpoints answer "what is available right now in this date range" and need a revalidation window to pick up newly-arrived dates. The 5-minute `must-revalidate` window is the same trade-off: a series update can be invisible for up to 5 minutes, acceptable because date arrivals are not real-time-critical.
+
+The single-date variant can use immutable headers because the date is in the **path**, so once that date's data exists the URL → bytes mapping is pinned forever. A conditional optimisation is possible — emit immutable headers when `to_date` is explicitly provided and is older than "today" in the local TZ, since no new dates can land inside a closed past window — but it is not implemented: the savings are limited (clients rarely pre-commit to a closed `to` until they have finished an interaction) and conditional cache headers are a sharp edge that interacts with the TZ/date-rollover rules in [§9](#9-date-timezone-and-coordinate-normalisation).
 
 ### 6.2 Data tiles (`/data_tiles`)
 
