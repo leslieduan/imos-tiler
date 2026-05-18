@@ -44,7 +44,7 @@ This project's LOD system derives a pyramid of chunk grids from the native data 
 
 ### 5. No point query endpoint
 
-`GET /tiles/{product_id}/{date}/point?lat=&lon=` returns the actual data value at a geographic point. titiler.xarray does not provide this.
+`GET /{product_id}/{date}/point?lat=&lon=` (mounted under both `/data_tiles` and `/visual_tiles`) returns the actual data value at a geographic point. titiler.xarray does not provide this.
 
 ## Summary
 

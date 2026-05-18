@@ -108,7 +108,7 @@ def get_legend(
 
 
 @router.get(
-    "/{product_id}/{date}/tiles/{z}/{x}/{y}.{ext}",
+    "/{product_id}/{date}/{z}/{x}/{y}.{ext}",
     summary="Visualisation raster tile",
     description=(
         "Standard Web Mercator (XYZ) tile rendered as a colourised PNG or WebP. "

@@ -1,6 +1,6 @@
 # Tile System
 
-This server exposes **two independent tile APIs** that share the URL shape `/{product_id}/{date}/tiles/{z}/{x}/{y}.png` but interpret `z`, `x`, `y` in entirely different coordinate systems. Mixing them up is the most common cause of "why is my tile blank / 404 / off-by-one" bugs.
+This server exposes **two independent tile APIs** that share the URL shape `/{product_id}/{date}/{z}/{x}/{y}.png` but interpret `z`, `x`, `y` in entirely different coordinate systems. Mixing them up is the most common cause of "why is my tile blank / 404 / off-by-one" bugs.
 
 | | `/data_tiles` | `/visual_tiles` |
 |---|---|---|
@@ -24,7 +24,7 @@ See [`technical.md` §5](technical.md#5-tile-coordinate-systems-and-projection-p
 `z`, `x`, `y` are coordinates **within the product's own bounding box**, not a global grid. There is no fixed world origin — `(x=0, y=0)` is the north-west corner of the dataset itself.
 
 ```
-GET /data_tiles/sea_level_anomaly/2024-02-24/tiles/1/0/0.png   ← LOD 1, NW chunk
+GET /data_tiles/sea_level_anomaly/2024-02-24/1/0/0.png   ← LOD 1, NW chunk
 GET /data_tiles/sea_level_anomaly/2024-02-24/manifest.json    ← bounds + LOD grids + value ranges
 ```
 
@@ -66,7 +66,7 @@ Required for decoding raw data tiles. Returns:
 `z`, `x`, `y` are **standard Web Mercator slippy-map tile coordinates** — identical to OpenStreetMap, MapboxGL, MapLibre, Leaflet, and OpenLayers. The reprojection from the source EPSG:4326 data to the EPSG:3857 output PNG happens server-side via `rio-tiler`'s `XarrayReader.tile(...)`.
 
 ```
-GET /visual_tiles/sea_level_anomaly/2024-02-24/tiles/5/29/19.png?colormap=RdBu_r&rescale=-0.5,0.5
+GET /visual_tiles/sea_level_anomaly/2024-02-24/5/29/19.png?colormap=RdBu_r&rescale=-0.5,0.5
 ```
 
 ### 2.1 `z` — Web Mercator zoom level

@@ -19,7 +19,7 @@ router.include_router(products_router)
 
 
 @router.get(
-    "/{product_id}/{date}/tiles/{z}/{x}/{y}.png",
+    "/{product_id}/{date}/{z}/{x}/{y}.png",
     summary="Raw data tile",
     description=(
         "Returns an RGBA PNG encoded for WebGL shader consumption. "
