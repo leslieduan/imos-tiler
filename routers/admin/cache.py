@@ -15,9 +15,9 @@ import asyncio
 from fastapi import APIRouter
 
 from constants import PRODUCTS
-from services.data_renderer import processed_memo_stats
+from services.data_renderer import clear_processed_cache, processed_memo_stats
 from services.disk_cache import collect_disk_stats, get_refresh_status
-from services.loader import slice_memo_stats
+from services.loader import clear_slice_cache, slice_memo_stats
 
 router = APIRouter()
 
@@ -103,3 +103,21 @@ def _build_response() -> dict:
 )
 async def get_cache_state():
     return await asyncio.to_thread(_build_response)
+
+
+@router.delete(
+    "/cache/memory",
+    summary="Clear all in-memory caches",
+    description=(
+        "Drops every entry in the L2 slice cache and the L1 processed-grid cache. "
+        "Disk cache is untouched. In-flight computes are not cancelled — they'll just "
+        "miss the cache on completion and re-populate it."
+    ),
+)
+async def clear_memory_cache():
+    return {
+        "cleared": {
+            "slice": clear_slice_cache(),
+            "processed": clear_processed_cache(),
+        }
+    }
