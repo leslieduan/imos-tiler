@@ -738,6 +738,30 @@ Size is controlled by `SLICE_CACHE_SIZE` (default `10`). Entry size varies signi
 
 Primary consumers are **visual_tiles** (no L1 above it — every tile request calls `load_slice`) and **data_tiles manifest/point** (always need `ds` directly). For data_tiles tile requests, the slice is only loaded on an L1 miss; once the processed grid is warm, L2 is bypassed entirely.
 
+#### 10.3.1 Oscillating latency on time-series requests that straddle the L3 window
+
+The `/point` time-series endpoint loads one slice per available date in `[from, to]`. When the requested range is **larger than `SLICE_CACHE_SIZE`** *and* **extends past the `CACHE_DAYS` prewarm boundary**, the same request alternates between fast (~tens of ms) and slow (~seconds) on every other hit — even though no other traffic is touching the server. This is a structural property of the L2/L3 interaction, not a bug.
+
+**Concrete scenario.** `SLICE_CACHE_SIZE = 10`, `CACHE_DAYS = 30`, today is 2026-05-18. A client requests `/{product_id}/point?from=2026-04-15&to=2026-05-15` (31 dates). L3 prewarm covers the most recent 30 dates (~2026-04-18 → 2026-05-17), so **3 dates** at the start of the range (2026-04-15, 16, 17) are **outside L3** — call them the *orphan* dates. They live only on S3.
+
+Two design facts make these orphans persistently expensive:
+
+1. **`load_slice` reads from L3 but never writes to it.** A `factory()` miss falls through to `store[...].sel(time=t).compute()`, returns the slice, and lets L2 cache it — but the on-disk pickle is never created. Only `prewarm_disk_slices` and `refresh_disk_cache` (in `services/disk_cache.py`) write to L3, and they only touch dates within the `[-_CACHE_DAYS:]` window.
+2. **Zarr's atomic read unit is the chunk, not the timestep.** For products chunked `(time=5, lat=full, lon=full)`, an S3 read for one orphan date downloads ~5 timesteps' worth of compressed bytes; xarray decodes the chunk and discards 4/5 of it. fsspec's chunk cache may absorb the cost across `.compute()` calls *inside* one Python process if they happen close together, but it is not a reliable cross-request cache. In practice the three contiguous orphans typically share one chunk, so the S3 cost per cold request is roughly **one chunk download** — but it's still ~1–2 s wall-clock, dominating the response.
+
+**Why the latency oscillates.** With 31 dates fanning out through `asyncio.gather(asyncio.to_thread(load_slice, ...))`, each per-date result is inserted into the size-10 L2 LRU as it completes. The 3 orphans finish slowest (S3 vs disk), so they are the **last** entries inserted and survive in L2.
+
+| Hit | L2 state at start                    | What happens                                                                                                                      | Wall time |
+| --- | ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------- | --------- |
+| 1   | empty                                | 28 L3-disk reads + 1 S3 chunk download (covers all 3 orphans). Last 10 inserts survive in L2 → **all 3 orphans + 7 disk dates**.   | ~2.6 s    |
+| 2   | 3 orphans + 7 disk dates             | 10 L2 hits (incl. all 3 orphans) → no S3. 21 misses → L3-disk reads, all fast. **The 21 inserts evict every orphan from L2.**      | ~19 ms    |
+| 3   | 10 disk-backed dates, no orphans     | 10 L2 hits + 18 L3 reads + 3 S3 fetches for the orphan chunk. Same as hit 1, with 7 fewer L2 misses. After: orphans back in L2.    | ~2.7 s    |
+| 4   | same as hit 2                        | same as hit 2                                                                                                                     | ~19 ms    |
+
+The pattern repeats indefinitely. The asymmetry is that **the orphans are L2 *hits* in hit 2 but fresh *inserts* in hit 3** — and the 21 inserts done during hit 2 (for the disk-backed misses) flush the orphans out of L2 entirely, because hit count doesn't protect against eviction once 21 fresh inserts have rotated through a size-10 cache.
+
+**General shape of the trap.** Any request that needs **K distinct slices** where `K > SLICE_CACHE_SIZE` *and* some subset `O ⊂ K` is outside the L3 prewarm window will exhibit this oscillation. Each repeat hit alternates between "orphans still in L2 from the previous fetch" (fast) and "orphans got evicted by the disk-backed inserts" (slow → re-fetch from S3 → orphans land back in L2 → next hit is fast again). The thrash is invisible to `/admin/cache` because L2's stats only report size and inflight counts, not key-level churn.
+
 ### 10.4 L3 — Slice cache, disk (`DISK_CACHE_PATH` directory)
 
 Persists fully-computed slices as lz4-compressed pickles to survive server restarts. On an L2 miss, `load_slice` checks disk before going to S3. A disk hit (~30 ms read + decompress) is ~60× faster than a cold S3 fetch.
