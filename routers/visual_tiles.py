@@ -5,8 +5,10 @@ from fastapi.responses import JSONResponse, Response
 from services.colormap_config import is_categorical, list_colormaps
 from services.colormap_lookup import resolve_colormap
 from services.legend_renderer import render_legend
-from services.visual_renderer import render_bbox, render_tile
-from utils.image import ImageFormat, media_type
+from services.loader import get_available_dates, load_slice_uncached
+from services.store_registry import get_store
+from services.visual_renderer import render_bbox, render_bbox_animation, render_tile
+from utils.image import AnimatedFormat, ImageFormat, animated_media_type, media_type
 from utils.memoizer import Memoizer
 
 from .products import router as products_router
@@ -17,6 +19,8 @@ from .shared import (
     get_product_or_404,
     load_slice_or_404,
 )
+
+_MAX_ANIMATION_FRAMES = 60
 
 router = APIRouter()
 router.include_router(products_router)
@@ -175,6 +179,25 @@ def get_tile(
     return Response(content=body, media_type=media_type(ext), headers=IMMUTABLE_CACHE_HEADERS)
 
 
+def _default_bbox_from_store(product_source_path: str) -> tuple[float, float, float, float]:
+    """Return EPSG:4326 bounds for the dataset, clamped to ±180 lon.
+
+    Antimeridian-straddling datasets (e.g. GSLA at 57–185°E) lose the sliver past
+    180° in the default rendering — callers can pass an explicit bbox to cover
+    the other side.
+    """
+    store = get_store(product_source_path)
+    lat_min = float(store.lat.min())
+    lat_max = float(store.lat.max())
+    lon_min = float(store.lon.min())
+    lon_max = float(store.lon.max())
+    if lon_min > 180:
+        lon_min -= 360
+    if lon_max > 180:
+        lon_max = 180.0
+    return (lon_min, lat_min, lon_max, lat_max)
+
+
 @router.get(
     "/{product_id}/{date}/bbox.{ext}",
     summary="Visualisation tile by bbox",
@@ -264,3 +287,124 @@ def get_bbox(
         raise HTTPException(status_code=400, detail=str(e)) from e
 
     return Response(content=body, media_type=media_type(ext), headers=IMMUTABLE_CACHE_HEADERS)
+
+
+@router.get(
+    "/{product_id}/{from_date}/{to_date}/animation.{ext}",
+    summary="Animated bbox over a date range",
+    description=(
+        f"Renders the same bbox across every available date in [from_date, to_date] "
+        f"and assembles them into an animated image (GIF / APNG / animated WebP). "
+        f"Intended for demos and quick visualisations — not optimised for high traffic. "
+        f"At most {_MAX_ANIMATION_FRAMES} frames per request; requests beyond that are rejected. "
+        f"If bbox is omitted, the dataset's native bounds are used (clamped to ±180° lon). "
+        f"This endpoint bypasses the in-memory slice cache so it never evicts hot tiles, "
+        f"and the response is not cached. Expect cold requests to be slow."
+    ),
+)
+def get_animation(
+    product_id: str = Path(openapi_examples=PRODUCT_EX),
+    from_date: str = Path(pattern=r"^\d{4}-\d{2}-\d{2}$", openapi_examples=DATE_EX),
+    to_date: str = Path(pattern=r"^\d{4}-\d{2}-\d{2}$", openapi_examples=DATE_EX),
+    ext: AnimatedFormat = Path(
+        pattern="^(gif|apng|webp)$",
+        description="Animated output format — 'gif' (universal, 256-colour palette), 'apng' (lossless RGBA), or 'webp' (compressed RGBA).",
+    ),
+    bbox: str | None = Query(
+        None,
+        description="Bounding box as 'minx,miny,maxx,maxy' in the CRS specified by the crs parameter. Defaults to the dataset's native bounds.",
+    ),
+    width: int = Query(512, ge=1, le=2048),
+    height: int = Query(512, ge=1, le=2048),
+    colormap_name: str = Query("viridis", alias="colormap"),
+    rescale: str | None = Query(
+        None,
+        description="Value range as 'min,max'. Defaults to the union range across all frames so the colour ramp stays stable.",
+    ),
+    crs: str = Query(
+        "EPSG:4326",
+        description="CRS of the bbox. 'EPSG:4326' (default) for geographic degrees; 'EPSG:3857' for Web Mercator meters.",
+    ),
+    duration: int = Query(
+        200, ge=10, le=5000, description="Milliseconds per frame in the animation."
+    ),
+):
+    if from_date > to_date:
+        raise HTTPException(
+            status_code=400, detail=f"from_date {from_date!r} is after to_date {to_date!r}."
+        )
+
+    try:
+        resolve_colormap(colormap_name)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    product = get_product_or_404(product_id)
+    if isinstance(product.variable, list):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Product '{product_id}' has multiple variables; animation supports single-variable products only.",
+        )
+    variable: str = product.variable
+
+    crs = crs.upper()
+    if crs not in ("EPSG:4326", "EPSG:3857"):
+        raise HTTPException(status_code=400, detail="crs must be 'EPSG:4326' or 'EPSG:3857'")
+
+    if bbox is None:
+        bbox_tuple = _default_bbox_from_store(product.source_path)
+        # Default bbox is in EPSG:4326 regardless of the crs query param.
+        crs = "EPSG:4326"
+    else:
+        try:
+            minx, miny, maxx, maxy = (float(v) for v in bbox.split(","))
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail="bbox must be 'minx,miny,maxx,maxy'") from e
+        bbox_tuple = (minx, miny, maxx, maxy)
+
+    rescale_range = _parse_rescale(rescale)
+    _require_rescale_if_categorical(colormap_name, rescale_range)
+    if ext == "webp" and is_categorical(colormap_name):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Colormap '{colormap_name}' is categorical and cannot be encoded as animated WebP "
+                "(lossy compression corrupts the discrete colour boundaries). Use .apng or .gif."
+            ),
+        )
+
+    available = get_available_dates(product.source_path)
+    dates = [d for d in available if from_date <= d <= to_date]
+    if not dates:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No data for product {product_id!r} in [{from_date}, {to_date}].",
+        )
+    if len(dates) > _MAX_ANIMATION_FRAMES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Date range yields {len(dates)} frames; max is {_MAX_ANIMATION_FRAMES}. "
+                "Narrow the range and retry."
+            ),
+        )
+
+    datasets = [load_slice_uncached(product.source_path, d, [variable]) for d in dates]
+
+    try:
+        body = render_bbox_animation(
+            datasets,
+            variable,
+            bbox_tuple,
+            width,
+            height,
+            colormap_name,
+            rescale_range,
+            crs=crs,
+            fmt=ext,
+            duration_ms=duration,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    return Response(content=body, media_type=animated_media_type(ext))

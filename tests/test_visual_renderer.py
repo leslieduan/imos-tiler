@@ -201,3 +201,48 @@ def test_render_bbox_outside_data_returns_empty():
     )
     img = _decode_png(out)
     assert (img[..., 3] == 0).all()
+
+
+def test_render_bbox_animation_produces_apng_with_multiple_frames():
+    # Distinct fill patterns so Pillow's APNG encoder doesn't collapse identical
+    # adjacent frames into one (it does this for byte-identical frames).
+    ds_a = _scalar_ds()
+    ds_b = _scalar_ds()
+    ds_b["GSLA"].values[:] = ds_b["GSLA"].values[:] * 0.3
+    out = visual_renderer.render_bbox_animation(
+        [ds_a, ds_b],
+        "GSLA",
+        bbox=(140.0, -40.0, 150.0, -30.0),
+        width=64,
+        height=64,
+        fmt="apng",
+        duration_ms=100,
+    )
+    img = Image.open(io.BytesIO(out))
+    assert img.format == "PNG"
+    assert getattr(img, "n_frames", 1) == 2
+
+
+def test_render_bbox_animation_empty_dataset_list_raises():
+    with pytest.raises(ValueError):
+        visual_renderer.render_bbox_animation(
+            [], "GSLA", bbox=(140.0, -40.0, 150.0, -30.0), width=32, height=32
+        )
+
+
+def test_render_bbox_animation_all_nan_does_not_error():
+    """All-NaN frames must still produce a valid image. Both GIF and APNG encoders
+    collapse adjacent byte-identical frames, so we can't assert n_frames > 1 — we
+    just need the call to succeed and produce a valid image."""
+    ds = _scalar_ds(fill="nan")
+    out = visual_renderer.render_bbox_animation(
+        [ds, ds],
+        "GSLA",
+        bbox=(140.0, -40.0, 150.0, -30.0),
+        width=32,
+        height=32,
+        fmt="gif",
+        duration_ms=100,
+    )
+    img = Image.open(io.BytesIO(out))
+    assert img.format == "GIF"
