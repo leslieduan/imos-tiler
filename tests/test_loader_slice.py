@@ -61,7 +61,7 @@ def test_load_slice_unknown_date_raises_file_not_found(monkeypatch):
     ds = _ds_with_time(["2024-01-15T13:00:00"])
     monkeypatch.setattr(xr, "open_zarr", lambda *_, **__: ds)
 
-    with pytest.raises(FileNotFoundError, match="local dates"):
+    with pytest.raises(FileNotFoundError, match="Latest available date is '2024-01-16'"):
         loader.load_slice("s3://b/x.zarr", "1999-01-01", ["v"])
 
 

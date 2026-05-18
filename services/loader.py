@@ -29,7 +29,6 @@ from services.disk_cache import (
     read_slice_from_disk,
 )
 from services.store_registry import get_store, store_registry
-from utils.dates import LOCAL_TZ
 from utils.memoizer import Memoizer
 
 logger = logging.getLogger(__name__)
@@ -89,12 +88,14 @@ def load_slice(store_url: str, date: str, variables: list[str]) -> xr.Dataset:
                 return cached
 
         store = get_store(store_url)
-        matching = list(store_registry.date_index(store_url).get(date, ()))
+        index = store_registry.date_index(store_url)
+        matching = list(index.get(date, ()))
         if not matching:
-            raise FileNotFoundError(
-                f"No data for date {date!r}. Dates must be {LOCAL_TZ.key} local dates "
-                f"(as returned by the manifest endpoint), not UTC."
+            latest = max(index) if index else None
+            hint = (
+                f" Latest available date is {latest!r}." if latest else " No dates are available."
             )
+            raise FileNotFoundError(f"No data for date {date!r}.{hint}")
         if len(matching) > 1:
             logger.warning(
                 "Multiple timestamps (%d) map to date %r in %s; using first: %s",
