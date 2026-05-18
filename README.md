@@ -70,7 +70,8 @@ Raw RGBA tiles for WebGL shader consumption — pixel bytes encode scientific va
 | GET    | `/data_tiles/manifest?from=&to=`                        | Available dates for all products (defaults to last 3 months) |
 | GET    | `/data_tiles/{product_id}/{date}/{z}/{x}/{y}.png`       | Raw value-encoded tile                                       |
 | GET    | `/data_tiles/{product_id}/{date}/manifest.json`         | Tile config (bounds, value ranges, LOD grid)                 |
-| GET    | `/data_tiles/{product_id}/{date}/point?lat=&lon=`       | Point value lookup                                           |
+| GET    | `/data_tiles/{product_id}/{date}/point?lat=&lon=`       | Point value lookup (single date)                             |
+| GET    | `/data_tiles/{product_id}/point?lat=&lon=&from=&to=`    | Point value time series across a date range (defaults: `from`=3 months ago, `to`=unbounded) |
 
 ### Visual tiles (`/visual_tiles`)
 
