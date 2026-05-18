@@ -125,7 +125,7 @@ Zarr eliminates this: metadata is one `.zmetadata` HTTP request, and variable ch
 
 ### Request flow
 
-**Data tiles** (`/data_tiles/{product_id}/{date}/tiles/{z}/{x}/{y}.png`)
+**Data tiles** (`/data_tiles/{product_id}/{date}/{z}/{x}/{y}.png`)
 
 `load_slice` is lazy — the handler passes a callable to `render_tile`, which only invokes it when `_get_processed` misses. On a processed-cache hit, no slice I/O occurs.
 
@@ -136,7 +136,7 @@ disk warm      → get_lod_grids (already set) → _get_processed miss → load_
 S3 cold        → get_lod_grids (already set) → _get_processed miss → load_slice (S3 .compute(), ~2s) → resample → cache → _extract_chunk → PNG encode
 ```
 
-**Visual tiles** (`/visual_tiles/{product_id}/{date}/tiles/{z}/{x}/{y}.{ext}` or `/bbox.{ext}` — `ext ∈ {png, webp}`)
+**Visual tiles** (`/visual_tiles/{product_id}/{date}/{z}/{x}/{y}.{ext}` or `/bbox.{ext}` — `ext ∈ {png, webp}`)
 
 No L1 cache. Every request calls `load_slice`, then `XarrayReader` reprojects to Web Mercator.
 
@@ -312,7 +312,7 @@ GET /{prefix}/{product_id}/{date}/point?lat=&lon=         → variable value at 
 ### 6.2 Data tiles (`/data_tiles`)
 
 ```
-GET /data_tiles/{product_id}/{date}/tiles/{z}/{x}/{y}.png → raw RGBA PNG tile
+GET /data_tiles/{product_id}/{date}/{z}/{x}/{y}.png       → raw RGBA PNG tile
 GET /data_tiles/{product_id}/{date}/manifest.json         → bounds + value ranges + LOD grid config
 ```
 
@@ -325,7 +325,7 @@ Colourised PNG tiles in standard Web Mercator (XYZ). Single-variable products on
 ```
 GET /visual_tiles/colormaps                                            → all supported colormap names
 GET /visual_tiles/colormaps/{name}/legend                              → color legend PNG for a colormap
-GET /visual_tiles/{product_id}/{date}/tiles/{z}/{x}/{y}.{ext}            → colourised Web Mercator image (.png or .webp)
+GET /visual_tiles/{product_id}/{date}/{z}/{x}/{y}.{ext}                  → colourised Web Mercator image (.png or .webp)
 GET /visual_tiles/{product_id}/{date}/bbox.{ext}?bbox=minx,miny,maxx,maxy → colourised image for arbitrary bbox (.png or .webp)
 ```
 
@@ -535,8 +535,8 @@ Practical rules:
 The tile and bbox endpoints take the output format as a `.{ext}` path-param suffix:
 
 ```
-GET /visual_tiles/{id}/{date}/tiles/{z}/{x}/{y}.png   → image/png
-GET /visual_tiles/{id}/{date}/tiles/{z}/{x}/{y}.webp  → image/webp
+GET /visual_tiles/{id}/{date}/{z}/{x}/{y}.png         → image/png
+GET /visual_tiles/{id}/{date}/{z}/{x}/{y}.webp        → image/webp
 GET /visual_tiles/{id}/{date}/bbox.png?bbox=...       → image/png
 GET /visual_tiles/{id}/{date}/bbox.webp?bbox=...      → image/webp
 ```
@@ -824,7 +824,7 @@ The server combines an **asyncio event loop** (for FastAPI/Uvicorn request multi
 Look at the route definitions in `routers/`:
 
 ```python
-@router.get("/{product_id}/{date}/tiles/{z}/{x}/{y}.{ext}")
+@router.get("/{product_id}/{date}/{z}/{x}/{y}.{ext}")
 def get_tile(...):
     ...
 ```

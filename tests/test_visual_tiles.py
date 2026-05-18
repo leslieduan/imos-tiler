@@ -24,33 +24,31 @@ def _make_ds() -> xr.Dataset:
 
 
 def test_tile_unknown_product():
-    response = client.get("/visual_tiles/nonexistent/2024-01-01/tiles/5/0/0.png")
+    response = client.get("/visual_tiles/nonexistent/2024-01-01/5/0/0.png")
     assert response.status_code == 404
 
 
 def test_tile_multi_variable_product_rejected():
-    response = client.get("/visual_tiles/ocean_current/2024-01-01/tiles/5/0/0.png")
+    response = client.get("/visual_tiles/ocean_current/2024-01-01/5/0/0.png")
     assert response.status_code == 400
 
 
 def test_tile_missing_date():
     with patch("routers.shared.load_slice", side_effect=FileNotFoundError("No data")):
-        response = client.get("/visual_tiles/sea_level_anomaly/9999-01-01/tiles/5/0/0.png")
+        response = client.get("/visual_tiles/sea_level_anomaly/9999-01-01/5/0/0.png")
     assert response.status_code == 404
 
 
 def test_tile_bad_rescale():
     with patch("routers.shared.load_slice", return_value=_make_ds()):
-        response = client.get(
-            "/visual_tiles/sea_level_anomaly/2024-01-01/tiles/5/0/0.png?rescale=bad"
-        )
+        response = client.get("/visual_tiles/sea_level_anomaly/2024-01-01/5/0/0.png?rescale=bad")
     assert response.status_code == 400
 
 
 def test_tile_unknown_colormap():
     with patch("routers.shared.load_slice", return_value=_make_ds()):
         response = client.get(
-            "/visual_tiles/sea_level_anomaly/2024-01-01/tiles/5/0/0.png?colormap=not_a_real_colormap"
+            "/visual_tiles/sea_level_anomaly/2024-01-01/5/0/0.png?colormap=not_a_real_colormap"
         )
     assert response.status_code == 400
 
@@ -60,7 +58,7 @@ def test_tile_ok():
         patch("routers.shared.load_slice", return_value=_make_ds()),
         patch("routers.visual_tiles.render_tile", return_value=_PNG),
     ):
-        response = client.get("/visual_tiles/sea_level_anomaly/2024-01-01/tiles/5/0/0.png")
+        response = client.get("/visual_tiles/sea_level_anomaly/2024-01-01/5/0/0.png")
     assert response.status_code == 200
     assert response.headers["content-type"] == "image/png"
 
@@ -71,7 +69,7 @@ def test_tile_ok_with_rescale():
         patch("routers.visual_tiles.render_tile", return_value=_PNG),
     ):
         response = client.get(
-            "/visual_tiles/sea_level_anomaly/2024-01-01/tiles/5/0/0.png?rescale=-0.5,0.5"
+            "/visual_tiles/sea_level_anomaly/2024-01-01/5/0/0.png?rescale=-0.5,0.5"
         )
     assert response.status_code == 200
 
@@ -84,7 +82,7 @@ def test_tile_ok_with_custom_colormap():
         patch("services.colormap_config._custom_colormaps", {"test_ramp": custom}),
     ):
         response = client.get(
-            "/visual_tiles/sea_level_anomaly/2024-01-01/tiles/5/0/0.png?colormap=test_ramp"
+            "/visual_tiles/sea_level_anomaly/2024-01-01/5/0/0.png?colormap=test_ramp"
         )
     assert response.status_code == 200
 
@@ -97,13 +95,13 @@ def test_tile_webp_ok():
         patch("routers.shared.load_slice", return_value=_make_ds()),
         patch("routers.visual_tiles.render_tile", return_value=_WEBP),
     ):
-        response = client.get("/visual_tiles/sea_level_anomaly/2024-01-01/tiles/5/0/0.webp")
+        response = client.get("/visual_tiles/sea_level_anomaly/2024-01-01/5/0/0.webp")
     assert response.status_code == 200
     assert response.headers["content-type"] == "image/webp"
 
 
 def test_tile_unknown_extension_rejected():
-    response = client.get("/visual_tiles/sea_level_anomaly/2024-01-01/tiles/5/0/0.jpg")
+    response = client.get("/visual_tiles/sea_level_anomaly/2024-01-01/5/0/0.jpg")
     assert response.status_code == 422
 
 
@@ -115,7 +113,7 @@ def test_tile_webp_rejected_for_categorical_colormap():
         patch("services.colormap_config._custom_colormap_modes", {"cat_map": "categorical"}),
     ):
         response = client.get(
-            "/visual_tiles/sea_level_anomaly/2024-01-01/tiles/5/0/0.webp?colormap=cat_map&rescale=1,4"
+            "/visual_tiles/sea_level_anomaly/2024-01-01/5/0/0.webp?colormap=cat_map&rescale=1,4"
         )
     assert response.status_code == 400
     assert "categorical" in response.json()["detail"].lower()

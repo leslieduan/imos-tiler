@@ -17,7 +17,7 @@ The dataset.md products are **representative anchors**, not an exhaustive list �
 
 FastAPI runs `def` route handlers in a thread pool managed by anyio. Each concurrent request gets its own thread — the same one-thread-per-request model as Spring/Tomcat, but with a smaller default pool.
 
-### Data tile paths (`/data_tiles/.../tiles/`)
+### Data tile paths (`/data_tiles/...`)
 
 `load_slice` is lazy — the route handler passes a callable to `render_tile`, which only invokes it if `_get_processed` misses. Each request falls into one of these paths:
 
@@ -26,7 +26,7 @@ FastAPI runs `def` route handlers in a thread pool managed by anyio. Each concur
 - **Disk warm** — `_processed_cache` and L2 both miss; `(product, date)` is on disk. The thread reads + decompresses the lz4 pickle (~30ms), resamples, populates both caches, then encodes.
 - **Cold** — nothing cached. The thread fetches Zarr chunks from S3 (`.compute()`, ~2s), writes to disk and L2, resamples, populates `_processed_cache`, then encodes.
 
-### Visual tile paths (`/visual_tiles/.../tiles/` and `/bbox`)
+### Visual tile paths (`/visual_tiles/...` and `/bbox`)
 
 No processed grid cache. Each request calls `load_slice` unconditionally:
 
@@ -169,7 +169,7 @@ Concurrent requests for the same `(product, date, lod)` that all miss `_processe
 
 ## CloudFront and real-world concurrency
 
-In production, CloudFront sits in front of this server and caches tile responses at the edge. A tile URL (`/visual_tiles/{product}/{date}/tiles/{z}/{x}/{y}.png`) is fully deterministic — the same URL always returns the same bytes for a given product and date — so CloudFront's cache hit rate is very high once a date has been requested.
+In production, CloudFront sits in front of this server and caches tile responses at the edge. A tile URL (`/visual_tiles/{product}/{date}/{z}/{x}/{y}.png`) is fully deterministic — the same URL always returns the same bytes for a given product and date — so CloudFront's cache hit rate is very high once a date has been requested.
 
 In practice this means:
 

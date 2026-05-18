@@ -68,7 +68,7 @@ Raw RGBA tiles for WebGL shader consumption — pixel bytes encode scientific va
 | ------ | ------------------------------------------------------- | ------------------------------------------------------------ |
 | GET    | `/data_tiles/products`                                  | List all registered products                                 |
 | GET    | `/data_tiles/manifest?from=&to=`                        | Available dates for all products (defaults to last 3 months) |
-| GET    | `/data_tiles/{product_id}/{date}/tiles/{z}/{x}/{y}.png` | Raw value-encoded tile                                       |
+| GET    | `/data_tiles/{product_id}/{date}/{z}/{x}/{y}.png`       | Raw value-encoded tile                                       |
 | GET    | `/data_tiles/{product_id}/{date}/manifest.json`         | Tile config (bounds, value ranges, LOD grid)                 |
 | GET    | `/data_tiles/{product_id}/{date}/point?lat=&lon=`       | Point value lookup                                           |
 
@@ -78,7 +78,7 @@ Colourised Web Mercator (XYZ) tiles — compatible with MapboxGL `raster` source
 
 | Method | Path                                                              | Description                                                                                                       |
 | ------ | ----------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| GET    | `/visual_tiles/{product_id}/{date}/tiles/{z}/{x}/{y}.{ext}`         | Colourised tile (Web Mercator XYZ). `ext` is `png` (lossless) or `webp` (lossy, ~50% smaller). Categorical colormaps must use `.png`. |
+| GET    | `/visual_tiles/{product_id}/{date}/{z}/{x}/{y}.{ext}`               | Colourised tile (Web Mercator XYZ). `ext` is `png` (lossless) or `webp` (lossy, ~50% smaller). Categorical colormaps must use `.png`. |
 | GET    | `/visual_tiles/{product_id}/{date}/bbox.{ext}?bbox=minx,miny,maxx,maxy` | Colourised image for an arbitrary bbox (EPSG:4326 degrees by default; pass `crs=EPSG:3857` for Web Mercator meters). `ext` is `png` or `webp`. |
 | GET    | `/visual_tiles/colormaps`                                           | All supported colormap names grouped by source (custom, rio-tiler, matplotlib)                                    |
 | GET    | `/visual_tiles/colormaps/{name}/legend`                             | Color legend PNG for a colormap (gradient bar ± tick labels)                                                      |
@@ -173,7 +173,7 @@ curl -X POST http://localhost:8000/admin/colormaps \
 
 ```
 # Use with rescale matching the key range
-GET /visual_tiles/{product_id}/{date}/tiles/1/0/0.png?colormap=land_cover&rescale=1,4
+GET /visual_tiles/{product_id}/{date}/1/0/0.png?colormap=land_cover&rescale=1,4
 ```
 
 **Color legend** — returns a PNG color bar for any colormap name returned by `GET /visual_tiles/colormaps`. Without `rescale`, only the bar is rendered. With `rescale=min,max`, tick labels are drawn at lo, mid, and hi:

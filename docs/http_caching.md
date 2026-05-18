@@ -52,7 +52,7 @@ the bytes never change (subject to the operational rule in §"Invariant").
 | ----------------------------------------------- | --------------------------------------------------- |
 | `/data_tiles/{p}/{d}/{z}/{x}/{y}.png`           | product_id, date, tile coords                       |
 | `/data_tiles/{p}/{d}/manifest.json`             | product_id, date                                    |
-| `/visual_tiles/{p}/{d}/tiles/{z}/{x}/{y}.{ext}` | + colormap, rescale, ext                            |
+| `/visual_tiles/{p}/{d}/{z}/{x}/{y}.{ext}`       | + colormap, rescale, ext                            |
 | `/visual_tiles/{p}/{d}/bbox.{ext}`              | + bbox, width, height, crs                          |
 | `/visual_tiles/colormaps/{name}/legend`         | colormap name + rescale, width, height, orientation |
 | `/{product_id}/{date}/point`                    | product_id, date, lat, lon                          |
@@ -195,9 +195,9 @@ frontend appends `?cv=...` to URLs, bumping `CACHE_VERSION` is inert.
   cache-busting effect comes from the URL change, not server-side logic:
 
   ```
-  curl '...tiles/3/4/2.png?colormap=viridis'                # same bytes
-  curl '...tiles/3/4/2.png?colormap=viridis&cv=cv1'         # same bytes
-  curl '...tiles/3/4/2.png?colormap=viridis&cv=anything'    # same bytes
+  curl '.../3/4/2.png?colormap=viridis'                # same bytes
+  curl '.../3/4/2.png?colormap=viridis&cv=cv1'         # same bytes
+  curl '.../3/4/2.png?colormap=viridis&cv=anything'    # same bytes
   ```
 
   Browsers and CloudFront treat the three URLs as distinct cache entries
@@ -222,13 +222,13 @@ URLs verbatim.
 
 ```
 Day 1 — CACHE_VERSION = "cv1"
-  Frontend URLs: .../tiles/3/4/2.png?colormap=viridis&cv=cv1
+  Frontend URLs: .../3/4/2.png?colormap=viridis&cv=cv1
   Browser + CloudFront cache these (immutable, 1 year).
 
 Day 30 — bump CACHE_VERSION to "cv2"; deploy
   Within 5 min, frontend revalidates /manifest, sees "cv2".
-  New URLs: .../tiles/3/4/2.png?colormap=viridis&cv=cv2  → cache miss everywhere
-  Old URLs: .../tiles/3/4/2.png?colormap=viridis&cv=cv1  → orphaned; LRU evicts
+  New URLs: .../3/4/2.png?colormap=viridis&cv=cv2  → cache miss everywhere
+  Old URLs: .../3/4/2.png?colormap=viridis&cv=cv1  → orphaned; LRU evicts
 ```
 
 Worst-case staleness on an output-altering change: **5 minutes** (the manifest
