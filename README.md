@@ -94,12 +94,13 @@ Query parameters for tile requests:
 
 Requires `X-Admin-Key` header. Admin endpoints are blocked at the nginx layer and only reachable at port 8000 — on EC2, use an SSH tunnel (`ssh -L 8000:localhost:8000 ec2-user@your-ec2-ip`) before calling them.
 
-| Method | Path                      | Description                    |
-| ------ | ------------------------- | ------------------------------ |
-| POST   | `/admin/products`         | Register a new product         |
-| DELETE | `/admin/products/{id}`    | Remove a product               |
-| POST   | `/admin/colormaps`        | Register a new custom colormap |
-| DELETE | `/admin/colormaps/{name}` | Remove a custom colormap       |
+| Method | Path                      | Description                                                                |
+| ------ | ------------------------- | -------------------------------------------------------------------------- |
+| POST   | `/admin/products`         | Register a new product                                                     |
+| DELETE | `/admin/products/{id}`    | Remove a product                                                           |
+| POST   | `/admin/colormaps`        | Register a new custom colormap                                             |
+| DELETE | `/admin/colormaps/{name}` | Remove a custom colormap                                                   |
+| GET    | `/admin/cache`            | Cache state snapshot (disk footprint, refresh status, in-flight computes) |
 
 ## Managing products
 

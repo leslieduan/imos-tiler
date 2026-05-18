@@ -24,6 +24,7 @@ import os
 import pickle
 import shutil
 import threading
+from datetime import UTC, datetime
 from pathlib import Path
 
 import lz4.frame
@@ -34,6 +35,18 @@ from constants import Product
 logger = logging.getLogger(__name__)
 
 _CACHE_DAYS = int(os.environ.get("CACHE_DAYS", 30))
+
+# Status of the most recent refresh_disk_cache run, surfaced via /admin/cache.
+# "never_run" until the first cycle starts; flips to "running" while in progress,
+# then "ok" or "error". We track both start and completion so /admin/cache can
+# distinguish "currently running" from "last finished at X".
+_refresh_status: dict = {
+    "last_started_at": None,
+    "last_completed_at": None,
+    "status": "never_run",
+    "last_error": None,
+}
+_refresh_status_lock = threading.Lock()
 
 
 def disk_cache_path(store_url: str, date: str, variables: list[str]) -> Path | None:
@@ -209,36 +222,164 @@ def refresh_disk_cache(products: list[Product]) -> None:
     """
     if not os.environ.get("DISK_CACHE_PATH"):
         return
-    evict_stale_and_orphans(products)
 
-    from services.loader import get_available_dates, load_slice
+    with _refresh_status_lock:
+        _refresh_status["last_started_at"] = datetime.now(UTC)
+        _refresh_status["status"] = "running"
 
-    for product in products:
-        variables = product.variables
-        try:
-            target_dates = set(get_available_dates(product.source_path)[-_CACHE_DAYS:])
-        except Exception:
-            logger.warning("Refresh: could not get dates for %s", product.id, exc_info=True)
-            continue
+    try:
+        evict_stale_and_orphans(products)
 
-        _p = disk_cache_path(product.source_path, "", variables)
-        if _p is None:
-            continue
-        cache_dir = _p.parent
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        cached_dates = {f.name.split(".")[0] for f in cache_dir.glob("*.pkl.lz4")}
+        from services.loader import get_available_dates, load_slice
 
-        for date in sorted(target_dates - cached_dates):
+        for product in products:
+            variables = product.variables
             try:
-                ds = load_slice(product.source_path, date, variables)
-                p = disk_cache_path(product.source_path, date, variables)
-                if p is not None:
-                    write_slice_to_disk(p, ds)
-                    logger.info("Disk cache added: %s / %s", product.id, date)
+                target_dates = set(get_available_dates(product.source_path)[-_CACHE_DAYS:])
             except Exception:
-                logger.warning("Disk cache add failed: %s / %s", product.id, date, exc_info=True)
+                logger.warning("Refresh: could not get dates for %s", product.id, exc_info=True)
+                continue
 
-    _evict_if_over_threshold()
+            _p = disk_cache_path(product.source_path, "", variables)
+            if _p is None:
+                continue
+            cache_dir = _p.parent
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            cached_dates = {f.name.split(".")[0] for f in cache_dir.glob("*.pkl.lz4")}
+
+            for date in sorted(target_dates - cached_dates):
+                try:
+                    ds = load_slice(product.source_path, date, variables)
+                    p = disk_cache_path(product.source_path, date, variables)
+                    if p is not None:
+                        write_slice_to_disk(p, ds)
+                        logger.info("Disk cache added: %s / %s", product.id, date)
+                except Exception:
+                    logger.warning(
+                        "Disk cache add failed: %s / %s", product.id, date, exc_info=True
+                    )
+
+        _evict_if_over_threshold()
+    except Exception as e:
+        with _refresh_status_lock:
+            _refresh_status["last_completed_at"] = datetime.now(UTC)
+            _refresh_status["status"] = "error"
+            _refresh_status["last_error"] = f"{type(e).__name__}: {e}"
+        raise
+    else:
+        with _refresh_status_lock:
+            _refresh_status["last_completed_at"] = datetime.now(UTC)
+            _refresh_status["status"] = "ok"
+            _refresh_status["last_error"] = None
+
+
+def get_refresh_status() -> dict:
+    """Snapshot of the most recent refresh_disk_cache run, with ISO-8601 UTC timestamps."""
+    with _refresh_status_lock:
+        return {
+            "status": _refresh_status["status"],
+            "last_started_at": (
+                _refresh_status["last_started_at"].isoformat()
+                if _refresh_status["last_started_at"]
+                else None
+            ),
+            "last_completed_at": (
+                _refresh_status["last_completed_at"].isoformat()
+                if _refresh_status["last_completed_at"]
+                else None
+            ),
+            "last_error": _refresh_status["last_error"],
+            "interval_seconds": int(os.environ.get("CACHE_REFRESH_INTERVAL_SECONDS", 14400)),
+        }
+
+
+_EMPTY_PRODUCT_DISK_STATS: dict = {
+    "file_count": 0,
+    "total_bytes": 0,
+    "oldest_date": None,
+    "newest_date": None,
+    "last_write_at": None,
+}
+
+
+def collect_disk_stats(products: list[Product]) -> dict:
+    """Single-pass L3 cache walk producing both global and per-product stats.
+
+    Walks ``DISK_CACHE_PATH`` once and stats every file once, then attributes
+    each file to a product by matching its parent dir name against the dir name
+    that ``disk_cache_path`` would produce for that product. The previous
+    implementation walked the base tree for the global total and then re-walked
+    each product subdir, stat'ing every file twice.
+
+    Returns ``{"global": {...}, "per_product": {pid: {...}}}``. When disk
+    caching is disabled, ``global`` is ``{"enabled": False}`` and every product
+    gets the zero stats.
+    """
+    base = os.environ.get("DISK_CACHE_PATH")
+    if not base:
+        return {
+            "global": {"enabled": False},
+            "per_product": {p.id: dict(_EMPTY_PRODUCT_DISK_STATS) for p in products},
+        }
+
+    limit_bytes = int(os.environ.get("DISK_CACHE_LIMIT_GB", 20)) * 1024**3
+    threshold_bytes = int(limit_bytes * float(os.environ.get("DISK_EVICTION_THRESHOLD", 0.85)))
+
+    # Map "cache dir name" -> product id so we can attribute each file as we
+    # encounter it. Dir name is derived the same way write paths are built, so
+    # the match is exact.
+    dir_to_pid: dict[str, str] = {}
+    for p in products:
+        _path = disk_cache_path(p.source_path, "", p.variables)
+        if _path is not None:
+            dir_to_pid[_path.parent.name] = p.id
+
+    per_pid_sizes: dict[str, list[int]] = {pid: [] for pid in dir_to_pid.values()}
+    per_pid_mtimes: dict[str, list[float]] = {pid: [] for pid in dir_to_pid.values()}
+    per_pid_dates: dict[str, list[str]] = {pid: [] for pid in dir_to_pid.values()}
+    total_bytes = 0
+
+    base_path = Path(base)
+    if base_path.exists():
+        for f in base_path.rglob("*.pkl.lz4"):
+            st = f.stat()
+            total_bytes += st.st_size
+            pid = dir_to_pid.get(f.parent.name)
+            if pid is None:
+                continue  # orphaned dir; counted in global, not attributed
+            per_pid_sizes[pid].append(st.st_size)
+            per_pid_mtimes[pid].append(st.st_mtime)
+            per_pid_dates[pid].append(f.name.split(".")[0])
+
+    per_product: dict[str, dict] = {}
+    for p in products:
+        sizes = per_pid_sizes.get(p.id, [])
+        if not sizes:
+            per_product[p.id] = dict(_EMPTY_PRODUCT_DISK_STATS)
+            continue
+        dates = sorted(per_pid_dates[p.id])
+        per_product[p.id] = {
+            "file_count": len(sizes),
+            "total_bytes": sum(sizes),
+            "oldest_date": dates[0],
+            "newest_date": dates[-1],
+            "last_write_at": datetime.fromtimestamp(max(per_pid_mtimes[p.id]), tz=UTC).isoformat(),
+        }
+
+    return {
+        "global": {
+            "enabled": True,
+            "base_path": base,
+            "total_bytes": total_bytes,
+            "limit_bytes": limit_bytes,
+            "eviction_threshold_bytes": threshold_bytes,
+            "utilization_pct": (
+                round(total_bytes / limit_bytes * 100, 2) if limit_bytes > 0 else 0.0
+            ),
+            "over_eviction_threshold": total_bytes > threshold_bytes,
+        },
+        "per_product": per_product,
+    }
 
 
 def evict_product_dir(product: Product) -> None:
