@@ -101,6 +101,7 @@ Requires `X-Admin-Key` header. Admin endpoints are blocked at the nginx layer an
 | POST   | `/admin/colormaps`        | Register a new custom colormap                                             |
 | DELETE | `/admin/colormaps/{name}` | Remove a custom colormap                                                   |
 | GET    | `/admin/cache`            | Cache state snapshot (disk footprint, refresh status, in-flight computes) |
+| DELETE | `/admin/cache/memory`     | Clear all in-memory caches (L1 processed grids + L2 slices). Disk untouched. |
 
 ## Managing products
 
@@ -194,11 +195,9 @@ See [`docs/security.md`](docs/security.md) for how admin endpoints are secured i
 
 ## Docs
 
-- [`docs/tile_system.md`](docs/tile_system.md) — tile coordinate systems: how `data_tiles` and `visual_tiles` use `z`/`x`/`y` differently
-- [`docs/technical.md`](docs/technical.md) — architecture, LOD algorithm, caching strategy, PNG encoding contract
+- [`docs/technical.md`](docs/technical.md) — architecture, tile coordinate systems, LOD algorithm, caching strategy, concurrency model, capacity planning, PNG encoding contract
 - [`docs/cache_analysis.md`](docs/cache_analysis.md) — cache option analysis: why disk cache was chosen over Redis and EFS
 - [`docs/http_caching.md`](docs/http_caching.md) — HTTP caching design: Cache-Control headers, ETag revalidation on `/manifest`, CACHE_VERSION invalidation
-- [`docs/concurrency.md`](docs/concurrency.md) — concurrency model, capacity evaluation, thread pool and cache sizing
 - [`docs/dataset.md`](docs/dataset.md) — representative example Zarr stores (size classes, dimensions, chunking, variables) used as planning anchors
 - [`docs/security.md`](docs/security.md) — admin endpoint security, API key setup, nginx, EC2 configuration
 - [`docs/png-vs-webp-vs-bin.md`](docs/png-vs-webp-vs-bin.md) — tile format evaluation
