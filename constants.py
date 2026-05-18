@@ -35,6 +35,15 @@ CHUNK_PX = (240, 192)
 PRODUCTS_CONFIG_PATH = os.environ.get("PRODUCTS_CONFIG_PATH", "products.json")
 COLORMAPS_CONFIG_PATH = os.environ.get("COLORMAPS_CONFIG_PATH", "colormaps.json")
 
+# Bump when anything changes that would make the server render different bytes for an
+# existing URL: renderer code (colormap interpolation, PNG encoder, projection algorithm,
+# data normalisation), product config under the same ID, or colormap definition under the
+# same name. The frontend reads this from /manifest and appends it to tile/legend URLs as
+# ?cv=...; bumping it invalidates browser and CDN caches together (new URLs miss everywhere).
+# Do NOT bump on every build — only on changes that affect rendered output.
+# See docs/http_caching.md for the full design.
+CACHE_VERSION = "cv1"
+
 
 @dataclass(frozen=True)
 class Product:

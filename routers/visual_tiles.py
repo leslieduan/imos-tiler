@@ -10,13 +10,17 @@ from utils.image import ImageFormat, media_type
 from utils.memoizer import Memoizer
 
 from .products import router as products_router
-from .shared import DATE_EX, PRODUCT_EX, get_product_or_404, load_slice_or_404
+from .shared import (
+    DATE_EX,
+    IMMUTABLE_CACHE_HEADERS,
+    PRODUCT_EX,
+    get_product_or_404,
+    load_slice_or_404,
+)
 
 router = APIRouter()
 router.include_router(products_router)
 
-
-_IMAGE_CACHE_HEADERS = {"Cache-Control": f"public, max-age={86400 * 30}"}
 
 # Dedup-only Memoizers (cache=None): /data_tiles already shares the rio-tiler /
 # encoding work across concurrent requests via _processed_memo, visual tiles had
@@ -100,7 +104,7 @@ def get_legend(
 
     rescale_range = _parse_rescale(rescale)
     png = render_legend(name, rescale_range, width, height, orientation)
-    return Response(content=png, media_type="image/png", headers=_IMAGE_CACHE_HEADERS)
+    return Response(content=png, media_type="image/png", headers=IMMUTABLE_CACHE_HEADERS)
 
 
 @router.get(
@@ -168,7 +172,7 @@ def get_tile(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
-    return Response(content=body, media_type=media_type(ext), headers=_IMAGE_CACHE_HEADERS)
+    return Response(content=body, media_type=media_type(ext), headers=IMMUTABLE_CACHE_HEADERS)
 
 
 @router.get(
@@ -259,4 +263,4 @@ def get_bbox(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
-    return Response(content=body, media_type=media_type(ext), headers=_IMAGE_CACHE_HEADERS)
+    return Response(content=body, media_type=media_type(ext), headers=IMMUTABLE_CACHE_HEADERS)

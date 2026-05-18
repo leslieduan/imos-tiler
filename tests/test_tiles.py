@@ -142,7 +142,8 @@ def test_availability_ok():
         response = client.get("/data_tiles/manifest")
     assert response.status_code == 200
     body = response.json()
-    assert body == {"products": {"product_a": {"available_dates": ["2024-06-01", "2024-07-01"]}}}
+    assert body["products"] == {"product_a": {"available_dates": ["2024-06-01", "2024-07-01"]}}
+    assert "cache_version" in body
 
 
 def test_availability_date_filters():

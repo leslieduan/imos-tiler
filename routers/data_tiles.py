@@ -6,12 +6,16 @@ from services.data_renderer import render_manifest, render_tile
 from services.loader import get_lod_grids
 
 from .products import router as products_router
-from .shared import DATE_EX, PRODUCT_EX, get_product_or_404, load_slice_or_404
+from .shared import (
+    DATE_EX,
+    IMMUTABLE_CACHE_HEADERS,
+    PRODUCT_EX,
+    get_product_or_404,
+    load_slice_or_404,
+)
 
 router = APIRouter()
 router.include_router(products_router)
-
-_TILE_CACHE_HEADERS = {"Cache-Control": f"public, max-age={86400 * 30}"}
 
 
 @router.get(
@@ -51,7 +55,7 @@ def get_tile(
         y,
         date,
     )
-    return Response(content=png_bytes, media_type="image/png", headers=_TILE_CACHE_HEADERS)
+    return Response(content=png_bytes, media_type="image/png", headers=IMMUTABLE_CACHE_HEADERS)
 
 
 @router.get(
@@ -70,4 +74,4 @@ def get_manifest(
     get_lod_grids(product)
     variables = product.variables
     ds = load_slice_or_404(product.source_path, date, variables)
-    return JSONResponse(content=render_manifest(product, ds))
+    return JSONResponse(content=render_manifest(product, ds), headers=IMMUTABLE_CACHE_HEADERS)
