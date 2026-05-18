@@ -35,6 +35,8 @@ class Memoizer:
         self.cache = cache
         self._lock = threading.Lock()
         self._inflight: dict[Hashable, concurrent.futures.Future] = {}
+        self._peak_inflight = 0
+        self._total_computes = 0
 
     def get_or_compute(self, key: Hashable, factory: Callable[[], T]) -> T:
         """Return cached value, wait on an in-flight compute, or run ``factory()`` once."""
@@ -47,6 +49,9 @@ class Memoizer:
             else:
                 future = concurrent.futures.Future()
                 self._inflight[key] = future
+                self._total_computes += 1
+                if len(self._inflight) > self._peak_inflight:
+                    self._peak_inflight = len(self._inflight)
                 should_compute = True
 
         if not should_compute:
@@ -65,6 +70,20 @@ class Memoizer:
             with self._lock:
                 self._inflight.pop(key, None)
         return result
+
+    def stats(self) -> dict:
+        """Snapshot of current/peak in-flight count, total computes started, and live keys.
+
+        ``inflight_keys`` is copied under the lock so callers can iterate without
+        racing on insertions or removals. Counters reset only on process restart.
+        """
+        with self._lock:
+            return {
+                "inflight": len(self._inflight),
+                "inflight_keys": list(self._inflight.keys()),
+                "peak_inflight": self._peak_inflight,
+                "total_computes": self._total_computes,
+            }
 
     def evict_matching(self, predicate: Callable[[Hashable], bool]) -> int:
         """Remove all cache entries whose key satisfies ``predicate``. Returns count removed."""

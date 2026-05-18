@@ -172,11 +172,12 @@ titiler-project/
     visual_tiles.py              ← /visual_tiles — colourised Web Mercator XYZ tiles + bbox + colormap listing/legend
     products.py                  ← shared: /products, /manifest, /{id}/{date}/point — included by both tile routers
     shared.py                    ← shared router helpers (PRODUCT_EX/DATE_EX examples, get_product_or_404, load_slice_or_404)
-    admin/                       ← /admin — product and colormap management (key-protected, package)
+    admin/                       ← /admin — product, colormap, and cache-state endpoints (key-protected, package)
       __init__.py                ← assembles admin_router and applies require_admin_key
       auth.py                    ← X-Admin-Key dependency
       products.py                ← POST/DELETE /admin/products
       colormaps.py               ← POST/DELETE /admin/colormaps
+      cache.py                   ← GET /admin/cache — read-only cache state snapshot
   services/
     store_registry.py            ← Zarr store singleton (stale-while-revalidate) + per-URL date index
     disk_cache.py                ← L3 disk cache lifecycle: path, read/write, prewarm, refresh, eviction
@@ -367,6 +368,8 @@ DELETE /admin/products/{product_id} → remove a product
 
 POST   /admin/colormaps             → register a custom colormap
 DELETE /admin/colormaps/{name}      → remove a custom colormap
+
+GET    /admin/cache                 → cache-state snapshot (see §10.6)
 ```
 
 ---
@@ -700,6 +703,18 @@ All three layers use `concurrent.futures.Future` to deduplicate concurrent misse
 - `_tile_memo` / `_bbox_memo` (Memoizers with `cache=None`) — dedup-only protection in front of the visual-tile renderer.
 
 The first thread to miss the cache creates the Future and does the work; all other threads arriving for the same key block on `future.result()` and receive the same result when the single computation completes. Errors propagate to all waiting threads so a failed request does not permanently block future attempts for the same key. See [`docs/concurrency.md`](concurrency.md) for capacity implications.
+
+### 10.6 Cache-state visibility (`GET /admin/cache`)
+
+A single read-only admin endpoint surfaces everything a production debugger usually wants to know about the cache. It returns four sections:
+
+- **`disk`** — global L3 footprint: total bytes, configured limit (`DISK_CACHE_LIMIT_GB`), eviction threshold, utilisation %, and an `over_eviction_threshold` flag so pressure is visible at a glance. `{"enabled": false}` when `DISK_CACHE_PATH` is unset.
+- **`refresh`** — the most recent `refresh_disk_cache` run (status `never_run`/`running`/`ok`/`error`, start + completion timestamps, last error message, configured interval). Distinguishes "tried 5 min ago and crashed" from "hasn't run in 6 hours."
+- **`in_flight`** — instantaneous count of computations currently mid-flight in each Memoizer (`current`), high-water mark since process start (`peak`), and total computes started since startup (`total_computes`). Slice and processed-grid memoizers reported separately. **Not** a rolling window — values reflect the moment of the request and drop to 0 when nothing is running.
+- **`memory_cache`** — current size and max for the slice and processed-grid LRUs.
+- **`products`** — per-product breakdown: disk file count, total bytes, oldest/newest cached date, most recent write mtime, and in-flight counts attributed by `(source_path, sorted_variables)` so two products sharing a Zarr don't collide.
+
+The handler runs the filesystem walk via `asyncio.to_thread` (single-pass — every cache file is stat'd once, then attributed to a product via parent-dir-name lookup in `services/disk_cache.collect_disk_stats`), so a thousand-file cache costs at most a few milliseconds of thread-pool time and never blocks tile requests. Peak/total counters are bumped under the Memoizer's existing lock; ambient cost on the tile-serving path is two integer ops per cache miss.
 
 ---
 

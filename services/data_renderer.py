@@ -100,6 +100,15 @@ def _get_processed(
     return _processed_memo.get_or_compute(key, factory)
 
 
+def processed_memo_stats() -> dict:
+    """In-flight + LRU stats for the L1 processed-grid memoizer. Used by /admin/cache."""
+    return {
+        **_processed_memo.stats(),
+        "cache_size": len(_processed_cache),
+        "cache_max": _processed_cache.maxsize,
+    }
+
+
 def evict_processed_cache(product: Product) -> None:
     removed = _processed_memo.evict_matching(lambda k: k[0] == product.source_path)
     if removed:

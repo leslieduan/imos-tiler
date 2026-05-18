@@ -111,6 +111,15 @@ def load_slice(store_url: str, date: str, variables: list[str]) -> xr.Dataset:
     return _slice_memo.get_or_compute(cache_key, factory)
 
 
+def slice_memo_stats() -> dict:
+    """In-flight + LRU stats for the L2 slice memoizer. Used by /admin/cache."""
+    return {
+        **_slice_memo.stats(),
+        "cache_size": len(_slice_cache),
+        "cache_max": _slice_cache.maxsize,
+    }
+
+
 def evict_product_cache(product: Product) -> None:
     """Remove all in-memory and disk cache entries for a deleted product."""
     from services.data_renderer import evict_processed_cache

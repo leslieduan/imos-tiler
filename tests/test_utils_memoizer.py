@@ -154,6 +154,47 @@ def test_evict_matching_predicate_empty_match():
     assert cache == {"a": 1, "b": 2}
 
 
+def test_stats_tracks_peak_and_total_computes():
+    """Peak should record the high-water mark even after in-flight count drops to zero."""
+    m = Memoizer(cache=LRUCache(maxsize=8))
+    started = threading.Barrier(3)
+    proceed = threading.Event()
+
+    def factory():
+        started.wait()
+        proceed.wait(timeout=2)
+        return "ok"
+
+    threads = [
+        threading.Thread(target=lambda k=k: m.get_or_compute(k, factory)) for k in ("a", "b")
+    ]
+    for t in threads:
+        t.start()
+    started.wait()  # both factories are now mid-flight
+    snapshot = m.stats()
+    assert snapshot["inflight"] == 2
+    assert snapshot["peak_inflight"] == 2
+    assert snapshot["total_computes"] == 2
+    assert set(snapshot["inflight_keys"]) == {"a", "b"}
+
+    proceed.set()
+    for t in threads:
+        t.join(timeout=2)
+
+    after = m.stats()
+    assert after["inflight"] == 0
+    assert after["peak_inflight"] == 2  # remembers the high-water mark
+    assert after["total_computes"] == 2
+
+
+def test_stats_total_computes_skips_cache_hits():
+    """A cache hit should not bump the compute counter — only first-time misses do."""
+    m = Memoizer(cache=LRUCache(maxsize=4))
+    m.get_or_compute("k", lambda: 1)
+    m.get_or_compute("k", lambda: 2)  # hit, factory not called
+    assert m.stats()["total_computes"] == 1
+
+
 def test_lru_eviction_respected():
     """Verify the Memoizer plays nicely with an LRU cache's natural eviction."""
     cache = LRUCache(maxsize=2)

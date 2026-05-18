@@ -1,0 +1,254 @@
+"""GET /admin/cache: response shape, auth, disk stats, refresh status, in-flight attribution."""
+
+from unittest.mock import patch
+
+import pytest
+from starlette.testclient import TestClient
+
+from constants import PRODUCTS, Product
+from main import app
+from services import data_renderer, disk_cache, loader
+
+client = TestClient(app, raise_server_exceptions=True)
+
+_ADMIN_KEY = "test-secret"
+_HEADERS = {"X-Admin-Key": _ADMIN_KEY}
+
+
+@pytest.fixture(autouse=True)
+def admin_key_env(monkeypatch):
+    monkeypatch.setenv("ADMIN_API_KEY", _ADMIN_KEY)
+
+
+@pytest.fixture(autouse=True)
+def reset_memoizer_counters():
+    """Other tests share the module-level memoizers; reset counters for isolation."""
+    loader._slice_memo._peak_inflight = 0
+    loader._slice_memo._total_computes = 0
+    data_renderer._processed_memo._peak_inflight = 0
+    data_renderer._processed_memo._total_computes = 0
+    yield
+
+
+@pytest.fixture(autouse=True)
+def reset_refresh_status():
+    """Refresh status is module-level; reset to the 'never_run' baseline per test."""
+    with disk_cache._refresh_status_lock:
+        disk_cache._refresh_status.update(
+            {
+                "last_started_at": None,
+                "last_completed_at": None,
+                "status": "never_run",
+                "last_error": None,
+            }
+        )
+    yield
+
+
+@pytest.fixture
+def cache_root(tmp_path, monkeypatch):
+    monkeypatch.setenv("DISK_CACHE_PATH", str(tmp_path))
+    yield tmp_path
+
+
+# ---------------------------------------------------------------------------
+# Auth
+# ---------------------------------------------------------------------------
+
+
+def test_get_cache_without_admin_key_returns_401():
+    r = client.get("/admin/cache")
+    assert r.status_code == 401
+
+
+def test_get_cache_wrong_admin_key_returns_403():
+    r = client.get("/admin/cache", headers={"X-Admin-Key": "wrong"})
+    assert r.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Response shape
+# ---------------------------------------------------------------------------
+
+
+def test_get_cache_returns_top_level_keys(monkeypatch):
+    monkeypatch.delenv("DISK_CACHE_PATH", raising=False)
+    r = client.get("/admin/cache", headers=_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert set(body.keys()) == {"disk", "refresh", "in_flight", "memory_cache", "products"}
+
+
+def test_disk_disabled_when_env_unset(monkeypatch):
+    monkeypatch.delenv("DISK_CACHE_PATH", raising=False)
+    body = client.get("/admin/cache", headers=_HEADERS).json()
+    assert body["disk"] == {"enabled": False}
+
+
+def test_refresh_status_never_run_by_default():
+    body = client.get("/admin/cache", headers=_HEADERS).json()
+    assert body["refresh"]["status"] == "never_run"
+    assert body["refresh"]["last_started_at"] is None
+    assert body["refresh"]["last_completed_at"] is None
+    assert body["refresh"]["last_error"] is None
+
+
+def test_in_flight_zero_when_idle():
+    body = client.get("/admin/cache", headers=_HEADERS).json()
+    assert body["in_flight"]["slice"]["current"] == 0
+    assert body["in_flight"]["processed"]["current"] == 0
+
+
+def test_products_in_response_match_registered_products():
+    body = client.get("/admin/cache", headers=_HEADERS).json()
+    # The conftest seeds these two products.
+    assert set(body["products"].keys()) == {"sea_level_anomaly", "ocean_current"}
+    for entry in body["products"].values():
+        assert set(entry.keys()) == {"disk", "in_flight"}
+        assert set(entry["in_flight"].keys()) == {"slice", "processed"}
+
+
+# ---------------------------------------------------------------------------
+# Per-product disk stats
+# ---------------------------------------------------------------------------
+
+
+def test_per_product_disk_stats_reflect_files_on_disk(cache_root):
+    """File count, byte total, and date range should mirror what's actually on disk."""
+    sla = PRODUCTS["sea_level_anomaly"]
+    cache_dir = disk_cache.disk_cache_path(sla.source_path, "x", sla.variables).parent
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "2024-01-01.pkl.lz4").write_bytes(b"x" * 100)
+    (cache_dir / "2024-06-15.pkl.lz4").write_bytes(b"x" * 250)
+
+    body = client.get("/admin/cache", headers=_HEADERS).json()
+    sla_disk = body["products"]["sea_level_anomaly"]["disk"]
+
+    assert sla_disk["file_count"] == 2
+    assert sla_disk["total_bytes"] == 350
+    assert sla_disk["oldest_date"] == "2024-01-01"
+    assert sla_disk["newest_date"] == "2024-06-15"
+    assert sla_disk["last_write_at"] is not None  # ISO UTC timestamp
+
+
+def test_per_product_disk_stats_empty_when_no_files(cache_root):
+    body = client.get("/admin/cache", headers=_HEADERS).json()
+    sla_disk = body["products"]["sea_level_anomaly"]["disk"]
+    assert sla_disk == {
+        "file_count": 0,
+        "total_bytes": 0,
+        "oldest_date": None,
+        "newest_date": None,
+        "last_write_at": None,
+    }
+
+
+def test_global_disk_stats_aggregate_across_products(cache_root, monkeypatch):
+    monkeypatch.setenv("DISK_CACHE_LIMIT_GB", "1")
+    monkeypatch.setenv("DISK_EVICTION_THRESHOLD", "0.85")
+
+    sla = PRODUCTS["sea_level_anomaly"]
+    cache_dir = disk_cache.disk_cache_path(sla.source_path, "x", sla.variables).parent
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "2024-01-01.pkl.lz4").write_bytes(b"x" * 1000)
+
+    body = client.get("/admin/cache", headers=_HEADERS).json()
+    assert body["disk"]["enabled"] is True
+    assert body["disk"]["total_bytes"] == 1000
+    assert body["disk"]["limit_bytes"] == 1024**3
+    assert body["disk"]["over_eviction_threshold"] is False
+
+
+# ---------------------------------------------------------------------------
+# Refresh status after a run
+# ---------------------------------------------------------------------------
+
+
+def test_refresh_status_ok_after_successful_run(cache_root):
+    p = PRODUCTS["sea_level_anomaly"]
+    with (
+        patch("services.loader.get_available_dates", return_value=[]),
+        patch("services.loader.load_slice"),
+    ):
+        disk_cache.refresh_disk_cache([p])
+
+    body = client.get("/admin/cache", headers=_HEADERS).json()
+    assert body["refresh"]["status"] == "ok"
+    assert body["refresh"]["last_started_at"] is not None
+    assert body["refresh"]["last_completed_at"] is not None
+    assert body["refresh"]["last_error"] is None
+
+
+def test_refresh_status_error_when_run_raises(cache_root):
+    p = PRODUCTS["sea_level_anomaly"]
+    # evict_stale_and_orphans is the first sub-call inside refresh; force it to blow up.
+    with (
+        patch.object(disk_cache, "evict_stale_and_orphans", side_effect=RuntimeError("boom")),
+        pytest.raises(RuntimeError),
+    ):
+        disk_cache.refresh_disk_cache([p])
+
+    body = client.get("/admin/cache", headers=_HEADERS).json()
+    assert body["refresh"]["status"] == "error"
+    assert "boom" in body["refresh"]["last_error"]
+
+
+# ---------------------------------------------------------------------------
+# In-flight attribution
+# ---------------------------------------------------------------------------
+
+
+def test_inflight_breakdown_distinguishes_products_sharing_a_store():
+    """Two products on the same source_path differ only by variables — must not collide."""
+    sla = PRODUCTS["sea_level_anomaly"]  # GSLA, single var
+    cur = PRODUCTS["ocean_current"]  # UCUR + VCUR, multi var
+
+    # Simulate one in-flight slice per product. We don't need real Futures —
+    # the response only inspects keys, not values.
+    sla_key = (sla.source_path, "2024-01-01", tuple(sorted(sla.variables)))
+    cur_key = (cur.source_path, "2024-01-01", tuple(sorted(cur.variables)))
+
+    with loader._slice_memo._lock:
+        loader._slice_memo._inflight[sla_key] = object()  # type: ignore[assignment]
+        loader._slice_memo._inflight[cur_key] = object()  # type: ignore[assignment]
+
+    try:
+        body = client.get("/admin/cache", headers=_HEADERS).json()
+        assert body["products"]["sea_level_anomaly"]["in_flight"]["slice"] == 1
+        assert body["products"]["ocean_current"]["in_flight"]["slice"] == 1
+        assert body["in_flight"]["slice"]["current"] == 2
+    finally:
+        with loader._slice_memo._lock:
+            loader._slice_memo._inflight.pop(sla_key, None)
+            loader._slice_memo._inflight.pop(cur_key, None)
+
+
+def test_inflight_unknown_store_not_attributed_to_any_product():
+    """An in-flight key for a deregistered/unknown store should be counted globally
+    but not assigned to any product."""
+    ghost_key = ("s3://gone/unknown.zarr", "2024-01-01", ("v",))
+    with loader._slice_memo._lock:
+        loader._slice_memo._inflight[ghost_key] = object()  # type: ignore[assignment]
+    try:
+        body = client.get("/admin/cache", headers=_HEADERS).json()
+        assert body["in_flight"]["slice"]["current"] == 1
+        assert all(entry["in_flight"]["slice"] == 0 for entry in body["products"].values())
+    finally:
+        with loader._slice_memo._lock:
+            loader._slice_memo._inflight.pop(ghost_key, None)
+
+
+def test_unknown_product_creating_unrelated_inflight_key_not_attributed():
+    # Sanity check that totals still come through with a real test product not in PRODUCTS.
+    extra = Product(id="not_registered", source_path="s3://other/z.zarr", variable="X")
+    key = (extra.source_path, "2024-01-01", ("X",))
+    with loader._slice_memo._lock:
+        loader._slice_memo._inflight[key] = object()  # type: ignore[assignment]
+    try:
+        body = client.get("/admin/cache", headers=_HEADERS).json()
+        assert body["in_flight"]["slice"]["current"] == 1
+        # No product entry for it.
+        assert "not_registered" not in body["products"]
+    finally:
+        with loader._slice_memo._lock:
+            loader._slice_memo._inflight.pop(key, None)
