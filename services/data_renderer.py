@@ -115,6 +115,14 @@ def evict_processed_cache(product: Product) -> None:
         logger.info("Processed cache evicted %d entry/entries for: %s", removed, product.id)
 
 
+def clear_processed_cache() -> int:
+    """Drop every entry in the L1 processed-grid cache. Returns count removed."""
+    removed = _processed_memo.evict_matching(lambda _: True)
+    if removed:
+        logger.info("Processed cache cleared: %d entry/entries", removed)
+    return removed
+
+
 def _extract_chunk(
     arr: np.ndarray,
     cx: int,

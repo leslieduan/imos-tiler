@@ -50,7 +50,7 @@ The server is a FastAPI application that produces on-demand PNG tiles for IMOS o
 | `/data_tiles`   | EPSG:4326 (Plate Carrée) | Custom LOD pyramid: `z` = LOD level, `x`/`y` = chunk col/row | WebGL shader (decodes raw values, reprojects on GPU) |
 | `/visual_tiles` | EPSG:3857 (Web Mercator) | Standard XYZ slippy-map tiles (OSM/MapboxGL/Leaflet)         | Any map library / WMS-style consumer                 |
 
-The same Zarr slice is the source for both pipelines; they diverge at the renderer. See [§5](#5-tile-coordinate-systems-and-projection-pipeline) and [`docs/tile_system.md`](tile_system.md) for the full distinction.
+The same Zarr slice is the source for both pipelines; they diverge at the renderer. See [§5](#5-tile-coordinate-systems-and-projection-pipeline) for the full distinction.
 
 There is no static product list compiled into the code. Products live in `products.json` and can be populated in two ways: pre-populated on disk **before** the server starts (typical for a fresh deployment or reproducible bootstrap), or added/removed at runtime via the **admin API**, which takes effect immediately without restart. See [§13](#13-adding-a-new-product) for both flows.
 
@@ -161,8 +161,6 @@ titiler-project/
     colormaps.json               ← Docker: mounted volume, set via COLORMAPS_CONFIG_PATH=data/colormaps.json
   docs/
     technical.md                 ← this file
-    tile_system.md               ← focused explanation of the two tile coordinate systems
-    concurrency.md               ← concurrency model, capacity tables, stampede protection
     cache_analysis.md            ← cache design decision record (Redis vs EFS vs EBS vs ephemeral)
     dataset.md                   ← per-store variable / dimension / chunking reference
     netcdf-vs-zarr.md            ← format comparison, IMOS product file analysis, performance data
@@ -177,7 +175,7 @@ titiler-project/
       auth.py                    ← X-Admin-Key dependency
       products.py                ← POST/DELETE /admin/products
       colormaps.py               ← POST/DELETE /admin/colormaps
-      cache.py                   ← GET /admin/cache — read-only cache state snapshot
+      cache.py                   ← GET /admin/cache (state snapshot) + DELETE /admin/cache/memory (clear L1+L2)
   services/
     store_registry.py            ← Zarr store singleton (stale-while-revalidate) + per-URL date index
     disk_cache.py                ← L3 disk cache lifecycle: path, read/write, prewarm, refresh, eviction
@@ -204,23 +202,41 @@ titiler-project/
 
 ## 5. Tile coordinate systems and projection pipeline
 
-The server produces tiles in **two different coordinate reference systems** depending on the endpoint. Understanding this is critical — the two pipelines look superficially similar but cannot be mixed.
+The server produces tiles in **two different coordinate reference systems** depending on the endpoint. The two pipelines share the URL shape `/{product_id}/{date}/{z}/{x}/{y}.png` but interpret `z`, `x`, `y` in entirely different coordinate systems. Mixing them up is the most common cause of "why is my tile blank / 404 / off-by-one" bugs.
 
-### 5.1 Two pipelines, two CRSs
+### 5.1 Which API should I use?
 
-|                            | `/data_tiles`                                                                       | `/visual_tiles`                                                                  |
-| -------------------------- | ----------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
-| **Output CRS**             | EPSG:4326 (Plate Carrée)                                                            | EPSG:3857 (Web Mercator)                                                         |
-| **Tile coordinate scheme** | Custom — `z`=LOD index, `x`/`y`=chunk col/row inside the product's data extent      | Standard XYZ — `z`=zoom level, `x`/`y` over the full Mercator world (`0..2^z−1`) |
-| **Pixel content**          | Raw value packed into RGBA bytes (24-bit normalised uint or two 8-bit U/V channels) | Colourised RGBA image after applying a colormap LUT                              |
-| **Reprojection happens…**  | In the **WebGL fragment shader** on the client, on the GPU                          | On the **server**, by `rio-tiler`'s `XarrayReader.tile(...)`                     |
-| **Out-of-bounds tile**     | HTTP 404                                                                            | Transparent 256×256 PNG (spatial), HTTP 400 (invalid coords)                     |
-| **Multi-variable support** | Yes (UV products such as `ocean_current`)                                           | No (single-variable products only)                                               |
-| **Manifest endpoint**      | Yes (`/manifest.json` per product/date)                                             | Not applicable                                                                   |
+- Building a normal map with Mapbox GL, MapLibre, Leaflet, OpenLayers, etc., and you just need pretty raster tiles overlaid on a base map → **`/visual_tiles`**.
+- Building a custom WebGL visualisation where the client needs the raw scientific values (dynamic colour ramps, client-side analysis, particle animation on UV data) → **`/data_tiles`**.
 
-The data-tiles `z` axis indexes a **custom LOD pyramid** anchored to the product's own extent — see [§7](#7-data-tile-internals) for the algorithm that derives the pyramid from each Zarr store's dimensions, and [`docs/tile_system.md`](tile_system.md) for a focused walk-through of `z`/`x`/`y` semantics in both pipelines.
+### 5.2 Two pipelines, two CRSs
 
-### 5.2 Data tiles — generated in EPSG:4326 (Plate Carrée)
+|                                  | `/data_tiles`                                                                       | `/visual_tiles`                                                                  |
+| -------------------------------- | ----------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| **Output CRS**                   | EPSG:4326 (Plate Carrée)                                                            | EPSG:3857 (Web Mercator)                                                         |
+| **`z` meaning**                  | LOD index (`1` = coarsest, `N` = finest)                                            | Zoom level (`0` = whole world; each step doubles tiles per axis)                 |
+| **`(x, y)` reference frame**     | Product's own extent (NW corner = `0, 0`)                                           | Whole world (Web Mercator origin = `0, 0`)                                       |
+| **`(x, y)` range at level `z`**  | `0` to `lod_grids[z] − 1`                                                           | `0` to `2^z − 1`                                                                 |
+| **Out-of-range `(z, x, y)`**     | HTTP 404                                                                            | HTTP 400 (invalid coords); transparent 256×256 PNG (in-range but outside data)   |
+| **Pixel content**                | Raw value packed into RGBA bytes (24-bit normalised uint or two 8-bit U/V channels) | Colourised RGBA image after applying a colormap LUT                              |
+| **Reprojection happens…**        | In the **WebGL fragment shader** on the client, on the GPU                          | On the **server**, by `rio-tiler`'s `XarrayReader.tile(...)`                     |
+| **Multi-variable support**       | Yes (UV products such as `ocean_current`)                                           | No (single-variable products only)                                               |
+| **Per-tile decode manifest**     | Required (`/{product_id}/{date}/manifest.json`)                                     | Not applicable                                                                   |
+| **Extra non-tile endpoint**      | —                                                                                   | `/bbox` (arbitrary region, EPSG:4326 or EPSG:3857)                               |
+
+The data-tiles `z` axis indexes a **custom LOD pyramid** anchored to the product's own extent — see [§7](#7-data-tile-internals) for the algorithm that derives the pyramid from each Zarr store's dimensions.
+
+#### `data_tiles` — `z`/`x`/`y` semantics
+
+`z` selects a **resolution level**, not a map-zoom level. The valid values are the keys of `product.lod_grids` (typically `1`–`4`); `z = 1` is the coarsest, `z = N` is native data resolution. The LOD grids are derived at server startup from each Zarr store's actual lat/lon dimensions and the fixed chunk size (`CHUNK_PX = (240, 192)`). The client maps map-zoom to LOD via the universal `LOD.zoom_thresholds` returned in each level's `zoomThreshold` field.
+
+`x` and `y` are chunk column/row within the LOD grid: `x = 0` is the westernmost column, `y = 0` is the northernmost row. Valid range at LOD `z` is `0 ≤ x < grid_cols` and `0 ≤ y < grid_rows`, where `(grid_cols, grid_rows) = product.lod_grids[z]`. Requesting outside this range returns **HTTP 404**. Clients are expected to fetch the manifest first so they know each LOD's grid dimensions.
+
+#### `visual_tiles` — `z`/`x`/`y` semantics
+
+`z`, `x`, `y` are **standard Web Mercator slippy-map tile coordinates** — identical to OpenStreetMap, MapboxGL, MapLibre, Leaflet, and OpenLayers. At zoom `z`, the world is divided into a `2^z × 2^z` grid; `x = 0` is the leftmost column, `y = 0` is the topmost row. Valid range is `0 ≤ x, y ≤ 2^z − 1`. Out-of-range coordinates (e.g. `x = 2^z`) return **HTTP 400** — the URL is malformed. In-range tiles that fall **outside the product's data extent** return a **transparent 256×256 PNG** (not an error), so clients can request a full world grid without first checking the data bounds.
+
+### 5.3 Data tiles — generated in EPSG:4326 (Plate Carrée)
 
 Source Zarr data lives on a regular lat/lon grid. Data tiles preserve that grid exactly: longitude maps linearly to pixel X, latitude maps linearly to pixel Y. This is Plate Carrée — the visual representation of EPSG:4326 / WGS84 geographic coordinates.
 
@@ -243,7 +259,7 @@ The manifest returns geographic bounds (`lonMin`, `lonMax`, `latMin`, `latMax`) 
 - Standard for oceanographic datasets (IMOS, ERA5, CMIP6 all use regular lat/lon grids).
 - A reprojection on the server side would either lossy-resample again or require per-tile inverse-Mercator math — both wasteful when the WebGL shader can do the equivalent operation on the GPU at zero marginal cost per fragment.
 
-### 5.3 Visual tiles — generated in EPSG:3857 (Web Mercator)
+### 5.4 Visual tiles — generated in EPSG:3857 (Web Mercator)
 
 `services/visual_renderer.py` calls `XarrayReader.tile(x, y, z, reproject_method="bilinear")`. The reader internally:
 
@@ -256,14 +272,14 @@ Because the output PNG is already in Web Mercator, visual tiles work directly wi
 
 The `/bbox.{ext}` endpoint follows the same pipeline using `reader.part(...)`; it accepts the bbox in either EPSG:4326 or EPSG:3857 (controlled by `?crs=`) and produces a Web Mercator image in the requested format.
 
-### 5.4 Frontend integration
+### 5.5 Frontend integration
 
 The frontend in production renders a Web Mercator base map (typical of every map library: Mapbox, MapLibre, Leaflet, OpenLayers, Google Maps).
 
 - **Visual tiles** plug straight into a `raster` source — no shader and no per-frame math.
 - **Data tiles** are sampled by a custom **WebGL fragment shader**. The shader does the work the server intentionally skipped: for each fragment's Mercator position it computes the inverse Mercator to recover `(lon, lat)`, then samples the Plate-Carrée atlas via a linear lat/lon lookup — matching the server's `np.linspace` mapping. Value decoding (uint24 → float via the manifest's `valueRange`) and colour-ramp lookup happen in the same pass.
 
-### 5.5 The manifest is the contract between server and shader
+### 5.6 The manifest is the contract between server and shader
 
 The manifest (data-tile pipeline only) is the interface between the server's coordinate system and the WebGL shader's uniforms:
 
@@ -279,7 +295,7 @@ The manifest (data-tile pipeline only) is the interface between the server's coo
 
 ## 6. URL contract and API surface
 
-`z`/`x`/`y` mean different things in each tile API — see §5 and [`docs/tile_system.md`](tile_system.md).
+`z`/`x`/`y` mean different things in each tile API — see [§5](#5-tile-coordinate-systems-and-projection-pipeline).
 
 ### 6.1 Shared endpoints (mounted under both `/data_tiles` and `/visual_tiles`)
 
@@ -370,6 +386,7 @@ POST   /admin/colormaps             → register a custom colormap
 DELETE /admin/colormaps/{name}      → remove a custom colormap
 
 GET    /admin/cache                 → cache-state snapshot (see §10.6)
+DELETE /admin/cache/memory          → clear all in-memory caches (L1 + L2); disk untouched (see §10.7)
 ```
 
 ---
@@ -702,7 +719,7 @@ All three layers use `concurrent.futures.Future` to deduplicate concurrent misse
 - `_processed_memo` (Memoizer over `_processed_cache`) — processed grid computation (`_get_processed`).
 - `_tile_memo` / `_bbox_memo` (Memoizers with `cache=None`) — dedup-only protection in front of the visual-tile renderer.
 
-The first thread to miss the cache creates the Future and does the work; all other threads arriving for the same key block on `future.result()` and receive the same result when the single computation completes. Errors propagate to all waiting threads so a failed request does not permanently block future attempts for the same key. See [`docs/concurrency.md`](concurrency.md) for capacity implications.
+The first thread to miss the cache creates the Future and does the work; all other threads arriving for the same key block on `future.result()` and receive the same result when the single computation completes. Errors propagate to all waiting threads so a failed request does not permanently block future attempts for the same key. See [§12.8](#128-per-request-capacity-origin-server-ec2ecs-in-region) for capacity implications.
 
 ### 10.6 Cache-state visibility (`GET /admin/cache`)
 
@@ -715,6 +732,14 @@ A single read-only admin endpoint surfaces everything a production debugger usua
 - **`products`** — per-product breakdown: disk file count, total bytes, oldest/newest cached date, most recent write mtime, and in-flight counts attributed by `(source_path, sorted_variables)` so two products sharing a Zarr don't collide.
 
 The handler runs the filesystem walk via `asyncio.to_thread` (single-pass — every cache file is stat'd once, then attributed to a product via parent-dir-name lookup in `services/disk_cache.collect_disk_stats`), so a thousand-file cache costs at most a few milliseconds of thread-pool time and never blocks tile requests. Peak/total counters are bumped under the Memoizer's existing lock; ambient cost on the tile-serving path is two integer ops per cache miss.
+
+### 10.7 In-memory cache flush (`DELETE /admin/cache/memory`)
+
+Drops every entry from both in-memory tiers — `_processed_cache` (L1) and `_slice_cache` (L2) — and returns the counts cleared as `{"cleared": {"slice": N, "processed": M}}`. Disk (L3) is untouched, so the next request for any flushed key still hits disk in ~30 ms instead of re-fetching from S3.
+
+Implemented as `Memoizer.evict_matching(lambda _: True)` in both `services/loader.clear_slice_cache` and `services/data_renderer.clear_processed_cache`. The eviction runs under the Memoizer's existing lock — concurrent `get_or_compute` calls block briefly while keys are removed. Any **in-flight** compute is not cancelled: it finishes and re-publishes into the (now-empty) cache when it completes, so a flush during heavy load may leave a handful of partially-refilled entries from work that was already running. Callers that arrived before the flush and are still `await`ing a shared Future receive the original result, not a re-computed one — there is no torn state.
+
+Use cases: forcing a re-read after a Zarr store has been updated out-of-band, recovering from a poisoned cache entry, or freeing memory during an interactive debugging session without restarting the process.
 
 ---
 
@@ -850,7 +875,7 @@ The pool has `THREAD_POOL_SIZE` slots (default 100). Each in-flight sync request
 - **I/O releases the GIL** — `xarray`'s S3 fetch is mostly `urllib3`/`botocore` socket I/O. While one thread waits on S3, others can run.
 - **numpy/PIL release the GIL during their C-level work** — resampling, normalisation, and PNG encoding all benefit from real parallelism.
 
-Stampede protection (`_slice_memo`, `_processed_memo`, `StoreRegistry._in_flight`) means that if 10 requests arrive for the same cold key, only 1 thread does the work; the other 9 hold their slots blocked on the Future. This caps peak unique work and peak RAM, but the held slots do count toward `THREAD_POOL_SIZE`. See [`docs/concurrency.md`](concurrency.md) for the full capacity analysis.
+Stampede protection (`_slice_memo`, `_processed_memo`, `StoreRegistry._in_flight`) means that if 10 requests arrive for the same cold key, only 1 thread does the work; the other 9 hold their slots blocked on the Future. This caps peak unique work and peak RAM, but the held slots do count toward `THREAD_POOL_SIZE`. See [§12.8](#128-per-request-capacity-origin-server-ec2ecs-in-region) and [§12.9](#129-scaling-thread_pool_size) for the full capacity analysis.
 
 ### 12.3 Background tasks run on the event loop and offload work via `asyncio.to_thread`
 
@@ -885,6 +910,157 @@ This is why a 60-second prewarm at startup does not delay the first request by 6
 - **`async def` an endpoint by accident.** If a future contributor turns a `def` handler into `async def`, blocking calls inside it (any `xarray`/`rio-tiler` call) will freeze the event loop and serialise every request behind the slowest one. There is no static check for this — review carefully.
 - **Forget `asyncio.to_thread` inside a background task.** A future addition like `await some_sync_function()` would suspend the coroutine forever (no awaitable) or, worse, run the sync function inline on the event loop. Anything CPU/IO-heavy must be wrapped in `asyncio.to_thread`.
 - **Unbounded background tasks.** Both lifespan tasks have a top-level `try/except`. New background tasks must do the same — an unhandled exception in an `asyncio.Task` is silent until the task is awaited.
+
+### 12.6 Thread pools: the layering
+
+§12.2 talks about "the thread pool" singular, which is fine as a first-order model — every tile request runs on it. But this server actually has **three distinct thread pools**, plus a couple of one-off worker threads. They're separate by design, not by accident; the layering buys isolation between the tile-serving hot path, admin/debug endpoints, and startup S3 fan-out.
+
+#### Why there's more than one pool (the history)
+
+Python's async ecosystem grew in layers, and each layer kept its own pool:
+
+1. **`concurrent.futures.ThreadPoolExecutor`** (Python 3.2) — the original primitive. Everything else wraps it.
+2. **asyncio's default executor** (Python 3.4) — asyncio needed a way to offload blocking work, so it added a default `ThreadPoolExecutor` accessed via `loop.run_in_executor(None, ...)`. `asyncio.to_thread()` (3.9) is a thin wrapper over it.
+3. **anyio's own pool** (2018) — anyio is a portability layer over both `asyncio` and `trio`. Since trio has no asyncio executor, anyio manages its own `WorkerThread` instances with a `CapacityLimiter`. This is **not** the same pool as asyncio's executor.
+4. **Starlette/FastAPI** chose anyio as their concurrency layer, which is why every sync `def` handler runs on anyio's pool — not asyncio's.
+
+The net effect: `asyncio.to_thread(...)` and `anyio.to_thread.run_sync(...)` look interchangeable but route to **different pools**. Both work, both are non-blocking, but they don't share slots.
+
+#### The pools in this app
+
+| Pool                                   | Default size                              | Configured by                                          | Used by                                                                                                                       |
+| -------------------------------------- | ----------------------------------------- | ------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------- |
+| **anyio default pool**                 | `100`                                     | `THREAD_POOL_SIZE` (set in `main.py` lifespan)         | Every FastAPI `def` handler — all `/data_tiles`, `/visual_tiles`, `/admin/products`, `/admin/colormaps` calls. The hot path. |
+| **asyncio default executor**           | `min(32, os.cpu_count() + 4)`             | not configured                                         | Every `asyncio.to_thread(...)` call — `GET/DELETE /admin/cache`, `_startup_cache_sync`, `_cache_refresh_loop`.                |
+| **prewarm `ThreadPoolExecutor`**       | `PREWARM_WORKERS` (default `8`)           | env var                                                | Built and torn down inside `prewarm_disk_slices`. One-shot S3 fan-out at startup and on each refresh cycle.                  |
+
+Plus non-pool worker threads:
+
+- **Store-prewarm daemon threads** — `prewarm_stores` spawns one bare `threading.Thread` per unique Zarr store URL at startup. They exit when each store is open. Not a reusable pool.
+- **C-extension threads** — Zarr decompression, NumPy via BLAS, and PIL/libpng all release the GIL and may use their own internal threads. Total OS thread count is always higher than the sum of the Python pools above.
+
+#### Why the separation is intentional
+
+| Concern                                                                 | What the layout buys                                                                                                                                                            |
+| ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Admin/debug visibility under overload**                               | `/admin/cache` runs on the asyncio executor. When tile load fully saturates the anyio pool, the cache-state endpoint still answers — exactly when you'd want to inspect it.    |
+| **Background tasks not starving tile traffic**                          | `_cache_refresh_loop` and `_startup_cache_sync` also use the asyncio executor. Refresh cycles don't compete with tile rendering for anyio slots.                                |
+| **Prewarm S3 fan-out bounded independently of request capacity**       | `PREWARM_WORKERS = 8` caps simultaneous S3 connections during startup. If prewarm shared the anyio pool, it would either starve tile traffic at startup or under-utilise S3.    |
+
+#### Convention: which to use where
+
+- **Inside a `def` handler** — already on the anyio pool. Don't offload further unless the work is unusually heavy and would block other anyio-pool requests.
+- **Inside an `async def` handler or coroutine task** — wrap any blocking call in `asyncio.to_thread(...)`. This keeps the work off the event loop **and** off the anyio pool, preserving tile-handler capacity.
+- **For bounded parallel fan-out** (e.g. S3 prewarm) — create a dedicated `ThreadPoolExecutor` with `max_workers` set to the resource ceiling you care about (connection pool, S3 quota, etc.). Don't reuse the anyio or asyncio pools for this — they're not sized for resource gating.
+
+The trade-off of this layering is conceptual overhead — you have to know which call uses which pool. The alternative (route everything through anyio by switching admin/background to `def` + `anyio.to_thread.run_sync`) would simplify the mental model but lose the isolation: a fully-loaded tile pool would block admin endpoints, and a long refresh cycle could delay tile requests. The current layout treats isolation as more valuable than uniformity.
+
+### 12.7 Per-request paths
+
+Every tile request falls into one of four paths depending on which cache layer it hits. Latency and which resources it consumes vary by an order of magnitude across the paths — this taxonomy is the basis for the capacity tables in §12.8.
+
+**Data tile paths (`/data_tiles/...`).** `load_slice` is lazy — the route handler passes a callable to `render_tile`, which only invokes it if `_get_processed` misses:
+
+- **Processed warm** — `(product, date, lod)` already in `_processed_cache`. The thread does `_extract_chunk` + PNG encode only — no S3, disk, or slice I/O.
+- **Slice warm** — `_processed_cache` misses; `(product, date)` is in the L2 slice cache. The thread loads `ds` from memory, resamples, populates `_processed_cache`, then encodes.
+- **Disk warm** — `_processed_cache` and L2 both miss; `(product, date)` is on disk. The thread reads + decompresses the lz4 pickle (~30 ms), resamples, populates both caches, then encodes.
+- **Cold** — nothing cached. The thread fetches Zarr chunks from S3 (`.compute()`, ~2 s), writes to disk and L2, resamples, populates `_processed_cache`, then encodes.
+
+**Visual tile paths (`/visual_tiles/...` and `/bbox`).** No processed grid cache. Each request calls `load_slice` unconditionally:
+
+- **L2 warm** — `(product, date)` in L2. Reads `ds` from memory and renders via `XarrayReader`.
+- **Disk warm** — L2 miss; slice on disk. Reads + decompresses, populates L2, renders.
+- **Cold** — fetches from S3, writes to disk and L2, renders.
+
+All paths share the anyio thread pool and compete for the same slots. Processed-warm data-tile requests are fastest and release their slot quickly; cold requests hold slots for seconds.
+
+### 12.8 Per-request capacity (origin server, EC2/ECS in-region)
+
+S3 latency from within the same AWS region is an internal network hop — effectively negligible compared to home internet. The dominant cost on a cold request is chunk decompression and numpy assembly, not network wait.
+
+**Hot requests** (processed-warm or L2-warm):
+
+| Factor           | Value                            |
+| ---------------- | -------------------------------- |
+| Request duration | ~10–50 ms                        |
+| Max simultaneous | 100 (thread pool limit)          |
+| Throughput burst | ~100 ÷ 0.03 s ≈ **3,000 req/s**  |
+| Bottleneck       | CPU (PNG encode) and thread pool |
+
+**Disk-warm requests:**
+
+| Factor           | Value                                                              |
+| ---------------- | ------------------------------------------------------------------ |
+| Request duration | ~50 ms (GSLA-class) — ~200 ms (satellite-class)                    |
+| Max simultaneous | 100 (thread pool limit)                                            |
+| Throughput burst | ~2,000 req/s (GSLA-class) — ~500 req/s (satellite-class)           |
+| Bottleneck       | EBS read + lz4 decompress + numpy resample                         |
+
+Sustained throughput on satellite-class slices is further capped by **EBS bandwidth**: gp3 baseline 125 MB/s ÷ 18 MB/slice ≈ ~7 unique satellite-slice loads/sec. Provision EBS IOPS / bandwidth above baseline if disk-warm becomes the dominant traffic pattern (rare in practice — repeated reads of the same slice promote it to L2 after the first hit, after which the request is hot).
+
+**Cold requests (S3):**
+
+| Factor                       | Value                                                          |
+| ---------------------------- | -------------------------------------------------------------- |
+| Request duration             | ~400 ms (GSLA-class) — ~1.5–2 s (satellite-class)              |
+| Max simultaneous cold slices | 100 (thread pool limit; deduplicated by `_slice_memo`)         |
+| Throughput burst             | ~250 req/s (GSLA-class) — ~50–70 req/s (satellite-class)       |
+| Bottleneck                   | S3 fetch + CPU (decompression + numpy resample)                |
+
+The dominant cost on cold-class requests is the **S3 fetch itself** (~300–800 ms per Zarr chunk; the satellite-class slice needs 6 chunks). Disk-warm is ~5–10× faster than cold because the same 18 MB slice reads from local EBS (~5–25 ms) instead of S3, and is stored fully assembled rather than as 6 separate Zarr chunks needing recombination.
+
+In practice cold S3 requests only occur for dates older than `CACHE_DAYS` (outside the disk-cache window) or before startup prewarm completes. The hot / disk-warm / cold numbers above are **per-request** and independent of product mix — they hold for Scenario A, B, and C alike. What changes across scenarios is the **hit-rate distribution**: a larger product mix increases the chance that any given request falls into a cold or disk-warm tier rather than the hot tier, which is why [§14.3](#143-why-the-default-slice_cache_size10-is-too-small-for-production) sizes cache capacity to keep the working set hot.
+
+### 12.9 Scaling `THREAD_POOL_SIZE`
+
+The throughput numbers in §12.8 are **burst ceilings** computed as `THREAD_POOL_SIZE ÷ request_duration` at `THREAD_POOL_SIZE = 100`. They represent what the pool can absorb in a brief spike, **not what the server can sustain indefinitely**. Sustained throughput is bound by real resources (CPU cores, EBS bandwidth, S3 connection pool) that don't scale with thread count.
+
+**What scales with `THREAD_POOL_SIZE`, and what doesn't:**
+
+| Resource                                | Scales with pool size?   | Actual ceiling                                                                                              |
+| --------------------------------------- | ------------------------ | ----------------------------------------------------------------------------------------------------------- |
+| Burst capacity (short spikes)           | **Yes**, linearly        | Transient RAM: `pool_size × 61 MB` worst-case unique satellite slices in flight                             |
+| Hot sustained throughput                | **No**                   | CPU. On 4 vCPU with GIL-releasing PNG encode, plateaus around **~250–400 req/s** regardless of pool size    |
+| Disk-warm sustained (satellite-class)   | **No**                   | EBS bandwidth: gp3 baseline 125 MB/s ÷ 18 MB ≈ **~7 unique slices/sec**                                     |
+| Cold sustained (satellite-class)        | Partially                | S3 connection pool (aiobotocore default ~10 per host) + CPU for decompress/assembly                         |
+| Queueing tolerance under burst          | **Yes**, linearly        | OS thread limit (Linux defaults: thousands per process)                                                     |
+
+**Throughput at higher `THREAD_POOL_SIZE` (burst ceilings):**
+
+| `THREAD_POOL_SIZE` | Hot burst        | Disk-warm satellite burst | Cold satellite burst | Worst-case transient RAM | Thread-stack RAM |
+| ------------------ | ---------------- | ------------------------- | -------------------- | ------------------------ | ---------------- |
+| 50                 | ~1,500 req/s     | ~250 req/s                | ~25–35 req/s         | ~3 GB                    | ~50 MB           |
+| **100** (default)  | ~3,000 req/s     | ~500 req/s                | ~50–70 req/s         | ~6 GB                    | ~100 MB          |
+| 200                | ~6,000 req/s     | ~1,000 req/s              | ~100–140 req/s       | ~12 GB                   | ~200 MB          |
+| 500                | ~15,000 req/s    | ~2,500 req/s              | ~250–350 req/s       | ~30 GB                   | ~500 MB          |
+
+Burst columns scale linearly because they're arithmetic ceilings, not physical ones. **Sustained throughput converges to the CPU / EBS / S3 ceilings regardless of pool size** — raising the pool from 100 to 500 with 4 vCPU does not give 5× sustained hot throughput; it just lets bursts of 500 concurrent requests be absorbed without queueing rejections, at the cost of 5× transient RAM.
+
+**Theoretical maximum.** `anyio.to_thread.current_default_thread_limiter().total_tokens` accepts any positive integer — anyio has no hard cap. Practical ceilings are OS-level:
+
+- **`ulimit -u`** (max user processes) — usually thousands, configurable.
+- **RAM stack**: ~1 MB per thread (Linux default `pthread` stack). 1000 threads ≈ 1 GB.
+- **GIL** + **vCPU**: at most `N_cores × ~5` concurrent threads produce real CPU throughput; the rest are blocked on I/O or context-switched.
+
+**When to raise the pool size:**
+
+- Nginx access logs show request latency spikes correlated with concurrent-request count → the pool is exhausted, raise it.
+- Steady-state CPU is **< 70 %** on all cores while you observe queueing → the pool, not the CPU, is the bottleneck.
+- CPU is pegged at **100 %** across all cores → CPU is the bottleneck; raising the pool just adds context-switching overhead. Provision more vCPU or scale out horizontally instead.
+
+For the production scenarios in [§14.7](#147-planning-scenarios), `THREAD_POOL_SIZE = 100` is sufficient when fronted by CloudFront (§12.10), which absorbs the bulk of repeat traffic before it reaches the origin. Raise to 200 only when sized for a workload that legitimately produces simultaneous bursts of >100 unique uncached requests and you have the RAM headroom.
+
+### 12.10 CloudFront and real-world concurrency
+
+In production, CloudFront sits in front of this server and caches tile responses at the edge. A tile URL (`/visual_tiles/{product}/{date}/{z}/{x}/{y}.png`) is fully deterministic — the same URL always returns the same bytes for a given product and date — so CloudFront's cache hit rate is very high once a date has been requested.
+
+In practice:
+
+- The vast majority of tile requests are served by CloudFront and never reach the origin.
+- Only cache misses (first request for a tile coordinate, or after CloudFront TTL expiry) hit the origin.
+- The thread pool and stampede protection (§10.5) are a **backstop for origin misses**, not the steady-state load path.
+
+Concurrency pressure on the origin is therefore much lower than the theoretical maximums in §12.8 / §12.9 suggest.
 
 ---
 
@@ -1166,7 +1342,7 @@ Cold startup `prewarm_disk_slices` grows linearly with `N_satellite × CACHE_DAY
 
 Raise `PREWARM_WORKERS` further (e.g. 12–16) to halve startup again at the cost of more transient RAM and S3 bandwidth contention. On warm restart (disk already populated), prewarm completes in seconds regardless of scenario — it just verifies files exist.
 
-> Full capacity-per-request-type tables (hot / disk-warm / cold throughput per request) are in [`docs/concurrency.md`](concurrency.md).
+> Full capacity-per-request-type tables (hot / disk-warm / cold throughput per request) are in [§12.8](#128-per-request-capacity-origin-server-ec2ecs-in-region) and [§12.9](#129-scaling-thread_pool_size).
 
 ---
 

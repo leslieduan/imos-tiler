@@ -121,6 +121,14 @@ def slice_memo_stats() -> dict:
     }
 
 
+def clear_slice_cache() -> int:
+    """Drop every entry in the L2 slice cache. Returns count removed."""
+    removed = _slice_memo.evict_matching(lambda _: True)
+    if removed:
+        logger.info("Memory cache cleared: %d slice(s)", removed)
+    return removed
+
+
 def evict_product_cache(product: Product) -> None:
     """Remove all in-memory and disk cache entries for a deleted product."""
     from services.data_renderer import evict_processed_cache
