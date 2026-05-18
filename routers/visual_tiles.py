@@ -1,3 +1,5 @@
+import asyncio
+
 from fastapi import APIRouter, HTTPException, Path, Query
 from fastapi.openapi.models import Example
 from fastapi.responses import JSONResponse, Response
@@ -370,7 +372,8 @@ def get_bbox(
         f"and the response is not cached. Expect cold requests to be slow."
     ),
 )
-def get_animation(
+# async because we want to parallelise the per-frame S3 reads, which are the bottleneck for a multi-frame animation.
+async def get_animation(
     product_id: str = Path(openapi_examples=PRODUCT_EX),
     from_date: str = Path(pattern=r"^\d{4}-\d{2}-\d{2}$", openapi_examples=DATE_EX),
     to_date: str = Path(pattern=r"^\d{4}-\d{2}-\d{2}$", openapi_examples=DATE_EX),
@@ -479,7 +482,13 @@ def get_animation(
         product.source_path, bbox_tuple, crs, width, height
     )
 
-    datasets = [load_slice_uncached(product.source_path, d, [variable]) for d in dates]
+    # Fan out the per-frame S3 reads in parallel: each load_slice_uncached call blocks
+    # on Zarr/S3, so asyncio.to_thread frees the event loop and asyncio.gather drops
+    # total latency to ~max(per-frame) instead of the serial sum. Frames stay in the
+    # original date order because gather preserves the input order.
+    datasets = await asyncio.gather(
+        *(asyncio.to_thread(load_slice_uncached, product.source_path, d, [variable]) for d in dates)
+    )
 
     try:
         body = render_bbox_animation(

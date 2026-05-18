@@ -168,7 +168,7 @@ titiler-project/
   routers/
     data_tiles.py                ← /data_tiles — raw value-encoded RGBA tiles for WebGL
     visual_tiles.py              ← /visual_tiles — colourised Web Mercator XYZ tiles + bbox + colormap listing/legend
-    products.py                  ← shared: /products, /manifest, /{id}/{date}/point — included by both tile routers
+    products.py                  ← shared: /products, /manifest, /{id}/{date}/point, /{id}/point (time series) — included by both tile routers
     shared.py                    ← shared router helpers (PRODUCT_EX/DATE_EX examples, get_product_or_404, load_slice_or_404)
     admin/                       ← /admin — product, colormap, and cache-state endpoints (key-protected, package)
       __init__.py                ← assembles admin_router and applies require_admin_key
@@ -302,9 +302,10 @@ The manifest (data-tile pipeline only) is the interface between the server's coo
 `routers/products.py` is included by both tile routers, so these paths exist under both prefixes:
 
 ```
-GET /{prefix}/products                                    → list all registered products
-GET /{prefix}/manifest?from=YYYY-MM-DD&to=YYYY-MM-DD     → available dates for all products
-GET /{prefix}/{product_id}/{date}/point?lat=&lon=         → variable value at point
+GET /{prefix}/products                                          → list all registered products
+GET /{prefix}/manifest?from=YYYY-MM-DD&to=YYYY-MM-DD             → available dates for all products
+GET /{prefix}/{product_id}/{date}/point?lat=&lon=                → variable value at one date
+GET /{prefix}/{product_id}/point?lat=&lon=&from=&to=             → variable values at a point across a date range (time series)
 ```
 
 `/manifest` parameters:
@@ -324,6 +325,20 @@ GET /{prefix}/{product_id}/{date}/point?lat=&lon=         → variable value at 
 ```
 
 **Performance**: dates are read from the `time` coordinate of each Zarr store — a 1-D array held in the store singleton. No spatial data chunks are touched. Filtering is an in-memory string comparison. Responses are sub-millisecond once the store is warm.
+
+**`/point` time-series variant** — the dateless form (`/{prefix}/{product_id}/point?lat=&lon=&from=&to=`) returns one entry per available date in `[from, to]`:
+
+```json
+{
+  "lat": -33.8, "lon": 151.2,
+  "series": [
+    { "date": "2024-01-01", "variables": { "GSLA": { "value": 0.12, "units": "m" } } },
+    { "date": "2024-01-02", "variables": { "GSLA": { "value": 0.14, "units": "m" } } }
+  ]
+}
+```
+
+`from`/`to` follow the same defaults as `/manifest` (3 months before today / unbounded). The handler is `async def` and fans the per-date `load_slice` calls out via `asyncio.gather(asyncio.to_thread(...))` so total latency is ~max(per-date) instead of the serial sum; concurrent identical requests still share one compute through the L2 slice memoizer. Empty range → `200` with `series: []` (not `404`). Response is `Cache-Control: public, max-age=300, must-revalidate` (not immutable) because an unbounded `to` picks up new dates as they land.
 
 ### 6.2 Data tiles (`/data_tiles`)
 
@@ -415,7 +430,9 @@ GET /visual_tiles/{product_id}/{from_date}/{to_date}/animation.{ext}
 | Disk cache (L3)            | **Read-through.** If the prewarmed disk slice exists it is reused; otherwise the slice is fetched directly from the Zarr store. Animations never **write** to L3 — they may request dates outside the prewarmed window and we don't want to pollute L3 or trigger an eviction cycle. |
 | HTTP cache headers         | **None.** No `Cache-Control` set. CloudFront/CDN configurations should treat this path as no-cache; otherwise rare requests would still incur full origin cost while occupying CDN storage. |
 
-The end-user experience: cold requests are slow (each missing date is an S3 read), repeat requests don't get faster, but no other endpoint is affected.
+**Frame loading** — the handler is `async def`. Per-frame `load_slice_uncached` calls are dispatched in parallel via `asyncio.gather(asyncio.to_thread(...))`, so a cold N-frame request blocks on roughly the slowest single-frame S3 read rather than the serial sum. Frame order is preserved because `gather` returns results in input order. The thread pool is the asyncio default executor (see [§12.4](#124-three-thread-pools-not-one)), not the anyio handler pool — a 60-frame fan-out can't starve tile-handler slots.
+
+The end-user experience: cold requests are still slow (every missing date is an S3 round-trip), repeat requests don't get faster, but no other endpoint is affected.
 
 ### 6.4 Admin API (`/admin`)
 
@@ -721,6 +738,30 @@ Size is controlled by `SLICE_CACHE_SIZE` (default `10`). Entry size varies signi
 
 Primary consumers are **visual_tiles** (no L1 above it — every tile request calls `load_slice`) and **data_tiles manifest/point** (always need `ds` directly). For data_tiles tile requests, the slice is only loaded on an L1 miss; once the processed grid is warm, L2 is bypassed entirely.
 
+#### 10.3.1 Oscillating latency on time-series requests that straddle the L3 window
+
+The `/point` time-series endpoint loads one slice per available date in `[from, to]`. When the requested range is **larger than `SLICE_CACHE_SIZE`** *and* **extends past the `CACHE_DAYS` prewarm boundary**, the same request alternates between fast (~tens of ms) and slow (~seconds) on every other hit — even though no other traffic is touching the server. This is a structural property of the L2/L3 interaction, not a bug.
+
+**Concrete scenario.** `SLICE_CACHE_SIZE = 10`, `CACHE_DAYS = 30`, today is 2026-05-18. A client requests `/{product_id}/point?from=2026-04-15&to=2026-05-15` (31 dates). L3 prewarm covers the most recent 30 dates (~2026-04-18 → 2026-05-17), so **3 dates** at the start of the range (2026-04-15, 16, 17) are **outside L3** — call them the *orphan* dates. They live only on S3.
+
+Two design facts make these orphans persistently expensive:
+
+1. **`load_slice` reads from L3 but never writes to it.** A `factory()` miss falls through to `store[...].sel(time=t).compute()`, returns the slice, and lets L2 cache it — but the on-disk pickle is never created. Only `prewarm_disk_slices` and `refresh_disk_cache` (in `services/disk_cache.py`) write to L3, and they only touch dates within the `[-_CACHE_DAYS:]` window.
+2. **Zarr's atomic read unit is the chunk, not the timestep.** For products chunked `(time=5, lat=full, lon=full)`, an S3 read for one orphan date downloads ~5 timesteps' worth of compressed bytes; xarray decodes the chunk and discards 4/5 of it. fsspec's chunk cache may absorb the cost across `.compute()` calls *inside* one Python process if they happen close together, but it is not a reliable cross-request cache. In practice the three contiguous orphans typically share one chunk, so the S3 cost per cold request is roughly **one chunk download** — but it's still ~1–2 s wall-clock, dominating the response.
+
+**Why the latency oscillates.** With 31 dates fanning out through `asyncio.gather(asyncio.to_thread(load_slice, ...))`, each per-date result is inserted into the size-10 L2 LRU as it completes. The 3 orphans finish slowest (S3 vs disk), so they are the **last** entries inserted and survive in L2.
+
+| Hit | L2 state at start                    | What happens                                                                                                                      | Wall time |
+| --- | ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------- | --------- |
+| 1   | empty                                | 28 L3-disk reads + 1 S3 chunk download (covers all 3 orphans). Last 10 inserts survive in L2 → **all 3 orphans + 7 disk dates**.   | ~2.6 s    |
+| 2   | 3 orphans + 7 disk dates             | 10 L2 hits (incl. all 3 orphans) → no S3. 21 misses → L3-disk reads, all fast. **The 21 inserts evict every orphan from L2.**      | ~19 ms    |
+| 3   | 10 disk-backed dates, no orphans     | 10 L2 hits + 18 L3 reads + 3 S3 fetches for the orphan chunk. Same as hit 1, with 7 fewer L2 misses. After: orphans back in L2.    | ~2.7 s    |
+| 4   | same as hit 2                        | same as hit 2                                                                                                                     | ~19 ms    |
+
+The pattern repeats indefinitely. The asymmetry is that **the orphans are L2 *hits* in hit 2 but fresh *inserts* in hit 3** — and the 21 inserts done during hit 2 (for the disk-backed misses) flush the orphans out of L2 entirely, because hit count doesn't protect against eviction once 21 fresh inserts have rotated through a size-10 cache.
+
+**General shape of the trap.** Any request that needs **K distinct slices** where `K > SLICE_CACHE_SIZE` *and* some subset `O ⊂ K` is outside the L3 prewarm window will exhibit this oscillation. Each repeat hit alternates between "orphans still in L2 from the previous fetch" (fast) and "orphans got evicted by the disk-backed inserts" (slow → re-fetch from S3 → orphans land back in L2 → next hit is fast again). The thrash is invisible to `/admin/cache` because L2's stats only report size and inflight counts, not key-level churn.
+
 ### 10.4 L3 — Slice cache, disk (`DISK_CACHE_PATH` directory)
 
 Persists fully-computed slices as lz4-compressed pickles to survive server restarts. On an L2 miss, `load_slice` checks disk before going to S3. A disk hit (~30 ms read + decompress) is ~60× faster than a cold S3 fetch.
@@ -939,6 +980,7 @@ This is why a 60-second prewarm at startup does not delay the first request by 6
 | --------------------------------- | ------------------------------------------------- | -------------------------------------------------------------------------- |
 | HTTP accept / parse / route       | Event loop                                        | Pure async I/O; never blocks                                               |
 | Tile/manifest/point handlers      | Anyio thread pool (`THREAD_POOL_SIZE`)            | Sync `def` so blocking xarray/rio-tiler/PIL calls don't freeze the loop    |
+| `/point` time-series, `/animation` | Event-loop coroutine → `asyncio.to_thread` per date | `async def` so per-date `load_slice` calls fan out via `asyncio.gather`; latency drops to ~max(per-date) instead of the serial sum, and the parallel slices run on the asyncio executor — separate from the anyio handler pool |
 | `/admin/products` POST/DELETE     | Event loop (`async def`)                          | Fast JSON read/write only; admin product prewarm offloaded via `to_thread` |
 | `/products`, `/colormaps` listing | Event loop (`async def`)                          | In-memory dict reads only                                                  |
 | Store prewarm at startup          | One daemon thread per URL                         | Fire-and-forget metadata fetch                                             |

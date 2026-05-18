@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import math
 
@@ -6,7 +7,7 @@ from fastapi.openapi.models import Example
 from fastapi.responses import JSONResponse, Response
 
 from constants import CACHE_VERSION, PRODUCTS
-from services.loader import get_available_dates
+from services.loader import get_available_dates, load_slice
 from services.product_config import list_products
 from utils.dates import three_months_ago
 
@@ -128,4 +129,72 @@ def get_point(
             "variables": values,
         },
         headers=IMMUTABLE_CACHE_HEADERS,
+    )
+
+
+@router.get(
+    "/{product_id}/point",
+    summary="Point value time series",
+    description=(
+        "Returns the value(s) of all product variables at the nearest grid cell to the "
+        "given lat/lon across a date range. `from` defaults to 3 months before today; "
+        "`to` is unbounded by default. Only dates with available data are included."
+    ),
+)
+# async because we want to parallelise the per-date load_slice calls, which are the bottleneck for a multi-date request.
+async def get_point_series(
+    product_id: str = Path(openapi_examples=PRODUCT_EX),
+    lat: float = Query(..., openapi_examples={"default": Example(value=-33.8)}),
+    lon: float = Query(..., openapi_examples={"default": Example(value=151.2)}),
+    from_date: str | None = Query(
+        None,
+        alias="from",
+        pattern=r"^\d{4}-\d{2}-\d{2}$",
+        description="Start date (inclusive), YYYY-MM-DD. Defaults to 3 months before today.",
+        openapi_examples={"default": Example(value="2024-01-01")},
+    ),
+    to_date: str | None = Query(
+        None,
+        alias="to",
+        pattern=r"^\d{4}-\d{2}-\d{2}$",
+        description="End date (inclusive), YYYY-MM-DD. Defaults to no upper bound.",
+        openapi_examples={"default": Example(value="2024-01-31")},
+    ),
+):
+    product = get_product_or_404(product_id)
+    variables = product.variables
+
+    effective_from = from_date or three_months_ago()
+    available = get_available_dates(product.source_path)
+    dates_in_range = [d for d in available if d >= effective_from and (not to_date or d <= to_date)]
+
+    # Fan out load_slice across dates: each call is IO/CPU-bound on the Zarr store, so
+    # asyncio.to_thread frees the event loop while they run. Concurrent identical
+    # requests still share one compute via the slice memoizer in load_slice.
+    slices = await asyncio.gather(
+        *(asyncio.to_thread(load_slice, product.source_path, d, variables) for d in dates_in_range)
+    )
+
+    series = []
+    point_lat: float | None = None
+    point_lon: float | None = None
+    for date_str, ds in zip(dates_in_range, slices, strict=True):
+        point = ds.sel(lat=lat, lon=lon, method="nearest")
+        if point_lat is None:
+            point_lat = float(point.lat.values)
+            point_lon = float(point.lon.values)
+        values = {}
+        for var in variables:
+            v = float(point[var].squeeze())
+            values[var] = {
+                "value": None if math.isnan(v) else v,
+                "units": point[var].attrs.get("units"),
+            }
+        series.append({"date": date_str, "variables": values})
+
+    # Revalidate (not immutable): an unbounded `to` window will pick up new dates as
+    # they land, so we can't promise the response bytes are pinned to the URL.
+    return JSONResponse(
+        content={"lat": point_lat, "lon": point_lon, "series": series},
+        headers=_REVALIDATE_HEADERS,
     )
