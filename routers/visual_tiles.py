@@ -7,7 +7,12 @@ from services.colormap_lookup import resolve_colormap
 from services.legend_renderer import render_legend
 from services.loader import get_available_dates, load_slice_uncached
 from services.store_registry import get_store
-from services.visual_renderer import render_bbox, render_bbox_animation, render_tile
+from services.visual_renderer import (
+    _bbox_to_wgs84,
+    render_bbox,
+    render_bbox_animation,
+    render_tile,
+)
 from utils.image import AnimatedFormat, ImageFormat, animated_media_type, media_type
 from utils.memoizer import Memoizer
 
@@ -179,6 +184,66 @@ def get_tile(
     return Response(content=body, media_type=media_type(ext), headers=IMMUTABLE_CACHE_HEADERS)
 
 
+def _native_resolution_in_bbox(
+    product_source_path: str,
+    bbox_wgs84: tuple[float, float, float, float],
+    max_dim: int = 2048,
+) -> tuple[int, int]:
+    """Output dimensions that match the dataset's native cell resolution inside the bbox.
+
+    Clamped to ``[1, max_dim]`` per axis so a huge bbox over a high-resolution grid
+    can't blow the response up to an unreasonable size. Cell spacing is read from
+    the first two lat/lon coordinates — all current products are on regular grids;
+    irregular grids would need a different code path.
+    """
+    store = get_store(product_source_path)
+    lat_vals = store.lat.values
+    lon_vals = store.lon.values
+    lat_spacing = abs(float(lat_vals[1] - lat_vals[0]))
+    lon_spacing = abs(float(lon_vals[1] - lon_vals[0]))
+    lon_min, lat_min, lon_max, lat_max = bbox_wgs84
+    w = max(1, min(max_dim, int(round((lon_max - lon_min) / lon_spacing))))
+    h = max(1, min(max_dim, int(round((lat_max - lat_min) / lat_spacing))))
+    return w, h
+
+
+def _resolve_resolution(
+    product_source_path: str,
+    bbox_tuple: tuple[float, float, float, float],
+    crs: str,
+    width: int | None,
+    height: int | None,
+    max_dim: int = 2048,
+) -> tuple[int, int]:
+    """Fill in missing width/height per the documented defaulting rules.
+
+    Both omitted → dataset native cell count inside the bbox.
+    One provided → the other is derived from the bbox aspect ratio (in the bbox's
+    own CRS), so the output frame is not stretched relative to the requested view.
+    """
+    if width is not None and height is not None:
+        return width, height
+
+    if width is None and height is None:
+        bbox_wgs84 = _bbox_to_wgs84(bbox_tuple, crs)
+        return _native_resolution_in_bbox(product_source_path, bbox_wgs84, max_dim)
+
+    minx, miny, maxx, maxy = bbox_tuple
+    span_x = (maxx - minx) or 1.0
+    span_y = (maxy - miny) or 1.0
+    aspect = span_x / span_y
+
+    if height is None:
+        # Exactly one is None at this point — narrow with a runtime check for mypy.
+        assert width is not None
+        derived_h = max(1, min(max_dim, int(round(width / aspect))))
+        return width, derived_h
+
+    assert width is None
+    derived_w = max(1, min(max_dim, int(round(height * aspect))))
+    return derived_w, height
+
+
 def _default_bbox_from_store(product_source_path: str) -> tuple[float, float, float, float]:
     """Return EPSG:4326 bounds for the dataset, clamped to ±180 lon.
 
@@ -298,6 +363,9 @@ def get_bbox(
         f"Intended for demos and quick visualisations — not optimised for high traffic. "
         f"At most {_MAX_ANIMATION_FRAMES} frames per request; requests beyond that are rejected. "
         f"If bbox is omitted, the dataset's native bounds are used (clamped to ±180° lon). "
+        f"If width and height are both omitted, the frame matches the dataset's native cell count "
+        f"inside the bbox (capped at 2048 px per axis). If only one of width/height is given, "
+        f"the other is derived from the bbox aspect ratio so the output is not stretched. "
         f"This endpoint bypasses the in-memory slice cache so it never evicts hot tiles, "
         f"and the response is not cached. Expect cold requests to be slow."
     ),
@@ -314,8 +382,26 @@ def get_animation(
         None,
         description="Bounding box as 'minx,miny,maxx,maxy' in the CRS specified by the crs parameter. Defaults to the dataset's native bounds.",
     ),
-    width: int = Query(512, ge=1, le=2048),
-    height: int = Query(512, ge=1, le=2048),
+    width: int | None = Query(
+        None,
+        ge=1,
+        le=2048,
+        description=(
+            "Output frame width in pixels. If both width and height are omitted, the frame matches the "
+            "dataset's native cell count inside the bbox (capped at 2048). If only height is given, "
+            "width is derived from the bbox aspect ratio."
+        ),
+    ),
+    height: int | None = Query(
+        None,
+        ge=1,
+        le=2048,
+        description=(
+            "Output frame height in pixels. If both width and height are omitted, the frame matches the "
+            "dataset's native cell count inside the bbox (capped at 2048). If only width is given, "
+            "height is derived from the bbox aspect ratio."
+        ),
+    ),
     colormap_name: str = Query("viridis", alias="colormap"),
     rescale: str | None = Query(
         None,
@@ -389,6 +475,10 @@ def get_animation(
             ),
         )
 
+    resolved_w, resolved_h = _resolve_resolution(
+        product.source_path, bbox_tuple, crs, width, height
+    )
+
     datasets = [load_slice_uncached(product.source_path, d, [variable]) for d in dates]
 
     try:
@@ -396,8 +486,8 @@ def get_animation(
             datasets,
             variable,
             bbox_tuple,
-            width,
-            height,
+            resolved_w,
+            resolved_h,
             colormap_name,
             rescale_range,
             crs=crs,

@@ -159,6 +159,10 @@ def test_animation_ok_with_default_bbox():
             "routers.visual_tiles._default_bbox_from_store",
             return_value=(140.0, -40.0, 150.0, -30.0),
         ),
+        patch(
+            "routers.visual_tiles._native_resolution_in_bbox",
+            return_value=(256, 256),
+        ),
     ):
         response = client.get(
             "/visual_tiles/sea_level_anomaly/2024-01-01/2024-01-03/animation.apng"
@@ -226,9 +230,93 @@ def test_animation_explicit_bbox_passed_through():
         patch("routers.visual_tiles.load_slice_uncached", return_value=_make_ds()),
         patch("routers.visual_tiles.render_bbox_animation", side_effect=fake_render),
     ):
+        # width+height pinned so the test doesn't trip the native-resolution code path
+        # (which would try to open the real store to read lat/lon spacing).
         response = client.get(
             "/visual_tiles/sea_level_anomaly/2024-01-01/2024-01-01/animation.apng"
-            "?bbox=100,-50,160,-10"
+            "?bbox=100,-50,160,-10&width=256&height=256"
         )
     assert response.status_code == 200
     assert captured["bbox"] == (100.0, -50.0, 160.0, -10.0)
+
+
+def _capture_render_dims():
+    """Patch render_bbox_animation to record the (width, height) the router passed.
+
+    Returns (patch_obj, captured_dict). The dict gains 'wh' once render is called.
+    """
+    captured: dict = {}
+
+    def fake_render(*args, **_kwargs):
+        # render_bbox_animation(datasets, variable, bbox, width, height, ...)
+        captured["wh"] = (args[3], args[4])
+        return _APNG
+
+    return patch("routers.visual_tiles.render_bbox_animation", side_effect=fake_render), captured
+
+
+def test_animation_native_resolution_used_when_both_dims_omitted():
+    patch_render, captured = _capture_render_dims()
+    with (
+        patch("routers.visual_tiles.get_available_dates", return_value=["2024-01-01"]),
+        patch("routers.visual_tiles.load_slice_uncached", return_value=_make_ds()),
+        patch("routers.visual_tiles._native_resolution_in_bbox", return_value=(640, 350)),
+        patch_render,
+    ):
+        response = client.get(
+            "/visual_tiles/sea_level_anomaly/2024-01-01/2024-01-01/animation.apng"
+            "?bbox=57,-70,180,0"
+        )
+    assert response.status_code == 200
+    assert captured["wh"] == (640, 350)
+
+
+def test_animation_height_derived_from_bbox_aspect_when_only_width_given():
+    # Bbox aspect: (150 - 100) / (-10 - -50) = 50 / 40 = 1.25
+    # width=500 → derived height = round(500 / 1.25) = 400
+    patch_render, captured = _capture_render_dims()
+    with (
+        patch("routers.visual_tiles.get_available_dates", return_value=["2024-01-01"]),
+        patch("routers.visual_tiles.load_slice_uncached", return_value=_make_ds()),
+        patch_render,
+    ):
+        response = client.get(
+            "/visual_tiles/sea_level_anomaly/2024-01-01/2024-01-01/animation.apng"
+            "?bbox=100,-50,150,-10&width=500"
+        )
+    assert response.status_code == 200
+    assert captured["wh"] == (500, 400)
+
+
+def test_animation_width_derived_from_bbox_aspect_when_only_height_given():
+    # Bbox aspect: 50 / 40 = 1.25. height=400 → derived width = round(400 * 1.25) = 500.
+    patch_render, captured = _capture_render_dims()
+    with (
+        patch("routers.visual_tiles.get_available_dates", return_value=["2024-01-01"]),
+        patch("routers.visual_tiles.load_slice_uncached", return_value=_make_ds()),
+        patch_render,
+    ):
+        response = client.get(
+            "/visual_tiles/sea_level_anomaly/2024-01-01/2024-01-01/animation.apng"
+            "?bbox=100,-50,150,-10&height=400"
+        )
+    assert response.status_code == 200
+    assert captured["wh"] == (500, 400)
+
+
+def test_animation_derived_dimension_clamped_to_max():
+    # Extreme aspect ratio: bbox 100° wide × 0.5° tall → aspect 200.
+    # width=2000 → derived height = round(2000 / 200) = 10 (well under cap, no clamp).
+    # height=2000 → derived width = round(2000 * 200) = 400000 → clamped to 2048.
+    patch_render, captured = _capture_render_dims()
+    with (
+        patch("routers.visual_tiles.get_available_dates", return_value=["2024-01-01"]),
+        patch("routers.visual_tiles.load_slice_uncached", return_value=_make_ds()),
+        patch_render,
+    ):
+        response = client.get(
+            "/visual_tiles/sea_level_anomaly/2024-01-01/2024-01-01/animation.apng"
+            "?bbox=0,-0.25,100,0.25&height=2000"
+        )
+    assert response.status_code == 200
+    assert captured["wh"] == (2048, 2000)

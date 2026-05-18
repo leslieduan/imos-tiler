@@ -48,7 +48,7 @@ The server is a FastAPI application that produces on-demand PNG tiles for IMOS o
 | Pipeline        | Output CRS               | Coordinate convention                                        | Consumer                                             |
 | --------------- | ------------------------ | ------------------------------------------------------------ | ---------------------------------------------------- |
 | `/data_tiles`   | EPSG:4326 (Plate Carrée) | Custom LOD pyramid: `z` = LOD level, `x`/`y` = chunk col/row | WebGL shader (decodes raw values, reprojects on GPU) |
-| `/visual_tiles` | EPSG:3857 (Web Mercator) | Standard XYZ slippy-map tiles (OSM/MapboxGL/Leaflet)         | Any map library / WMS-style consumer                 |
+| `/visual_tiles` | EPSG:3857 (Web Mercator) | Standard XYZ slippy-map tiles (OSM/MapboxGL/Leaflet) plus a bbox endpoint and a date-range **animation** endpoint (GIF/APNG/WebP) for demos | Any map library / WMS-style consumer                 |
 
 The same Zarr slice is the source for both pipelines; they diverge at the renderer. See [§5](#5-tile-coordinate-systems-and-projection-pipeline) for the full distinction.
 
@@ -343,6 +343,7 @@ GET /visual_tiles/colormaps                                            → all s
 GET /visual_tiles/colormaps/{name}/legend                              → color legend PNG for a colormap
 GET /visual_tiles/{product_id}/{date}/{z}/{x}/{y}.{ext}                  → colourised Web Mercator image (.png or .webp)
 GET /visual_tiles/{product_id}/{date}/bbox.{ext}?bbox=minx,miny,maxx,maxy → colourised image for arbitrary bbox (.png or .webp)
+GET /visual_tiles/{product_id}/{from_date}/{to_date}/animation.{ext}    → animated bbox across a date range (.gif, .apng, .webp)
 ```
 
 **Legend query parameters:**
@@ -373,6 +374,48 @@ Without `rescale`, only the color bar is rendered. With `rescale`, 20 pixels alo
 | `width`     | `256`       | Output image width in pixels (1–2048)                                                                                            |
 | `height`    | `256`       | Output image height in pixels (1–2048)                                                                                           |
 | `crs`       | `EPSG:4326` | CRS of the bbox coordinates. `EPSG:4326` for geographic degrees; `EPSG:3857` for Web Mercator metres (Mapbox `{bbox-epsg-3857}`) |
+
+#### 6.3.1 Animation endpoint
+
+Renders the same bbox across every available date in `[from_date, to_date]` and assembles them into a single animated image. Intended for demos and quick visualisations — **not** a hot-path endpoint.
+
+```
+GET /visual_tiles/{product_id}/{from_date}/{to_date}/animation.{ext}
+```
+
+`ext` ∈ `gif`, `apng`, `webp`. Single-variable products only. `from_date` must be ≤ `to_date`.
+
+**Query parameters:**
+
+| Query param | Default                  | Description                                                                                                                                           |
+| ----------- | ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bbox`      | dataset's native extent  | `minx,miny,maxx,maxy` in the CRS specified by `crs`. When omitted, the dataset's lat/lon bounds are used (clamped to ±180° lon for antimeridian-straddling grids; pass `bbox` explicitly to render the slice past 180°). |
+| `width`     | _(see "Resolution defaulting" below)_ | Output frame width in pixels (1–2048).                                                                                                  |
+| `height`    | _(see "Resolution defaulting" below)_ | Output frame height in pixels (1–2048).                                                                                                 |
+| `colormap`  | `viridis`                | Colormap name. Categorical colormaps require `rescale`; animated WebP is rejected for categorical (use `.apng` or `.gif`).                            |
+| `rescale`   | union of all frames      | `min,max`. The default spans the union of every requested date so the colour ramp is stable frame-to-frame; auto-ranging per frame would flicker.    |
+| `crs`       | `EPSG:4326`              | CRS of the explicit `bbox`. The default bbox is always returned in EPSG:4326 regardless of `crs`.                                                     |
+| `duration`  | `200`                    | Milliseconds per frame (10–5000).                                                                                                                     |
+
+**Resolution defaulting** — three branches in `_resolve_resolution` (`routers/visual_tiles.py`):
+
+| Input                | Output                                                                                                                                                                              |
+| -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Both `width`+`height` | Used as given.                                                                                                                                                                      |
+| Both omitted          | Frame size matches the dataset's native cell count inside the bbox, i.e. `ceil(bbox_span / native_spacing)` per axis, **clamped to 2048**. Native spacing is read from the first two lat/lon coordinates — all current products are on regular grids. |
+| Only one provided     | The other is derived from the bbox aspect ratio in the bbox's own CRS (`(maxx-minx)/(maxy-miny)`) so the output is not stretched relative to the requested view. Clamped to 1–2048. |
+
+**Frame cap** — 60 frames per request, hard-coded in `_MAX_ANIMATION_FRAMES`. Requests beyond that are rejected with 400 so a wide date range can't produce a multi-hundred-megabyte response.
+
+**Caching design** — this endpoint deliberately differs from the other tile endpoints:
+
+| Layer                    | Behaviour                                                                                                                                                                       |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| In-memory slice cache (L2) | **Bypassed.** Animations call `load_slice_uncached` (`services/loader.py`) which never touches the LRU. A rare 60-frame request can therefore not evict hot slices serving the static `/visual_tiles` and `/data_tiles` endpoints. |
+| Disk cache (L3)            | **Read-through.** If the prewarmed disk slice exists it is reused; otherwise the slice is fetched directly from the Zarr store. Animations never **write** to L3 — they may request dates outside the prewarmed window and we don't want to pollute L3 or trigger an eviction cycle. |
+| HTTP cache headers         | **None.** No `Cache-Control` set. CloudFront/CDN configurations should treat this path as no-cache; otherwise rare requests would still incur full origin cost while occupying CDN storage. |
+
+The end-user experience: cold requests are slow (each missing date is an S3 read), repeat requests don't get faster, but no other endpoint is affected.
 
 ### 6.4 Admin API (`/admin`)
 
