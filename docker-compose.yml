@@ -27,6 +27,10 @@ services:
       - CACHE_DAYS=${CACHE_DAYS:-30}
       - PREWARM_WORKERS=${PREWARM_WORKERS:-4}
       - CACHE_REFRESH_INTERVAL_SECONDS=${CACHE_REFRESH_INTERVAL_SECONDS:-14400}
+      # LOG_FORMAT is not set here: Docker stdout is not a TTY, so log_config.py
+      # auto-selects JSON. Set LOG_FORMAT=text on the host to force human-readable
+      # output (e.g. for a debugging session via `docker run -it`).
+      - SLOW_FETCH_THRESHOLD_SECONDS=${SLOW_FETCH_THRESHOLD_SECONDS:-5}
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]

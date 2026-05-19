@@ -36,6 +36,7 @@
 13. [Adding a new product](#13-adding-a-new-product)
 14. [Capacity and resource planning](#14-capacity-and-resource-planning)
 15. [Environment variables](#15-environment-variables)
+16. [Logging](#16-logging)
 
 ---
 
@@ -1501,4 +1502,86 @@ A wrong-layer choice has real costs: making `max_lods` an env var would let an o
 | `PREWARM_WORKERS`                | `8`       | Thread-pool size used during the startup disk prewarm (and the per-product prewarm fired by `POST /admin/products`). |
 | `CACHE_REFRESH_INTERVAL_SECONDS` | `14400`   | Period (seconds) between background refresh cycles. Default 4 hours.                      |
 
+### 15.5 Logging
+
+| Variable                        | Default    | Description                                                                                                                                                            |
+| ------------------------------- | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `LOG_FORMAT`                    | _(auto)_   | `json` — force JSON output. `text` — force human-readable. Unset (default) — JSON when stdout is not a TTY (containers, EC2, CI), human-readable when it is (local terminal). |
+| `SLOW_FETCH_THRESHOLD_SECONDS`  | `5`        | Log a `WARNING` when a cold S3 `.compute()` takes longer than this many seconds. See [§16.4](#164-operational-signals).                                                |
+
 See `docker-compose.yml` for the production wiring of these variables, and [`docs/security.md`](security.md) for how `ADMIN_API_KEY` interacts with nginx and the EC2 security group.
+
+---
+
+## 16. Logging
+
+All logging configuration lives in `log_config.py`. `main.py` calls `configure_logging()` once at startup (after `load_dotenv()`) and nothing else touches logging setup.
+
+### 16.1 Format selection
+
+Format is chosen automatically from the TTY state of stdout — no configuration needed in most environments:
+
+| Environment | stdout TTY? | `LOG_FORMAT` | Format used |
+|---|---|---|---|
+| Local dev terminal | yes | unset | Human-readable (uvicorn default) |
+| Docker / EC2 / CI | no | unset | JSON (one object per line) |
+| Any | — | `json` | JSON (forced) |
+| Any | — | `text` | Human-readable (forced, e.g. `docker run -it`) |
+
+JSON records share a single schema for both app logs and uvicorn access logs:
+
+```json
+{"time": "2026-05-19T06:02:50.073+00:00", "level": "INFO", "logger": "services.loader", "message": "Store opened: s3://bucket/sla.zarr (365 dates)"}
+{"time": "2026-05-19T06:02:51.210+00:00", "level": "ERROR", "logger": "main", "message": "Unhandled error on GET /data_tiles/...", "exc": "Traceback ..."}
+{"time": "2026-05-19T06:03:00.001+00:00", "level": "INFO", "logger": "uvicorn.access", "message": "...", "client_addr": "1.2.3.4:52100", "request_line": "GET /data_tiles/sla/2026-05-19/2/0/0.png HTTP/1.1", "status_code": 200}
+```
+
+### 16.2 Application logger namespaces
+
+Uvicorn's default `LOGGING_CONFIG` only wires `uvicorn.*` loggers to its handler. `configure_logging()` also routes `services`, `routers`, and `main` through the same handler so all application logs share one format and one destination.
+
+### 16.3 Startup log sequence
+
+A clean startup produces these lines in order (all `INFO` unless noted):
+
+```
+Thread pool size: 100
+Loaded 3 product(s) from data/products.json
+Loaded 2 colormap(s) from data/colormaps.json
+Disk cache: path=/cache limit=20GB days=30 workers=8   ← or WARNING if DISK_CACHE_PATH unset
+Memory cache: slice=10 processed=50  Store TTL: 600s
+Store opened: s3://... (365 dates)                     ← one per product, from prewarm threads
+Cache refresh interval: 14400s
+Prewarm complete: 90 written, 0 skipped, 0 failed, 23.4s
+```
+
+If any line is missing, the corresponding feature is either misconfigured (missing env var) or failed silently — the prewarm/refresh error paths log at `WARNING` or `EXCEPTION` level.
+
+### 16.4 Operational signals
+
+Lines to watch for in production:
+
+| Level | Message pattern | What it means |
+|---|---|---|
+| `WARNING` | `Disk cache disabled: DISK_CACHE_PATH not set` | L3 cache is off — all slices go cold to S3. Set `DISK_CACHE_PATH`. |
+| `WARNING` | `Slow S3 fetch: <store> / <date> took N.Ns` | A cold `.compute()` exceeded `SLOW_FETCH_THRESHOLD_SECONDS`. S3 is slow for this key — check S3 region, VPC endpoints, or increase `DISK_CACHE_PATH` capacity so the date gets prewarmed. |
+| `WARNING` | `Disk cache add failed: <product> / <date>` | Refresh cycle couldn't write a slice — check disk space and `DISK_CACHE_LIMIT_GB`. |
+| `WARNING` | `Admin auth rejected (invalid key) from <ip>` | Failed admin authentication attempt. Unexpected IPs warrant investigation. |
+| `WARNING` | `Multiple timestamps (N) map to date <date> in <store>` | The Zarr store has more than one UTC timestamp resolving to the same local date. The first timestamp is used; check the store's time coordinate for duplicates. |
+| `ERROR` | `Unhandled error on <METHOD> <path>` | An uncaught exception reached the global handler — always signals a bug. The full traceback follows. |
+| `ERROR` | `Cache refresh cycle failed; will retry next interval` | The periodic refresh loop raised an unhandled exception. The next cycle still runs; check for disk-full or S3 access issues. |
+
+Background task summary lines confirm normal operation:
+
+```
+Prewarm complete: 142 written, 8 skipped, 0 failed, 23.4s
+Cache eviction: 5 stale dates, 1 orphan dirs removed
+Refresh cycle complete: 3 added, 0 failed, 4.1s
+Disk pressure eviction: 12 files removed (480.0 MB freed), usage now 71.2%
+```
+
+These are always `INFO`. Absence of the prewarm line after startup suggests a disk-cache config problem.
+
+### 16.5 Health check suppression
+
+`GET /health` responses are filtered from the uvicorn access log by `SuppressHealthChecks` (added in `configure_logging()`). Load-balancer probes fire every few seconds and would otherwise dominate the access log volume. App-level `/health` handler logs are unaffected — only the access-log entry is dropped.

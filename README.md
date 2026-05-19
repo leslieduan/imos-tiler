@@ -198,7 +198,7 @@ See [`docs/security.md`](docs/security.md) for how admin endpoints are secured i
 
 ## Docs
 
-- [`docs/technical.md`](docs/technical.md) — architecture, tile coordinate systems, LOD algorithm, caching strategy, concurrency model, capacity planning, PNG encoding contract
+- [`docs/technical.md`](docs/technical.md) — architecture, tile coordinate systems, LOD algorithm, caching strategy, concurrency model, capacity planning, PNG encoding contract, logging
 - [`docs/cache_analysis.md`](docs/cache_analysis.md) — cache option analysis: why disk cache was chosen over Redis and EFS
 - [`docs/http_caching.md`](docs/http_caching.md) — HTTP caching design: Cache-Control headers, ETag revalidation on `/manifest`, CACHE_VERSION invalidation
 - [`docs/dataset.md`](docs/dataset.md) — representative example Zarr stores (size classes, dimensions, chunking, variables) used as planning anchors
