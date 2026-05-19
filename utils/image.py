@@ -41,9 +41,6 @@ def _build_empty_tile(fmt: ImageFormat) -> bytes:
     return encode_rgba(np.zeros((TILE_SIZE, TILE_SIZE, 4), dtype=np.uint8), fmt)
 
 
-# Returned for tiles outside the data extent. Bytes are immutable, so a single
-# instance per format is safe to reuse across all responses — no need to
-# re-encode per call.
 _EMPTY_TILES: dict[ImageFormat, bytes] = {
     "png": _build_empty_tile("png"),
     "webp": _build_empty_tile("webp"),

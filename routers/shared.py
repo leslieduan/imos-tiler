@@ -1,13 +1,4 @@
-"""Helpers shared across the three routers (products, data_tiles, visual_tiles).
-
-These previously lived in routers/products.py with leading underscores, and the
-other routers reached in past the underscore convention to import them. That
-worked but reads as a layering violation — the underscored names announce
-"private", yet half the routers package depends on them.
-
-Moving them here keeps products.py focused on its own endpoints and gives the
-other routers a public, intentional import target.
-"""
+"""Helpers shared across the three routers (products, data_tiles, visual_tiles)."""
 
 from fastapi import HTTPException
 from fastapi.openapi.models import Example

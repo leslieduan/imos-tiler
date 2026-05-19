@@ -1,4 +1,4 @@
-"""GET /admin/cache: response shape, auth, disk stats, refresh status, in-flight attribution."""
+"""GET /admin/cache and DELETE /admin/cache/{memory,disk}: response shape, auth, disk stats, refresh status, in-flight attribution."""
 
 from unittest.mock import patch
 
@@ -45,6 +45,16 @@ def reset_refresh_status():
     yield
 
 
+@pytest.fixture(autouse=True)
+def reset_prewarm_running():
+    """Prewarm flag is module-level; ensure it is False before and after each test."""
+    with disk_cache._prewarm_lock:
+        disk_cache._prewarm_running = False
+    yield
+    with disk_cache._prewarm_lock:
+        disk_cache._prewarm_running = False
+
+
 @pytest.fixture
 def cache_root(tmp_path, monkeypatch):
     monkeypatch.setenv("DISK_CACHE_PATH", str(tmp_path))
@@ -76,7 +86,7 @@ def test_get_cache_returns_top_level_keys(monkeypatch):
     r = client.get("/admin/cache", headers=_HEADERS)
     assert r.status_code == 200
     body = r.json()
-    assert set(body.keys()) == {"disk", "refresh", "in_flight", "memory_cache", "products"}
+    assert set(body.keys()) == {"disk", "disk_writes", "in_flight", "memory_cache", "products"}
 
 
 def test_disk_disabled_when_env_unset(monkeypatch):
@@ -85,12 +95,38 @@ def test_disk_disabled_when_env_unset(monkeypatch):
     assert body["disk"] == {"enabled": False}
 
 
+def test_disk_writes_shape():
+    body = client.get("/admin/cache", headers=_HEADERS).json()
+    dw = body["disk_writes"]
+    assert set(dw.keys()) == {"prewarm", "refresh"}
+    assert set(dw["prewarm"].keys()) == {"running"}
+    assert set(dw["refresh"].keys()) == {
+        "status",
+        "last_started_at",
+        "last_completed_at",
+        "last_error",
+        "interval_seconds",
+    }
+
+
+def test_prewarm_running_false_by_default():
+    body = client.get("/admin/cache", headers=_HEADERS).json()
+    assert body["disk_writes"]["prewarm"]["running"] is False
+
+
+def test_prewarm_running_true_when_active():
+    with disk_cache._prewarm_lock:
+        disk_cache._prewarm_running = True
+    body = client.get("/admin/cache", headers=_HEADERS).json()
+    assert body["disk_writes"]["prewarm"]["running"] is True
+
+
 def test_refresh_status_never_run_by_default():
     body = client.get("/admin/cache", headers=_HEADERS).json()
-    assert body["refresh"]["status"] == "never_run"
-    assert body["refresh"]["last_started_at"] is None
-    assert body["refresh"]["last_completed_at"] is None
-    assert body["refresh"]["last_error"] is None
+    assert body["disk_writes"]["refresh"]["status"] == "never_run"
+    assert body["disk_writes"]["refresh"]["last_started_at"] is None
+    assert body["disk_writes"]["refresh"]["last_completed_at"] is None
+    assert body["disk_writes"]["refresh"]["last_error"] is None
 
 
 def test_in_flight_zero_when_idle():
@@ -173,10 +209,10 @@ def test_refresh_status_ok_after_successful_run(cache_root):
         disk_cache.refresh_disk_cache([p])
 
     body = client.get("/admin/cache", headers=_HEADERS).json()
-    assert body["refresh"]["status"] == "ok"
-    assert body["refresh"]["last_started_at"] is not None
-    assert body["refresh"]["last_completed_at"] is not None
-    assert body["refresh"]["last_error"] is None
+    assert body["disk_writes"]["refresh"]["status"] == "ok"
+    assert body["disk_writes"]["refresh"]["last_started_at"] is not None
+    assert body["disk_writes"]["refresh"]["last_completed_at"] is not None
+    assert body["disk_writes"]["refresh"]["last_error"] is None
 
 
 def test_refresh_status_error_when_run_raises(cache_root):
@@ -189,8 +225,8 @@ def test_refresh_status_error_when_run_raises(cache_root):
         disk_cache.refresh_disk_cache([p])
 
     body = client.get("/admin/cache", headers=_HEADERS).json()
-    assert body["refresh"]["status"] == "error"
-    assert "boom" in body["refresh"]["last_error"]
+    assert body["disk_writes"]["refresh"]["status"] == "error"
+    assert "boom" in body["disk_writes"]["refresh"]["last_error"]
 
 
 # ---------------------------------------------------------------------------
@@ -252,3 +288,72 @@ def test_unknown_product_creating_unrelated_inflight_key_not_attributed():
     finally:
         with loader._slice_memo._lock:
             loader._slice_memo._inflight.pop(key, None)
+
+
+# ---------------------------------------------------------------------------
+# DELETE /admin/cache/disk — auth
+# ---------------------------------------------------------------------------
+
+
+def test_delete_disk_cache_without_admin_key_returns_401():
+    r = client.delete("/admin/cache/disk")
+    assert r.status_code == 401
+
+
+def test_delete_disk_cache_wrong_admin_key_returns_403():
+    r = client.delete("/admin/cache/disk", headers={"X-Admin-Key": "wrong"})
+    assert r.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# DELETE /admin/cache/disk — 409 guards
+# ---------------------------------------------------------------------------
+
+
+def test_delete_disk_cache_returns_409_when_prewarm_running(monkeypatch):
+    with disk_cache._prewarm_lock:
+        disk_cache._prewarm_running = True
+    r = client.delete("/admin/cache/disk", headers=_HEADERS)
+    assert r.status_code == 409
+    assert "prewarm" in r.json()["detail"].lower()
+
+
+def test_delete_disk_cache_returns_409_when_refresh_running():
+    with disk_cache._refresh_status_lock:
+        disk_cache._refresh_status["status"] = "running"
+    r = client.delete("/admin/cache/disk", headers=_HEADERS)
+    assert r.status_code == 409
+    assert "refresh" in r.json()["detail"].lower()
+
+
+# ---------------------------------------------------------------------------
+# DELETE /admin/cache/disk — behaviour
+# ---------------------------------------------------------------------------
+
+
+def test_delete_disk_cache_removes_files_and_dirs(cache_root):
+    p = PRODUCTS["sea_level_anomaly"]
+    d = disk_cache.disk_cache_path(p.source_path, "x", p.variables).parent
+    d.mkdir(parents=True)
+    (d / "2024-01-01.pkl.lz4").write_bytes(b"x")
+    (d / "2024-01-02.pkl.lz4").write_bytes(b"x")
+
+    r = client.delete("/admin/cache/disk", headers=_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["cleared"]["disk"] == {"files": 2, "directories": 1}
+    assert not d.exists()
+    assert cache_root.exists()  # base dir preserved
+
+
+def test_delete_disk_cache_disabled_returns_zeros(monkeypatch):
+    monkeypatch.delenv("DISK_CACHE_PATH", raising=False)
+    r = client.delete("/admin/cache/disk", headers=_HEADERS)
+    assert r.status_code == 200
+    assert r.json()["cleared"]["disk"] == {"files": 0, "directories": 0}
+
+
+def test_delete_disk_cache_empty_cache_returns_zeros(cache_root):
+    r = client.delete("/admin/cache/disk", headers=_HEADERS)
+    assert r.status_code == 200
+    assert r.json()["cleared"]["disk"] == {"files": 0, "directories": 0}

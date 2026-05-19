@@ -104,6 +104,7 @@ Requires `X-Admin-Key` header. Admin endpoints are blocked at the nginx layer an
 | DELETE | `/admin/colormaps/{name}` | Remove a custom colormap                                                   |
 | GET    | `/admin/cache`            | Cache state snapshot (disk footprint, refresh status, in-flight computes) |
 | DELETE | `/admin/cache/memory`     | Clear all in-memory caches (L1 processed grids + L2 slices). Disk untouched. |
+| DELETE | `/admin/cache/disk`       | Delete every slice file from the L3 disk cache. Memory caches untouched. |
 
 ## Managing products
 
