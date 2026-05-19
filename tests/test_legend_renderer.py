@@ -100,7 +100,6 @@ def test_categorical_renders_discrete_blocks(monkeypatch):
     from services import colormap_lookup
 
     colormap_lookup.resolve_colormap.cache_clear()
-    colormap_lookup.colormap_lut.cache_clear()
 
     png = legend_renderer.render_legend("_test_cats", width=300, height=20)
     img = _decode(png)
