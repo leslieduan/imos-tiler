@@ -112,14 +112,17 @@ def processed_memo_stats() -> dict:
 def evict_processed_cache(product: Product) -> None:
     removed = _processed_memo.evict_matching(lambda k: k[0] == product.source_path)
     if removed:
-        logger.info("Processed cache evicted %d entry/entries for: %s", removed, product.id)
+        logger.info(
+            "Processed cache evicted for product",
+            extra={"product_id": product.id, "entries_removed": removed},
+        )
 
 
 def clear_processed_cache() -> int:
     """Drop every entry in the L1 processed-grid cache. Returns count removed."""
     removed = _processed_memo.evict_matching(lambda _: True)
     if removed:
-        logger.info("Processed cache cleared: %d entry/entries", removed)
+        logger.info("Processed cache cleared", extra={"entries_removed": removed})
     return removed
 
 

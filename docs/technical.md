@@ -1508,7 +1508,7 @@ A wrong-layer choice has real costs: making `max_lods` an env var would let an o
 | ------------------------------- | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `LOG_FORMAT`                    | _(auto)_   | `json` — force JSON output. `text` — force human-readable. Unset (default) — JSON when stdout is not a TTY (containers, EC2, CI), human-readable when it is (local terminal). |
 | `LOG_LEVEL`                     | `INFO`     | Application log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`). Controls `services`, `routers`, and `main` namespaces. Uvicorn's own log level is set separately via `--log-level`. |
-| `SLOW_FETCH_THRESHOLD_SECONDS`  | `5`        | Log a `WARNING` when a cold S3 `.compute()` takes longer than this many seconds. See [§16.4](#164-operational-signals).                                                |
+| `SLOW_FETCH_THRESHOLD_SECONDS`  | `5`        | Log a `WARNING` when a cold S3 `.compute()` takes longer than this many seconds. See [§16.5](#165-operational-signals).                                                |
 
 See `docker-compose.yml` for the production wiring of these variables, and [`docs/security.md`](security.md) for how `ADMIN_API_KEY` interacts with nginx and the EC2 security group.
 
@@ -1532,57 +1532,78 @@ Format is chosen automatically from the TTY state of stdout — no configuration
 JSON records share a single schema for both app logs and uvicorn access logs:
 
 ```json
-{"time": "2026-05-19T06:02:50.073+00:00", "level": "INFO", "logger": "services.loader", "message": "Store opened: s3://bucket/sla.zarr (365 dates)"}
-{"time": "2026-05-19T06:02:51.210+00:00", "level": "ERROR", "logger": "main", "message": "Unhandled error on GET /data_tiles/...", "exc": "Traceback ..."}
+{"time": "2026-05-19T06:02:50.073+00:00", "level": "INFO", "logger": "services.store_registry", "message": "Store opened", "store_url": "s3://bucket/sla.zarr", "date_count": 365}
+{"time": "2026-05-19T06:02:51.210+00:00", "level": "ERROR", "logger": "main", "message": "Unhandled error", "method": "GET", "path": "/data_tiles/...", "exc": "Traceback ..."}
 {"time": "2026-05-19T06:03:00.001+00:00", "level": "INFO", "logger": "uvicorn.access", "message": "...", "client_addr": "1.2.3.4:52100", "request_line": "GET /data_tiles/sla/2026-05-19/2/0/0.png HTTP/1.1", "status_code": 200}
 ```
 
-### 16.2 Application logger namespaces
+### 16.2 Structured fields
+
+`message` is a stable event name (e.g. `"Store opened"`, `"Slow S3 fetch"`); variable values are emitted as top-level JSON fields alongside it. This makes them queryable directly in CloudWatch Logs Insights without parsing the message string:
+
+```
+fields @timestamp, level, message, store_url, date, seconds
+| filter message = "Slow S3 fetch" and seconds > 10
+| sort @timestamp desc
+```
+
+Convention in code: pass values through `extra={...}` rather than `%s`-interpolating into the message.
+
+```python
+logger.info(
+    "Store opened",
+    extra={"store_url": store_url, "date_count": len(index)},
+)
+```
+
+`JsonFormatter` promotes any non-stdlib attribute on the record (i.e. anything supplied via `extra={}`, plus the fields uvicorn attaches to access records) to a top-level JSON field automatically.
+
+### 16.3 Application logger namespaces
 
 Uvicorn's default `LOGGING_CONFIG` only wires `uvicorn.*` loggers to its handler. `configure_logging()` also routes `services`, `routers`, and `main` through the same handler so all application logs share one format and one destination.
 
-### 16.3 Startup log sequence
+### 16.4 Startup log sequence
 
-A clean startup produces these lines in order (all `INFO` unless noted):
+A clean startup produces these `message` values in order (all `INFO` unless noted), each with its own structured fields:
 
 ```
-Thread pool size: 100
-Loaded 3 product(s) from data/products.json
-Loaded 2 colormap(s) from data/colormaps.json
-Disk cache: path=/cache limit=20GB days=30 workers=8   ← or WARNING if DISK_CACHE_PATH unset
-Memory cache: slice=10 processed=50  Store TTL: 600s
-Store opened: s3://... (365 dates)                     ← one per product, from prewarm threads
-Cache refresh interval: 14400s
-Prewarm complete: 90 written, 0 skipped, 0 failed, 23.4s
+Thread pool size set            thread_pool_size=100
+Loaded products from disk       count=3, path=data/products.json
+Loaded colormaps from disk      count=2, path=data/colormaps.json
+Disk cache enabled              path=/cache, limit_gb=20, days=30, workers=8   ← or WARNING "Disk cache disabled: DISK_CACHE_PATH not set"
+Memory cache configured         slice_cache_size=10, processed_cache_size=50, store_ttl_seconds=600
+Store opened                    store_url=s3://..., date_count=365             ← one per product, from prewarm threads
+Cache refresh interval set      interval_seconds=14400
+Prewarm complete                written=90, skipped=0, failed=0, seconds=23.4
 ```
 
 If any line is missing, the corresponding feature is either misconfigured (missing env var) or failed silently — the prewarm/refresh error paths log at `WARNING` or `EXCEPTION` level.
 
-### 16.4 Operational signals
+### 16.5 Operational signals
 
-Lines to watch for in production:
+Lines to watch for in production. Filter on `message` for the event name; the listed fields ride alongside it as queryable JSON.
 
-| Level | Message pattern | What it means |
-|---|---|---|
-| `WARNING` | `Disk cache disabled: DISK_CACHE_PATH not set` | L3 cache is off — all slices go cold to S3. Set `DISK_CACHE_PATH`. |
-| `WARNING` | `Slow S3 fetch: <store> / <date> took N.Ns` | A cold `.compute()` exceeded `SLOW_FETCH_THRESHOLD_SECONDS`. S3 is slow for this key — check S3 region, VPC endpoints, or increase `DISK_CACHE_PATH` capacity so the date gets prewarmed. |
-| `WARNING` | `Disk cache add failed: <product> / <date>` | Refresh cycle couldn't write a slice — check disk space and `DISK_CACHE_LIMIT_GB`. |
-| `WARNING` | `Admin auth rejected (invalid key) from <ip>` | Failed admin authentication attempt. Unexpected IPs warrant investigation. |
-| `DEBUG` | `Multiple timestamps (N) map to date <date> in <store>` | The Zarr store has more than one UTC timestamp resolving to the same local date (expected for sub-daily stores). The first timestamp is used. Enable `LOG_LEVEL=DEBUG` to see these. |
-| `ERROR` | `Unhandled error on <METHOD> <path>` | An uncaught exception reached the global handler — always signals a bug. The full traceback follows. |
-| `ERROR` | `Cache refresh cycle failed; will retry next interval` | The periodic refresh loop raised an unhandled exception. The next cycle still runs; check for disk-full or S3 access issues. |
+| Level | `message` | Key fields | What it means |
+|---|---|---|---|
+| `WARNING` | `Disk cache disabled: DISK_CACHE_PATH not set` | — | L3 cache is off — all slices go cold to S3. Set `DISK_CACHE_PATH`. |
+| `WARNING` | `Slow S3 fetch` | `store_url`, `date`, `seconds` | A cold `.compute()` exceeded `SLOW_FETCH_THRESHOLD_SECONDS`. S3 is slow for this key — check S3 region, VPC endpoints, or increase `DISK_CACHE_PATH` capacity so the date gets prewarmed. |
+| `WARNING` | `Disk cache add failed` | `product_id`, `date` | Refresh cycle couldn't write a slice — check disk space and `DISK_CACHE_LIMIT_GB`. |
+| `WARNING` | `Admin auth rejected: invalid key` | `client`, `path` | Failed admin authentication attempt. Unexpected `client` IPs warrant investigation. |
+| `DEBUG` | `Multiple timestamps map to single date; first will be used` | `count`, `date`, `store_url`, `first_timestamp` | The Zarr store has more than one UTC timestamp resolving to the same local date (expected for sub-daily stores). The first timestamp is used. Enable `LOG_LEVEL=DEBUG` to see these. |
+| `ERROR` | `Unhandled error` | `method`, `path` | An uncaught exception reached the global handler — always signals a bug. The full traceback rides in `exc`. |
+| `ERROR` | `Cache refresh cycle failed; will retry next interval` | — | The periodic refresh loop raised an unhandled exception. The next cycle still runs; check for disk-full or S3 access issues. |
 
 Background task summary lines confirm normal operation:
 
 ```
-Prewarm complete: 142 written, 8 skipped, 0 failed, 23.4s
-Cache eviction: 5 stale dates, 1 orphan dirs removed
-Refresh cycle complete: 3 added, 0 failed, 4.1s
-Disk pressure eviction: 12 files removed (480.0 MB freed), usage now 71.2%
+Prewarm complete                 written=142, skipped=8, failed=0, seconds=23.4
+Cache eviction complete          stale_dates=5, orphan_dirs=1
+Refresh cycle complete           added=3, failed=0, seconds=4.1
+Disk pressure eviction completed files_removed=12, mb_freed=480.0, usage_pct=71.2
 ```
 
-These are always `INFO`. Absence of the prewarm line after startup suggests a disk-cache config problem.
+These are always `INFO`. Absence of `Prewarm complete` after startup suggests a disk-cache config problem.
 
-### 16.5 Health check suppression
+### 16.6 Health check suppression
 
 `GET /health` responses are filtered from the uvicorn access log by `SuppressHealthChecks` (added in `configure_logging()`). Load-balancer probes fire every few seconds and would otherwise dominate the access log volume. App-level `/health` handler logs are unaffected — only the access-log entry is dropped.

@@ -30,12 +30,14 @@ def _spawn_prewarm(product: Product) -> None:
     def _on_done(t: asyncio.Task) -> None:
         _background_tasks.discard(t)
         if t.cancelled():
-            logger.info("Prewarm cancelled for %s", product.id)
+            logger.info("Prewarm cancelled", extra={"product_id": product.id})
             return
         exc = t.exception()
         if exc is not None:
             logger.exception(
-                "Prewarm failed for %s", product.id, exc_info=(type(exc), exc, exc.__traceback__)
+                "Prewarm failed",
+                extra={"product_id": product.id},
+                exc_info=(type(exc), exc, exc.__traceback__),
             )
 
     task.add_done_callback(_on_done)
@@ -85,9 +87,12 @@ async def add_product(payload: ProductPayload):
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
     except Exception as e:
-        logger.exception("Failed to persist product %s", payload.id)
+        logger.exception("Failed to persist product", extra={"product_id": payload.id})
         raise HTTPException(status_code=500, detail=f"Failed to persist product: {e}") from e
-    logger.info("Product registered: %s ← %s", product.id, product.source_path)
+    logger.info(
+        "Product registered",
+        extra={"product_id": product.id, "source_path": product.source_path},
+    )
     _spawn_prewarm(product)
     return JSONResponse(
         status_code=201, content={"id": product.id, "source_path": product.source_path}
@@ -109,8 +114,8 @@ def delete_product(product_id: str):
     except ValueError as e:
         raise HTTPException(status_code=403, detail=str(e)) from e
     except Exception as e:
-        logger.exception("Failed to persist removal of product %s", product_id)
+        logger.exception("Failed to persist removal of product", extra={"product_id": product_id})
         raise HTTPException(status_code=500, detail=f"Failed to persist removal: {e}") from e
-    logger.info("Product removed: %s", product_id)
+    logger.info("Product removed", extra={"product_id": product_id})
     if product is not None:
         evict_product_cache(product)

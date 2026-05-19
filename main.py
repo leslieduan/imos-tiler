@@ -75,31 +75,35 @@ async def _cache_refresh_loop(interval: int) -> None:
 async def lifespan(app: FastAPI):
     limiter = anyio.to_thread.current_default_thread_limiter()
     limiter.total_tokens = int(os.environ.get("THREAD_POOL_SIZE", 100))
-    logger.info("Thread pool size: %d", limiter.total_tokens)
+    logger.info("Thread pool size set", extra={"thread_pool_size": limiter.total_tokens})
     load_products()
     load_colormaps()
     disk_path = os.environ.get("DISK_CACHE_PATH")
     if disk_path:
         logger.info(
-            "Disk cache: path=%s limit=%sGB days=%s workers=%s",
-            disk_path,
-            os.environ.get("DISK_CACHE_LIMIT_GB", 20),
-            os.environ.get("CACHE_DAYS", 30),
-            os.environ.get("PREWARM_WORKERS", 8),
+            "Disk cache enabled",
+            extra={
+                "path": disk_path,
+                "limit_gb": int(os.environ.get("DISK_CACHE_LIMIT_GB", 20)),
+                "days": int(os.environ.get("CACHE_DAYS", 30)),
+                "workers": int(os.environ.get("PREWARM_WORKERS", 8)),
+            },
         )
     else:
         logger.warning("Disk cache disabled: DISK_CACHE_PATH not set")
     logger.info(
-        "Memory cache: slice=%s processed=%s  Store TTL: %ss",
-        os.environ.get("SLICE_CACHE_SIZE", 10),
-        os.environ.get("PROCESSED_CACHE_SIZE", 50),
-        os.environ.get("STORE_TTL_SECONDS", 600),
+        "Memory cache configured",
+        extra={
+            "slice_cache_size": int(os.environ.get("SLICE_CACHE_SIZE", 10)),
+            "processed_cache_size": int(os.environ.get("PROCESSED_CACHE_SIZE", 50)),
+            "store_ttl_seconds": int(os.environ.get("STORE_TTL_SECONDS", 600)),
+        },
     )
     store_urls = list({p.source_path for p in PRODUCTS.values()})
     prewarm_stores(store_urls)
     prewarm_task = asyncio.create_task(_startup_cache_sync(list(PRODUCTS.values())))
     interval = int(os.environ.get("CACHE_REFRESH_INTERVAL_SECONDS", 14400))
-    logger.info("Cache refresh interval: %ds", interval)
+    logger.info("Cache refresh interval set", extra={"interval_seconds": interval})
     refresh_task = asyncio.create_task(_cache_refresh_loop(interval))
     yield
     logger.info("Shutting down")
@@ -134,7 +138,10 @@ app.include_router(admin_router, prefix="/admin", tags=["admin"])
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
-    logger.exception("Unhandled error on %s %s", request.method, request.url.path)
+    logger.exception(
+        "Unhandled error",
+        extra={"method": request.method, "path": request.url.path},
+    )
     return JSONResponse(status_code=500, content={"detail": "Internal server error"})
 
 

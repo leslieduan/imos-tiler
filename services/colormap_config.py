@@ -45,7 +45,10 @@ def load_colormaps() -> None:
         return
     data: dict[str, list | dict] = json.loads(_config_path.read_text())
     _reload(data)
-    logger.info("Loaded %d colormap(s) from %s", len(_custom_colormaps), _config_path)
+    logger.info(
+        "Loaded colormaps from disk",
+        extra={"count": len(_custom_colormaps), "path": str(_config_path)},
+    )
 
 
 def register_colormap(

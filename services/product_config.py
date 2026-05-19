@@ -26,7 +26,10 @@ def load_products() -> None:
         PRODUCTS[product_id] = product
     for stale_id in [k for k in PRODUCTS if k not in new]:
         del PRODUCTS[stale_id]
-    logger.info("Loaded %d product(s) from %s", len(PRODUCTS), _config_path)
+    logger.info(
+        "Loaded products from disk",
+        extra={"count": len(PRODUCTS), "path": str(_config_path)},
+    )
 
 
 def register_product(entry: dict) -> Product:

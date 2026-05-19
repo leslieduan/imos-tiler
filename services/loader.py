@@ -103,7 +103,10 @@ def load_slice(store_url: str, date: str, variables: list[str]) -> xr.Dataset:
             result = store[variables].sel(time=pd.Timestamp(matching[0])).compute()
             elapsed = time.monotonic() - t0
             if elapsed > _SLOW_FETCH_THRESHOLD:
-                logger.warning("Slow S3 fetch: %s / %s took %.1fs", store_url, date, elapsed)
+                logger.warning(
+                    "Slow S3 fetch",
+                    extra={"store_url": store_url, "date": date, "seconds": elapsed},
+                )
             return result
         except KeyError as e:
             raise FileNotFoundError(f"No data found for date {date}") from e
@@ -137,7 +140,10 @@ def load_slice_uncached(store_url: str, date: str, variables: list[str]) -> xr.D
         result = store[variables].sel(time=pd.Timestamp(matching[0])).compute()
         elapsed = time.monotonic() - t0
         if elapsed > _SLOW_FETCH_THRESHOLD:
-            logger.warning("Slow S3 fetch: %s / %s took %.1fs", store_url, date, elapsed)
+            logger.warning(
+                "Slow S3 fetch",
+                extra={"store_url": store_url, "date": date, "seconds": elapsed},
+            )
         return result
     except KeyError as e:
         raise FileNotFoundError(f"No data found for date {date}") from e
@@ -156,7 +162,7 @@ def clear_slice_cache() -> int:
     """Drop every entry in the L2 slice cache. Returns count removed."""
     removed = _slice_memo.evict_matching(lambda _: True)
     if removed:
-        logger.info("Memory cache cleared: %d slice(s)", removed)
+        logger.info("Memory cache cleared", extra={"slices_removed": removed})
     return removed
 
 
@@ -170,7 +176,10 @@ def evict_product_cache(product: Product) -> None:
         lambda k: k[0] == product.source_path and k[2] == vars_tuple
     )
     if removed:
-        logger.info("Memory cache evicted %d slice(s) for: %s", removed, product.id)
+        logger.info(
+            "Memory cache evicted for product",
+            extra={"product_id": product.id, "slices_removed": removed},
+        )
 
     evict_processed_cache(product)
     evict_product_dir(product)
