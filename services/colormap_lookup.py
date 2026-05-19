@@ -17,7 +17,9 @@ import numpy as np
 from services.colormap_config import get_colormap, on_invalidate
 
 
-@lru_cache(maxsize=64)
+@lru_cache(
+    maxsize=64
+)  # called on every tile render in visual_renderer/visual_tiles, even though render_legend's cache means resolve_colormap is never called for repeat legend requests.
 def resolve_colormap(name: str) -> dict[int, tuple[int, int, int, int]]:
     """Return a rio-tiler colormap dict for the given name.
 
@@ -49,16 +51,4 @@ def resolve_colormap(name: str) -> dict[int, tuple[int, int, int, int]]:
     }
 
 
-@lru_cache(maxsize=128)
-def colormap_lut(name: str) -> np.ndarray:
-    """Return the 256×4 uint8 LUT for a colormap.
-
-    Cached separately from `resolve_colormap()` so the numpy conversion runs once
-    per name, not per legend request.
-    """
-    cm = resolve_colormap(name)
-    return np.array([cm[i] for i in range(256)], dtype=np.uint8)
-
-
 on_invalidate(resolve_colormap.cache_clear)
-on_invalidate(colormap_lut.cache_clear)

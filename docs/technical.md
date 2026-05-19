@@ -182,7 +182,7 @@ titiler-project/
     loader.py                    ← load_slice (L2 LRU) + get_available_dates + get_lod_grids + evict_product_cache
     data_renderer.py             ← processed grid cache + chunk extract + PNG encode (data tiles)
     visual_renderer.py           ← Web Mercator tile/bbox render (visual tiles) — encodes PNG or WebP
-    colormap_lookup.py           ← resolve_colormap()/colormap_lut() — custom→rio-tiler→matplotlib fallback chain
+    colormap_lookup.py           ← resolve_colormap() — custom→rio-tiler→matplotlib fallback chain
     legend_renderer.py           ← render_legend() — color bar + tick labels
     colormap_config.py           ← colormaps.json read/write + in-memory colormap registry + ColormapMode type + invalidation hooks
     product_config.py            ← products.json read/write + in-memory PRODUCTS dict management
@@ -612,7 +612,7 @@ Practical rules:
 - Name categorical colormaps after the dataset or variable they describe (e.g. `land_cover_classes`, `ocean_current_flag`) to make the coupling explicit.
 - Ramp colormaps are dataset-agnostic; categorical colormaps are not.
 
-**Cache behaviour.** `resolve_colormap()` in `services/colormap_lookup.py` is `@lru_cache`-d (max 64 entries); its companion `colormap_lut()` (max 128 entries) caches the numpy LUT used by the legend renderer. The caches are cleared automatically whenever a colormap is added or deleted via the admin API — `colormap_config._reload()` invokes the registered invalidation hooks, which include `resolve_colormap.cache_clear()`, `colormap_lut.cache_clear()`, and `render_legend.cache_clear()`.
+**Cache behaviour.** `resolve_colormap()` in `services/colormap_lookup.py` is `@lru_cache`-d (max 64 entries). `legend_renderer.render_legend()` caches the final PNG bytes (max 256 entries) and converts the colormap dict to a numpy array inline. The caches are cleared automatically whenever a colormap is added or deleted via the admin API — `colormap_config._reload()` invokes the registered invalidation hooks, which include `resolve_colormap.cache_clear()` and `render_legend.cache_clear()`.
 
 ### 8.4 Output format (PNG vs WebP)
 

@@ -17,7 +17,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 from services.colormap_config import is_categorical, on_invalidate
-from services.colormap_lookup import colormap_lut
+from services.colormap_lookup import resolve_colormap
 
 _LABEL_PX = 20  # pixels reserved alongside the bar for tick labels
 
@@ -32,7 +32,8 @@ def render_legend(
 ) -> bytes:
     """Render a linear color legend PNG for the given colormap."""
     categorical = is_categorical(colormap_name)
-    lut = colormap_lut(colormap_name)
+    cm = resolve_colormap(colormap_name)
+    lut = np.array([cm[i] for i in range(256)], dtype=np.uint8)
     has_labels = rescale is not None
 
     if orientation == "horizontal":
