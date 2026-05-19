@@ -17,6 +17,7 @@ from .shared import (
     PRODUCT_EX,
     get_product_or_404,
     load_slice_or_404,
+    validate_date,
 )
 
 router = APIRouter()
@@ -109,6 +110,7 @@ def get_point(
     lon: float = Query(..., openapi_examples={"default": Example(value=151.2)}),
 ):
     product = get_product_or_404(product_id)
+    validate_date(date)
     variables = product.variables
     ds = load_slice_or_404(product.source_path, date, variables)
 
