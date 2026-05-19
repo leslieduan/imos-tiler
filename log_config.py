@@ -82,10 +82,11 @@ def configure_logging() -> None:
     # logs share one format and destination. Without this, loggers outside
     # "services.*" (e.g. "main", "routers.admin.products") fall through to the
     # root logger which has no handlers configured by uvicorn's LOGGING_CONFIG.
+    app_level = os.environ.get("LOG_LEVEL", "INFO").upper()
     for namespace in ("services", "routers", "main"):
         LOGGING_CONFIG["loggers"][namespace] = {
             "handlers": ["default"],
-            "level": "INFO",
+            "level": app_level,
             "propagate": False,
         }
 

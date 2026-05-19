@@ -65,7 +65,7 @@ def _build_date_index(ds: xr.Dataset, store_url: str = "") -> dict[str, list]:
         index.setdefault(ts_to_local_date(ts), []).append(ts)
     for date, timestamps in index.items():
         if len(timestamps) > 1:
-            logger.warning(
+            logger.debug(
                 "Multiple timestamps (%d) map to date %r in %s; first will be used: %s",
                 len(timestamps),
                 date,

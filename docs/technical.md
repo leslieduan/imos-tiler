@@ -673,7 +673,7 @@ def ts_to_local_date(ts) -> str:
 Every point where a UTC timestamp is exposed or compared is converted via `ts_to_local_date`:
 
 - **`get_available_dates`** — converts store timestamps to local date strings. The manifest always returns values the client can round-trip back unchanged as request dates.
-- **`load_slice`** — iterates all timestamps in the store's `time` coordinate, converts each via `ts_to_local_date`, and collects those that match the requested date string exactly. The first matching timestamp is selected with `sel(time=pd.Timestamp(matching[0]))`. If multiple timestamps map to the same local date (e.g. sub-daily data), a warning is logged and the first is used. If no timestamp maps to the requested local date, `FileNotFoundError` is raised with a message indicating that dates must be in `LOCAL_TZ` local time (not UTC). This avoids `method="nearest"` silently serving data from an adjacent day.
+- **`load_slice`** — iterates all timestamps in the store's `time` coordinate, converts each via `ts_to_local_date`, and collects those that match the requested date string exactly. The first matching timestamp is selected with `sel(time=pd.Timestamp(matching[0]))`. If multiple timestamps map to the same local date (e.g. sub-daily data), a `DEBUG` message is logged and the first is used. If no timestamp maps to the requested local date, `FileNotFoundError` is raised with a message indicating that dates must be in `LOCAL_TZ` local time (not UTC). This avoids `method="nearest"` silently serving data from an adjacent day.
 
 **Critical constraint** — `get_available_dates` and `load_slice` must always use the same `LOCAL_TZ` value. Changing one without the other causes dates to silently mismatch: the manifest returns dates the client cannot successfully request. `TILE_TIMEZONE` is the single source of truth; never hardcode a timezone string in either function.
 
@@ -688,7 +688,7 @@ Do not construct date strings from the client's local clock — the server inter
 
 ### 9.4 Sub-daily data
 
-The current API is day-granularity only. If a store has sub-daily resolution, multiple UTC timestamps will map to the same local date — `load_slice` logs a warning and returns the first. Supporting hourly queries would require changes to the URL structure and cache-key design; deferred until there is a concrete use case.
+The current API is day-granularity only. If a store has sub-daily resolution, multiple UTC timestamps will map to the same local date — `load_slice` logs a `DEBUG` message and returns the first. Supporting hourly queries would require changes to the URL structure and cache-key design; deferred until there is a concrete use case.
 
 ### 9.5 Coordinate name normalisation
 
@@ -1507,6 +1507,7 @@ A wrong-layer choice has real costs: making `max_lods` an env var would let an o
 | Variable                        | Default    | Description                                                                                                                                                            |
 | ------------------------------- | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `LOG_FORMAT`                    | _(auto)_   | `json` — force JSON output. `text` — force human-readable. Unset (default) — JSON when stdout is not a TTY (containers, EC2, CI), human-readable when it is (local terminal). |
+| `LOG_LEVEL`                     | `INFO`     | Application log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`). Controls `services`, `routers`, and `main` namespaces. Uvicorn's own log level is set separately via `--log-level`. |
 | `SLOW_FETCH_THRESHOLD_SECONDS`  | `5`        | Log a `WARNING` when a cold S3 `.compute()` takes longer than this many seconds. See [§16.4](#164-operational-signals).                                                |
 
 See `docker-compose.yml` for the production wiring of these variables, and [`docs/security.md`](security.md) for how `ADMIN_API_KEY` interacts with nginx and the EC2 security group.
@@ -1567,7 +1568,7 @@ Lines to watch for in production:
 | `WARNING` | `Slow S3 fetch: <store> / <date> took N.Ns` | A cold `.compute()` exceeded `SLOW_FETCH_THRESHOLD_SECONDS`. S3 is slow for this key — check S3 region, VPC endpoints, or increase `DISK_CACHE_PATH` capacity so the date gets prewarmed. |
 | `WARNING` | `Disk cache add failed: <product> / <date>` | Refresh cycle couldn't write a slice — check disk space and `DISK_CACHE_LIMIT_GB`. |
 | `WARNING` | `Admin auth rejected (invalid key) from <ip>` | Failed admin authentication attempt. Unexpected IPs warrant investigation. |
-| `WARNING` | `Multiple timestamps (N) map to date <date> in <store>` | The Zarr store has more than one UTC timestamp resolving to the same local date. The first timestamp is used; check the store's time coordinate for duplicates. |
+| `DEBUG` | `Multiple timestamps (N) map to date <date> in <store>` | The Zarr store has more than one UTC timestamp resolving to the same local date (expected for sub-daily stores). The first timestamp is used. Enable `LOG_LEVEL=DEBUG` to see these. |
 | `ERROR` | `Unhandled error on <METHOD> <path>` | An uncaught exception reached the global handler — always signals a bug. The full traceback follows. |
 | `ERROR` | `Cache refresh cycle failed; will retry next interval` | The periodic refresh loop raised an unhandled exception. The next cycle still runs; check for disk-full or S3 access issues. |
 

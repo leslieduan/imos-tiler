@@ -30,6 +30,7 @@ services:
       # LOG_FORMAT is not set here: Docker stdout is not a TTY, so log_config.py
       # auto-selects JSON. Set LOG_FORMAT=text on the host to force human-readable
       # output (e.g. for a debugging session via `docker run -it`).
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - SLOW_FETCH_THRESHOLD_SECONDS=${SLOW_FETCH_THRESHOLD_SECONDS:-5}
     restart: unless-stopped
     healthcheck:
