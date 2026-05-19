@@ -336,3 +336,73 @@ def test_evict_product_dir_when_disabled_is_noop(monkeypatch):
 def test_evict_product_dir_when_missing_is_noop(cache_root):
     # Nothing on disk yet — must not crash.
     disk_cache.evict_product_dir(_product("never-cached"))
+
+
+# ---------------------------------------------------------------------------
+# clear_disk_cache
+# ---------------------------------------------------------------------------
+
+
+def test_clear_disk_cache_disabled_returns_zeros(monkeypatch):
+    monkeypatch.delenv("DISK_CACHE_PATH", raising=False)
+    assert disk_cache.clear_disk_cache() == {"files": 0, "directories": 0}
+
+
+def test_clear_disk_cache_empty_cache_returns_zeros(cache_root):
+    assert disk_cache.clear_disk_cache() == {"files": 0, "directories": 0}
+
+
+def test_clear_disk_cache_removes_all_product_dirs(cache_root):
+    p1 = _product("p1", source="s3://b/x.zarr", variable="v")
+    p2 = _product("p2", source="s3://b/y.zarr", variable="v")
+    for p in [p1, p2]:
+        d = disk_cache.disk_cache_path(p.source_path, "x", ["v"]).parent
+        d.mkdir(parents=True)
+        (d / "2024-01-01.pkl.lz4").write_bytes(b"a")
+        (d / "2024-01-02.pkl.lz4").write_bytes(b"b")
+
+    result = disk_cache.clear_disk_cache()
+    assert result == {"files": 4, "directories": 2}
+    assert list(cache_root.iterdir()) == []  # dirs gone, base preserved
+
+
+def test_clear_disk_cache_preserves_base_directory(cache_root):
+    disk_cache.clear_disk_cache()
+    assert cache_root.exists()
+
+
+# ---------------------------------------------------------------------------
+# is_prewarm_running / is_refresh_running
+# ---------------------------------------------------------------------------
+
+
+def test_is_prewarm_running_false_by_default():
+    with disk_cache._prewarm_lock:
+        disk_cache._prewarm_running = False
+    assert disk_cache.is_prewarm_running() is False
+
+
+def test_is_prewarm_running_true_when_set():
+    with disk_cache._prewarm_lock:
+        disk_cache._prewarm_running = True
+    try:
+        assert disk_cache.is_prewarm_running() is True
+    finally:
+        with disk_cache._prewarm_lock:
+            disk_cache._prewarm_running = False
+
+
+def test_is_refresh_running_false_when_status_ok():
+    with disk_cache._refresh_status_lock:
+        disk_cache._refresh_status["status"] = "ok"
+    assert disk_cache.is_refresh_running() is False
+
+
+def test_is_refresh_running_true_when_status_running():
+    with disk_cache._refresh_status_lock:
+        disk_cache._refresh_status["status"] = "running"
+    try:
+        assert disk_cache.is_refresh_running() is True
+    finally:
+        with disk_cache._refresh_status_lock:
+            disk_cache._refresh_status["status"] = "never_run"
