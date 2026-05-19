@@ -12,6 +12,7 @@ import xarray as xr
 
 from constants import Product
 from services import disk_cache, loader
+from services import store_registry as store_registry_module
 from services.store_registry import store_registry
 
 
@@ -101,20 +102,22 @@ def test_load_slice_uses_l3_disk_cache_on_miss(monkeypatch, tmp_path):
 
 
 def test_load_slice_warns_on_multiple_timestamps_per_date(monkeypatch):
-    """Two UTC timestamps mapping to the same local date should warn but still serve."""
+    """Two UTC timestamps mapping to the same local date should log debug but still serve."""
     # Two times that both land on Sydney local date 2024-01-16.
     ds = _ds_with_time(["2024-01-15T13:00:00", "2024-01-15T14:00:00"])
     monkeypatch.setattr(xr, "open_zarr", lambda *_, **__: ds)
 
-    # The services logger has propagate=False (set in main.py), so caplog can't
-    # capture it through the root logger. Patch the warning method directly.
-    warnings: list = []
-    monkeypatch.setattr(loader.logger, "warning", lambda *a, **kw: warnings.append(a))
+    # Debug log fires from store_registry when building the date index (once per
+    # store open), not from loader on every load. Patch that logger directly.
+    debug_calls: list = []
+    monkeypatch.setattr(
+        store_registry_module.logger, "debug", lambda *a, **kw: debug_calls.append(a)
+    )
 
     loader.load_slice("s3://b/x.zarr", "2024-01-16", ["v"])
 
-    assert warnings, "expected a warning when multiple UTC times map to one local date"
-    assert any("Multiple timestamps" in str(args[0]) for args in warnings)
+    assert debug_calls, "expected a debug log when multiple UTC times map to one local date"
+    assert any("Multiple timestamps" in str(args[0]) for args in debug_calls)
 
 
 def test_evict_product_cache_clears_l2_and_disk(monkeypatch, tmp_path):

@@ -56,13 +56,22 @@ def _open_store(store_url: str) -> xr.Dataset:
     return ds
 
 
-def _build_date_index(ds: xr.Dataset) -> dict[str, list]:
+def _build_date_index(ds: xr.Dataset, store_url: str = "") -> dict[str, list]:
     """Return {local_date: [timestamps]} for the dataset's time coord, or {} if missing."""
     if "time" not in ds.dims:
         return {}
     index: dict[str, list] = {}
     for ts in ds.coords["time"].values:
         index.setdefault(ts_to_local_date(ts), []).append(ts)
+    for date, timestamps in index.items():
+        if len(timestamps) > 1:
+            logger.debug(
+                "Multiple timestamps (%d) map to date %r in %s; first will be used: %s",
+                len(timestamps),
+                date,
+                store_url,
+                timestamps[0],
+            )
     return index
 
 
@@ -94,6 +103,7 @@ class StoreRegistry:
                 # TTL expired — return stale store and trigger a background refresh.
                 if store_url not in self._refreshing:
                     self._refreshing.add(store_url)
+                    logger.info("Store TTL expired, refreshing in background: %s", store_url)
                     threading.Thread(
                         target=self._refresh_background, args=(store_url,), daemon=True
                     ).start()
@@ -110,8 +120,9 @@ class StoreRegistry:
 
         try:
             ds = _open_store(store_url)
-            index = _build_date_index(ds)
+            index = _build_date_index(ds, store_url)
             self._publish(store_url, ds, index)
+            logger.info("Store opened: %s (%d dates)", store_url, len(index))
             future.set_result(ds)
         except Exception as e:
             future.set_exception(e)
@@ -154,7 +165,7 @@ class StoreRegistry:
     def _refresh_background(self, store_url: str) -> None:
         try:
             ds = _open_store(store_url)
-            index = _build_date_index(ds)
+            index = _build_date_index(ds, store_url)
             self._publish(store_url, ds, index)
             logger.info("Store refreshed: %s", store_url)
         except Exception:

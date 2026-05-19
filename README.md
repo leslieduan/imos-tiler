@@ -22,6 +22,14 @@ ADMIN_API_KEY=your-secret-key
 uv run uvicorn main:app --reload
 ```
 
+To enable debug-level application logs (e.g. to see sub-daily timestamp collisions or cache internals):
+
+```bash
+LOG_LEVEL=DEBUG uv run uvicorn main:app --reload
+```
+
+`LOG_LEVEL` accepts any standard Python log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`). Default is `INFO`.
+
 Server available at `http://localhost:8000`. Interactive API docs at `http://localhost:8000/docs`.
 
 ### Docker
@@ -30,6 +38,13 @@ Create a `.env` file in the project root before starting:
 
 ```bash
 ADMIN_API_KEY=your-secret-key
+```
+
+To enable debug logs, add `LOG_LEVEL=DEBUG` to `.env` (logs go to CloudWatch in JSON format):
+
+```bash
+ADMIN_API_KEY=your-secret-key
+LOG_LEVEL=DEBUG
 ```
 
 ```bash
@@ -198,7 +213,7 @@ See [`docs/security.md`](docs/security.md) for how admin endpoints are secured i
 
 ## Docs
 
-- [`docs/technical.md`](docs/technical.md) — architecture, tile coordinate systems, LOD algorithm, caching strategy, concurrency model, capacity planning, PNG encoding contract
+- [`docs/technical.md`](docs/technical.md) — architecture, tile coordinate systems, LOD algorithm, caching strategy, concurrency model, capacity planning, PNG encoding contract, logging
 - [`docs/cache_analysis.md`](docs/cache_analysis.md) — cache option analysis: why disk cache was chosen over Redis and EFS
 - [`docs/http_caching.md`](docs/http_caching.md) — HTTP caching design: Cache-Control headers, ETag revalidation on `/manifest`, CACHE_VERSION invalidation
 - [`docs/dataset.md`](docs/dataset.md) — representative example Zarr stores (size classes, dimensions, chunking, variables) used as planning anchors
