@@ -48,6 +48,19 @@ _refresh_status: dict = {
 }
 _refresh_status_lock = threading.Lock()
 
+_prewarm_running = False
+_prewarm_lock = threading.Lock()
+
+
+def is_prewarm_running() -> bool:
+    with _prewarm_lock:
+        return _prewarm_running
+
+
+def is_refresh_running() -> bool:
+    with _refresh_status_lock:
+        return _refresh_status["status"] == "running"
+
 
 def disk_cache_path(store_url: str, date: str, variables: list[str]) -> Path | None:
     """Return the L3 cache path for a slice, or None if disk caching is disabled."""
@@ -143,23 +156,31 @@ def prewarm_disk_slices(products: list[Product]) -> None:
 
     from services.loader import get_available_dates
 
-    jobs: list[tuple[Product, str, list[str]]] = []
-    for product in products:
-        variables = product.variables
-        try:
-            dates = get_available_dates(product.source_path)[-_CACHE_DAYS:]
-        except Exception:
-            logger.warning("Prewarm: could not get dates for %s", product.id, exc_info=True)
-            continue
-        jobs.extend((product, date, variables) for date in dates)
+    global _prewarm_running
+    with _prewarm_lock:
+        _prewarm_running = True
 
-    max_workers = int(os.environ.get("PREWARM_WORKERS", 8))
-    with concurrent.futures.ThreadPoolExecutor(
-        max_workers=max_workers, thread_name_prefix="prewarm"
-    ) as pool:
-        for p, d, v in jobs:
-            pool.submit(_prewarm_one, p, d, v)
-        # pool.__exit__ calls shutdown(wait=True) — all jobs complete before returning
+    try:
+        jobs: list[tuple[Product, str, list[str]]] = []
+        for product in products:
+            variables = product.variables
+            try:
+                dates = get_available_dates(product.source_path)[-_CACHE_DAYS:]
+            except Exception:
+                logger.warning("Prewarm: could not get dates for %s", product.id, exc_info=True)
+                continue
+            jobs.extend((product, date, variables) for date in dates)
+
+        max_workers = int(os.environ.get("PREWARM_WORKERS", 8))
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=max_workers, thread_name_prefix="prewarm"
+        ) as pool:
+            for p, d, v in jobs:
+                pool.submit(_prewarm_one, p, d, v)
+            # pool.__exit__ calls shutdown(wait=True) — all jobs complete before returning
+    finally:
+        with _prewarm_lock:
+            _prewarm_running = False
 
     _evict_if_over_threshold()
 
@@ -388,3 +409,24 @@ def evict_product_dir(product: Product) -> None:
     if _p is not None and _p.parent.exists():
         shutil.rmtree(_p.parent, ignore_errors=True)
         logger.info("Disk cache evicted (product removed): %s", product.id)
+
+
+def clear_disk_cache() -> dict:
+    """Remove every per-product directory from the L3 disk cache.
+
+    Returns ``{"files": N, "directories": M}`` — or zeros when disk caching is disabled.
+    """
+    base = os.environ.get("DISK_CACHE_PATH")
+    if not base:
+        return {"files": 0, "directories": 0}
+    base_path = Path(base)
+    if not base_path.exists():
+        return {"files": 0, "directories": 0}
+    files, dirs = 0, 0
+    for entry in base_path.iterdir():
+        if entry.is_dir():
+            files += sum(1 for _ in entry.rglob("*.pkl.lz4"))
+            shutil.rmtree(entry, ignore_errors=True)
+            dirs += 1
+    logger.info("Disk cache cleared: %d files in %d directories removed", files, dirs)
+    return {"files": files, "directories": dirs}

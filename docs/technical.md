@@ -175,7 +175,7 @@ titiler-project/
       auth.py                    ← X-Admin-Key dependency
       products.py                ← POST/DELETE /admin/products
       colormaps.py               ← POST/DELETE /admin/colormaps
-      cache.py                   ← GET /admin/cache (state snapshot) + DELETE /admin/cache/memory (clear L1+L2)
+      cache.py                   ← GET /admin/cache (state snapshot) + DELETE /admin/cache/memory (clear L1+L2) + DELETE /admin/cache/disk (clear L3)
   services/
     store_registry.py            ← Zarr store singleton (stale-while-revalidate) + per-URL date index
     disk_cache.py                ← L3 disk cache lifecycle: path, read/write, prewarm, refresh, eviction
@@ -454,6 +454,7 @@ DELETE /admin/colormaps/{name}      → remove a custom colormap
 
 GET    /admin/cache                 → cache-state snapshot (see §10.6)
 DELETE /admin/cache/memory          → clear all in-memory caches (L1 + L2); disk untouched (see §10.7)
+DELETE /admin/cache/disk            → delete every slice file from the L3 disk cache; memory untouched (see §10.8)
 ```
 
 ---
@@ -814,10 +815,10 @@ The first thread to miss the cache creates the Future and does the work; all oth
 
 ### 10.6 Cache-state visibility (`GET /admin/cache`)
 
-A single read-only admin endpoint surfaces everything a production debugger usually wants to know about the cache. It returns four sections:
+A single read-only admin endpoint surfaces everything a production debugger usually wants to know about the cache. It returns five sections:
 
 - **`disk`** — global L3 footprint: total bytes, configured limit (`DISK_CACHE_LIMIT_GB`), eviction threshold, utilisation %, and an `over_eviction_threshold` flag so pressure is visible at a glance. `{"enabled": false}` when `DISK_CACHE_PATH` is unset.
-- **`refresh`** — the most recent `refresh_disk_cache` run (status `never_run`/`running`/`ok`/`error`, start + completion timestamps, last error message, configured interval). Distinguishes "tried 5 min ago and crashed" from "hasn't run in 6 hours."
+- **`disk_writes`** — live state of the two background disk writers: `prewarm.running` (boolean) and `refresh` (status `never_run`/`running`/`ok`/`error`, start + completion timestamps, last error message, configured interval). Useful for spotting a stalled refresh or a prewarm still in progress after startup.
 - **`in_flight`** — instantaneous count of computations currently mid-flight in each Memoizer (`current`), high-water mark since process start (`peak`), and total computes started since startup (`total_computes`). Slice and processed-grid memoizers reported separately. **Not** a rolling window — values reflect the moment of the request and drop to 0 when nothing is running.
 - **`memory_cache`** — current size and max for the slice and processed-grid LRUs.
 - **`products`** — per-product breakdown: disk file count, total bytes, oldest/newest cached date, most recent write mtime, and in-flight counts attributed by `(source_path, sorted_variables)` so two products sharing a Zarr don't collide.
@@ -831,6 +832,16 @@ Drops every entry from both in-memory tiers — `_processed_cache` (L1) and `_sl
 Implemented as `Memoizer.evict_matching(lambda _: True)` in both `services/loader.clear_slice_cache` and `services/data_renderer.clear_processed_cache`. The eviction runs under the Memoizer's existing lock — concurrent `get_or_compute` calls block briefly while keys are removed. Any **in-flight** compute is not cancelled: it finishes and re-publishes into the (now-empty) cache when it completes, so a flush during heavy load may leave a handful of partially-refilled entries from work that was already running. Callers that arrived before the flush and are still `await`ing a shared Future receive the original result, not a re-computed one — there is no torn state.
 
 Use cases: forcing a re-read after a Zarr store has been updated out-of-band, recovering from a poisoned cache entry, or freeing memory during an interactive debugging session without restarting the process.
+
+### 10.8 Disk cache flush (`DELETE /admin/cache/disk`)
+
+Deletes every `.pkl.lz4` slice file from the L3 disk cache directory and returns the count removed as `{"cleared": {"disk": N}}`. Memory caches (L1, L2) are untouched.
+
+If `prewarm_disk_slices` or `refresh_disk_cache` is currently running the endpoint returns **409 Conflict** immediately without touching the disk — both operations write slice files, so clearing during either is pointless. Wait for the operation to complete before retrying.
+
+Implemented in `services/disk_cache.clear_disk_cache` — iterates the per-product subdirectories under `DISK_CACHE_PATH` and removes each with `shutil.rmtree`, leaving the base directory itself intact. The filesystem walk runs in a thread via `asyncio.to_thread` so the event loop stays free. Returns 0 (no-op) if `DISK_CACHE_PATH` is unset. In-flight computes are not cancelled — they may re-populate the disk cache on completion.
+
+Use cases: forcing a full cold repopulation from S3 (e.g. after the underlying Zarr data has been rewritten), recovering disk space during debugging, or resetting a corrupted cache state without restarting the server. After a flush, the next request for any date will fall through to S3 (~2 s) and the disk cache will be repopulated gradually — or trigger `prewarm_disk_slices` via a server restart to repopulate in bulk.
 
 ---
 
@@ -989,6 +1000,7 @@ This is why a 60-second prewarm at startup does not delay the first request by 6
 | Tile/manifest/point handlers      | Anyio thread pool (`THREAD_POOL_SIZE`)            | Sync `def` so blocking xarray/rio-tiler/PIL calls don't freeze the loop    |
 | `/point` time-series, `/animation` | Event-loop coroutine → `asyncio.to_thread` per date | `async def` so per-date `load_slice` calls fan out via `asyncio.gather`; latency drops to ~max(per-date) instead of the serial sum, and the parallel slices run on the asyncio executor — separate from the anyio handler pool |
 | `/admin/products` POST/DELETE     | Event loop (`async def`)                          | Fast JSON read/write only; admin product prewarm offloaded via `to_thread` |
+| `DELETE /admin/cache/disk`        | Event-loop coroutine → `asyncio.to_thread`        | `async def`; filesystem walk offloaded to asyncio executor so the event loop stays free |
 | `/products`, `/colormaps` listing | Event loop (`async def`)                          | In-memory dict reads only                                                  |
 | Store prewarm at startup          | One daemon thread per URL                         | Fire-and-forget metadata fetch                                             |
 | Store TTL refresh                 | One daemon thread per URL on TTL expiry           | Stale store returned immediately; fresh open happens in the background     |
@@ -1023,7 +1035,7 @@ The net effect: `asyncio.to_thread(...)` and `anyio.to_thread.run_sync(...)` loo
 | Pool                                   | Default size                              | Configured by                                          | Used by                                                                                                                       |
 | -------------------------------------- | ----------------------------------------- | ------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------- |
 | **anyio default pool**                 | `100`                                     | `THREAD_POOL_SIZE` (set in `main.py` lifespan)         | Every FastAPI `def` handler — all `/data_tiles`, `/visual_tiles`, `/admin/products`, `/admin/colormaps` calls. The hot path. |
-| **asyncio default executor**           | `min(32, os.cpu_count() + 4)`             | not configured                                         | Every `asyncio.to_thread(...)` call — `GET/DELETE /admin/cache`, `_startup_cache_sync`, `_cache_refresh_loop`.                |
+| **asyncio default executor**           | `min(32, os.cpu_count() + 4)`             | not configured                                         | Every `asyncio.to_thread(...)` call — `GET /admin/cache`, `DELETE /admin/cache/disk`, `_startup_cache_sync`, `_cache_refresh_loop`. (`DELETE /admin/cache/memory` runs inline on the event loop — its cache-clear ops are just in-memory lock acquisitions.)                |
 | **prewarm `ThreadPoolExecutor`**       | `PREWARM_WORKERS` (default `8`)           | env var                                                | Built and torn down inside `prewarm_disk_slices`. One-shot S3 fan-out at startup and on each refresh cycle.                  |
 
 Plus non-pool worker threads:

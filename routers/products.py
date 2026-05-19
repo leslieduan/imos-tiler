@@ -71,7 +71,7 @@ def get_products_availability(
         openapi_examples={"default": Example(value="2024-12-31")},
     ),
     if_none_match: str | None = Header(None, alias="if-none-match"),
-    # Automatically sent by browser using previous ETag from prevouse response.
+    # Automatically sent by browser using previous ETag from previous response.
 ):
     effective_from = from_date or three_months_ago()
     products = {}

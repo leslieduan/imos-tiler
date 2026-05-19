@@ -12,11 +12,17 @@ stays free; the response itself is small.
 
 import asyncio
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
 from constants import PRODUCTS
 from services.data_renderer import clear_processed_cache, processed_memo_stats
-from services.disk_cache import collect_disk_stats, get_refresh_status
+from services.disk_cache import (
+    clear_disk_cache,
+    collect_disk_stats,
+    get_refresh_status,
+    is_prewarm_running,
+    is_refresh_running,
+)
 from services.loader import clear_slice_cache, slice_memo_stats
 
 router = APIRouter()
@@ -66,22 +72,25 @@ def _build_response() -> dict:
 
     return {
         "disk": disk_stats["global"],
-        "refresh": get_refresh_status(),
+        "disk_writes": {
+            "prewarm": {"running": is_prewarm_running()},
+            "refresh": get_refresh_status(),
+        },
         "in_flight": {
-            "slice": {
+            "slice": {  # L2 in-memory slice cache (services/loader.py)
                 "current": slice_stats["inflight"],
                 "peak": slice_stats["peak_inflight"],
                 "total_computes": slice_stats["total_computes"],
             },
-            "processed": {
+            "processed": {  # L1 processed grid cache (services/data_renderer.py)
                 "current": processed_stats["inflight"],
                 "peak": processed_stats["peak_inflight"],
                 "total_computes": processed_stats["total_computes"],
             },
         },
         "memory_cache": {
-            "slice": {"size": slice_stats["cache_size"], "max": slice_stats["cache_max"]},
-            "processed": {
+            "slice": {"size": slice_stats["cache_size"], "max": slice_stats["cache_max"]},  # L2
+            "processed": {  # L1
                 "size": processed_stats["cache_size"],
                 "max": processed_stats["cache_max"],
             },
@@ -121,3 +130,27 @@ async def clear_memory_cache():
             "processed": clear_processed_cache(),
         }
     }
+
+
+@router.delete(
+    "/cache/disk",
+    summary="Clear all on-disk cache",
+    description=(
+        "Deletes every slice file from the L3 disk cache. "
+        "Memory caches are untouched. In-flight computes are not cancelled — "
+        "they may re-populate the disk cache on completion."
+    ),
+)
+async def clear_disk_cache_endpoint():
+    if is_prewarm_running():
+        raise HTTPException(
+            status_code=409,
+            detail="Prewarm disk cache is running — please try again once it completes.",
+        )
+    if is_refresh_running():
+        raise HTTPException(
+            status_code=409,
+            detail="Disk cache refresh is running — please try again once it completes.",
+        )
+    cleared = await asyncio.to_thread(clear_disk_cache)
+    return {"cleared": {"disk": cleared}}
