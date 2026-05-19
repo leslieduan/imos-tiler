@@ -24,6 +24,7 @@ import os
 import pickle
 import shutil
 import threading
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -116,16 +117,28 @@ def _evict_if_over_threshold() -> None:
         # Small-grid products are cheap to re-fetch from S3; evict them before large ones.
         entries = sorted(all_files, key=lambda f: (f.stat().st_size, f.name.split(".")[0]))
 
+        evicted_count = 0
+        evicted_bytes = 0
         for f in entries:
             if total <= threshold:
                 break
             size = f.stat().st_size
             f.unlink(missing_ok=True)
             total -= size
-            logger.info("Disk evicted (pressure): %s (%d KB)", f, size // 1024)
+            evicted_count += 1
+            evicted_bytes += size
+            logger.debug("Disk evicted (pressure): %s (%d KB)", f, size // 1024)
+        if evicted_count:
+            usage_pct = total / limit_bytes * 100 if limit_bytes > 0 else 0.0
+            logger.info(
+                "Disk pressure eviction: %d files removed (%.1f MB freed), usage now %.1f%%",
+                evicted_count,
+                evicted_bytes / 1024**2,
+                usage_pct,
+            )
 
 
-def _prewarm_one(product: Product, date: str, variables: list[str]) -> None:
+def _prewarm_one(product: Product, date: str, variables: list[str]) -> str:
     # Local import: load_slice lives in services.loader, which depends on this
     # module — keep the cycle out of import time.
     from services.loader import load_slice
@@ -133,15 +146,18 @@ def _prewarm_one(product: Product, date: str, variables: list[str]) -> None:
     try:
         cache_path = disk_cache_path(product.source_path, date, variables)
         if cache_path is not None and cache_path.exists():
-            return
+            return "skipped"
         ds = load_slice(product.source_path, date, variables)
         if cache_path is not None:
             write_slice_to_disk(cache_path, ds)
-            logger.info("Disk prewarm written (S3): %s / %s", product.id, date)
+            logger.debug("Disk prewarm written: %s / %s", product.id, date)
+            return "written"
+        return "skipped"
     except FileNotFoundError:
-        pass  # date in time index but nearest match is a different local day — not cacheable
+        return "skipped"  # date in time index but nearest match is a different local day
     except Exception:
         logger.warning("Disk prewarm failed: %s / %s", product.id, date, exc_info=True)
+        return "failed"
 
 
 def prewarm_disk_slices(products: list[Product]) -> None:
@@ -160,6 +176,7 @@ def prewarm_disk_slices(products: list[Product]) -> None:
     with _prewarm_lock:
         _prewarm_running = True
 
+    t0 = time.monotonic()
     try:
         jobs: list[tuple[Product, str, list[str]]] = []
         for product in products:
@@ -172,12 +189,24 @@ def prewarm_disk_slices(products: list[Product]) -> None:
             jobs.extend((product, date, variables) for date in dates)
 
         max_workers = int(os.environ.get("PREWARM_WORKERS", 8))
+        futs: list[concurrent.futures.Future[str]] = []
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=max_workers, thread_name_prefix="prewarm"
         ) as pool:
             for p, d, v in jobs:
-                pool.submit(_prewarm_one, p, d, v)
+                futs.append(pool.submit(_prewarm_one, p, d, v))
             # pool.__exit__ calls shutdown(wait=True) — all jobs complete before returning
+
+        counts: dict[str, int] = {"written": 0, "skipped": 0, "failed": 0}
+        for f in futs:
+            counts[f.result()] += 1
+        logger.info(
+            "Prewarm complete: %d written, %d skipped, %d failed, %.1fs",
+            counts["written"],
+            counts["skipped"],
+            counts["failed"],
+            time.monotonic() - t0,
+        )
     finally:
         with _prewarm_lock:
             _prewarm_running = False
@@ -198,6 +227,8 @@ def evict_stale_and_orphans(products: list[Product]) -> None:
 
     from services.loader import get_available_dates
 
+    stale = 0
+    orphans = 0
     for product in products:
         variables = product.variables
         try:
@@ -218,7 +249,8 @@ def evict_stale_and_orphans(products: list[Product]) -> None:
             p = disk_cache_path(product.source_path, date, variables)
             if p is not None and p.exists():
                 p.unlink()
-                logger.info("Disk cache evicted (stale): %s / %s", product.id, date)
+                stale += 1
+                logger.debug("Disk cache evicted (stale): %s / %s", product.id, date)
 
     # Remove cache dirs for products no longer registered
     base = os.environ.get("DISK_CACHE_PATH")
@@ -232,7 +264,11 @@ def evict_stale_and_orphans(products: list[Product]) -> None:
         for entry in base_path.iterdir():
             if entry.is_dir() and entry.name not in known_dirs:
                 shutil.rmtree(entry, ignore_errors=True)
-                logger.info("Disk cache evicted (orphaned product): %s", entry.name)
+                orphans += 1
+                logger.debug("Disk cache evicted (orphaned product): %s", entry.name)
+
+    if stale or orphans:
+        logger.info("Cache eviction: %d stale dates, %d orphan dirs removed", stale, orphans)
 
 
 def refresh_disk_cache(products: list[Product]) -> None:
@@ -248,11 +284,14 @@ def refresh_disk_cache(products: list[Product]) -> None:
         _refresh_status["last_started_at"] = datetime.now(UTC)
         _refresh_status["status"] = "running"
 
+    t0 = time.monotonic()
     try:
         evict_stale_and_orphans(products)
 
         from services.loader import get_available_dates, load_slice
 
+        added = 0
+        failed = 0
         for product in products:
             variables = product.variables
             try:
@@ -274,13 +313,21 @@ def refresh_disk_cache(products: list[Product]) -> None:
                     p = disk_cache_path(product.source_path, date, variables)
                     if p is not None:
                         write_slice_to_disk(p, ds)
-                        logger.info("Disk cache added: %s / %s", product.id, date)
+                        added += 1
+                        logger.debug("Disk cache added: %s / %s", product.id, date)
                 except Exception:
+                    failed += 1
                     logger.warning(
                         "Disk cache add failed: %s / %s", product.id, date, exc_info=True
                     )
 
         _evict_if_over_threshold()
+        logger.info(
+            "Refresh cycle complete: %d added, %d failed, %.1fs",
+            added,
+            failed,
+            time.monotonic() - t0,
+        )
     except Exception as e:
         with _refresh_status_lock:
             _refresh_status["last_completed_at"] = datetime.now(UTC)

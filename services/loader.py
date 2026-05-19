@@ -17,6 +17,7 @@ Long-lived store handles and disk-cache lifecycle live in their own modules
 import logging
 import os
 import threading
+import time
 
 import pandas as pd
 import xarray as xr
@@ -34,6 +35,7 @@ from utils.memoizer import Memoizer
 logger = logging.getLogger(__name__)
 
 _SLICE_CACHE_SIZE = int(os.environ.get("SLICE_CACHE_SIZE", 10))
+_SLOW_FETCH_THRESHOLD = float(os.environ.get("SLOW_FETCH_THRESHOLD_SECONDS", 5))
 _slice_cache: LRUCache = LRUCache(maxsize=_SLICE_CACHE_SIZE)
 _slice_memo: Memoizer = Memoizer(_slice_cache)
 
@@ -96,16 +98,13 @@ def load_slice(store_url: str, date: str, variables: list[str]) -> xr.Dataset:
                 f" Latest available date is {latest!r}." if latest else " No dates are available."
             )
             raise FileNotFoundError(f"No data for date {date!r}.{hint}")
-        if len(matching) > 1:
-            logger.warning(
-                "Multiple timestamps (%d) map to date %r in %s; using first: %s",
-                len(matching),
-                date,
-                store_url,
-                matching[0],
-            )
         try:
-            return store[variables].sel(time=pd.Timestamp(matching[0])).compute()
+            t0 = time.monotonic()
+            result = store[variables].sel(time=pd.Timestamp(matching[0])).compute()
+            elapsed = time.monotonic() - t0
+            if elapsed > _SLOW_FETCH_THRESHOLD:
+                logger.warning("Slow S3 fetch: %s / %s took %.1fs", store_url, date, elapsed)
+            return result
         except KeyError as e:
             raise FileNotFoundError(f"No data found for date {date}") from e
 
@@ -133,16 +132,13 @@ def load_slice_uncached(store_url: str, date: str, variables: list[str]) -> xr.D
         latest = max(index) if index else None
         hint = f" Latest available date is {latest!r}." if latest else " No dates are available."
         raise FileNotFoundError(f"No data for date {date!r}.{hint}")
-    if len(matching) > 1:
-        logger.warning(
-            "Multiple timestamps (%d) map to date %r in %s; using first: %s",
-            len(matching),
-            date,
-            store_url,
-            matching[0],
-        )
     try:
-        return store[variables].sel(time=pd.Timestamp(matching[0])).compute()
+        t0 = time.monotonic()
+        result = store[variables].sel(time=pd.Timestamp(matching[0])).compute()
+        elapsed = time.monotonic() - t0
+        if elapsed > _SLOW_FETCH_THRESHOLD:
+            logger.warning("Slow S3 fetch: %s / %s took %.1fs", store_url, date, elapsed)
+        return result
     except KeyError as e:
         raise FileNotFoundError(f"No data found for date {date}") from e
 

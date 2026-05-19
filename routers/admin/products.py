@@ -85,7 +85,9 @@ async def add_product(payload: ProductPayload):
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
     except Exception as e:
+        logger.exception("Failed to persist product %s", payload.id)
         raise HTTPException(status_code=500, detail=f"Failed to persist product: {e}") from e
+    logger.info("Product registered: %s ← %s", product.id, product.source_path)
     _spawn_prewarm(product)
     return JSONResponse(
         status_code=201, content={"id": product.id, "source_path": product.source_path}
@@ -107,6 +109,8 @@ def delete_product(product_id: str):
     except ValueError as e:
         raise HTTPException(status_code=403, detail=str(e)) from e
     except Exception as e:
+        logger.exception("Failed to persist removal of product %s", product_id)
         raise HTTPException(status_code=500, detail=f"Failed to persist removal: {e}") from e
+    logger.info("Product removed: %s", product_id)
     if product is not None:
         evict_product_cache(product)

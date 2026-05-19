@@ -1,11 +1,16 @@
 """Admin CRUD for custom colormaps."""
 
+import logging
+
 from fastapi import APIRouter, HTTPException, Path
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from services.colormap_config import ColormapMode, register_colormap, remove_colormap
 from utils.colors import build_categorical_lut, interpolate_colormap, parse_color
+
+logger = logging.getLogger(__name__)
+
 
 router = APIRouter()
 
@@ -98,7 +103,9 @@ def add_colormap(payload: ColormapPayload):
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
     except Exception as e:
+        logger.exception("Failed to persist colormap %s", payload.name)
         raise HTTPException(status_code=500, detail=f"Failed to persist colormap: {e}") from e
+    logger.info("Colormap registered: %s (%s)", payload.name, payload.mode)
     return JSONResponse(status_code=201, content={"name": payload.name})
 
 
@@ -114,4 +121,6 @@ def delete_colormap(name: str = Path(...)):
     except KeyError as e:
         raise HTTPException(status_code=404, detail=f"Colormap '{name}' not found") from e
     except Exception as e:
+        logger.exception("Failed to persist removal of colormap %s", name)
         raise HTTPException(status_code=500, detail=f"Failed to persist removal: {e}") from e
+    logger.info("Colormap removed: %s", name)

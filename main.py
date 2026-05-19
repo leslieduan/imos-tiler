@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import logging.config
 import os
 from contextlib import asynccontextmanager
 
@@ -9,9 +8,9 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from starlette.middleware.cors import CORSMiddleware
-from uvicorn.config import LOGGING_CONFIG
 
 from constants import PRODUCTS, Product
+from log_config import configure_logging
 from routers.admin import admin_router
 from routers.data_tiles import router as data_tiles_router
 from routers.visual_tiles import router as visual_tiles_router
@@ -24,18 +23,10 @@ from services.disk_cache import (
 from services.product_config import load_products
 from services.store_registry import prewarm_stores
 
-logger = logging.getLogger(__name__)
-
 load_dotenv()
+configure_logging()
 
-LOGGING_CONFIG["formatters"]["default"]["fmt"] = "%(levelprefix)s %(asctime)s %(message)s"
-LOGGING_CONFIG["formatters"]["default"]["datefmt"] = "%H:%M:%S"
-LOGGING_CONFIG["loggers"]["services"] = {
-    "handlers": ["default"],
-    "level": "INFO",
-    "propagate": False,
-}
-logging.config.dictConfig(LOGGING_CONFIG)
+logger = logging.getLogger(__name__)
 
 # Thinking on pixel drill: currently, to make tiles response fast, we cache Zarr slices per date per variable on disk. Because current chuking shape is (5 times, full_grid), this is good for map visualisation.
 # But not good for pixel drill, chuking like (full_time, small_grid) would be good. Even though we have this chunking Zarr, we still will face tricky chanlledge in how to cache the zarr slice on disk. Becasue
@@ -84,14 +75,34 @@ async def _cache_refresh_loop(interval: int) -> None:
 async def lifespan(app: FastAPI):
     limiter = anyio.to_thread.current_default_thread_limiter()
     limiter.total_tokens = int(os.environ.get("THREAD_POOL_SIZE", 100))
+    logger.info("Thread pool size: %d", limiter.total_tokens)
     load_products()
     load_colormaps()
+    disk_path = os.environ.get("DISK_CACHE_PATH")
+    if disk_path:
+        logger.info(
+            "Disk cache: path=%s limit=%sGB days=%s workers=%s",
+            disk_path,
+            os.environ.get("DISK_CACHE_LIMIT_GB", 20),
+            os.environ.get("CACHE_DAYS", 30),
+            os.environ.get("PREWARM_WORKERS", 8),
+        )
+    else:
+        logger.warning("Disk cache disabled: DISK_CACHE_PATH not set")
+    logger.info(
+        "Memory cache: slice=%s processed=%s  Store TTL: %ss",
+        os.environ.get("SLICE_CACHE_SIZE", 10),
+        os.environ.get("PROCESSED_CACHE_SIZE", 50),
+        os.environ.get("STORE_TTL_SECONDS", 600),
+    )
     store_urls = list({p.source_path for p in PRODUCTS.values()})
     prewarm_stores(store_urls)
     prewarm_task = asyncio.create_task(_startup_cache_sync(list(PRODUCTS.values())))
     interval = int(os.environ.get("CACHE_REFRESH_INTERVAL_SECONDS", 14400))
+    logger.info("Cache refresh interval: %ds", interval)
     refresh_task = asyncio.create_task(_cache_refresh_loop(interval))
     yield
+    logger.info("Shutting down")
     for task in (prewarm_task, refresh_task):
         task.cancel()
         try:
