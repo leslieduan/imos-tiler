@@ -12,6 +12,7 @@ from .shared import (
     PRODUCT_EX,
     get_product_or_404,
     load_slice_or_404,
+    validate_date,
 )
 
 router = APIRouter()
@@ -35,6 +36,7 @@ def get_tile(
     y: int = Path(openapi_examples={"default": Example(value=0)}),
 ):
     product = get_product_or_404(product_id)
+    validate_date(date)
     lod_grids = get_lod_grids(product)
 
     if z not in lod_grids:
@@ -71,6 +73,7 @@ def get_manifest(
     date: str = Path(pattern=r"^\d{4}-\d{2}-\d{2}$", openapi_examples=DATE_EX),
 ):
     product = get_product_or_404(product_id)
+    validate_date(date)
     get_lod_grids(product)
     variables = product.variables
     ds = load_slice_or_404(product.source_path, date, variables)

@@ -25,6 +25,7 @@ from .shared import (
     PRODUCT_EX,
     get_product_or_404,
     load_slice_or_404,
+    validate_date,
 )
 
 _MAX_ANIMATION_FRAMES = 60
@@ -154,6 +155,7 @@ def get_tile(
         raise HTTPException(status_code=400, detail=str(e)) from e
 
     product = get_product_or_404(product_id)
+    validate_date(date)
     if isinstance(product.variable, list):
         raise HTTPException(
             status_code=400,
@@ -301,6 +303,7 @@ def get_bbox(
         raise HTTPException(status_code=400, detail=str(e)) from e
 
     product = get_product_or_404(product_id)
+    validate_date(date)
     if isinstance(product.variable, list):
         raise HTTPException(
             status_code=400,
@@ -418,6 +421,8 @@ async def get_animation(
         200, ge=10, le=5000, description="Milliseconds per frame in the animation."
     ),
 ):
+    validate_date(from_date)
+    validate_date(to_date)
     if from_date > to_date:
         raise HTTPException(
             status_code=400, detail=f"from_date {from_date!r} is after to_date {to_date!r}."

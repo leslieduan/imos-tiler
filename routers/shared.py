@@ -1,5 +1,7 @@
 """Helpers shared across the three routers (products, data_tiles, visual_tiles)."""
 
+from datetime import date as _Date
+
 from fastapi import HTTPException
 from fastapi.openapi.models import Example
 
@@ -23,6 +25,13 @@ def get_product_or_404(product_id: str) -> Product:
     if product is None:
         raise HTTPException(status_code=404, detail=f"Unknown product: {product_id}")
     return product
+
+
+def validate_date(date: str) -> None:
+    try:
+        _Date.fromisoformat(date)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=f"Invalid date: {date!r}") from e
 
 
 def load_slice_or_404(store_url: str, date: str, variables: list[str]):
