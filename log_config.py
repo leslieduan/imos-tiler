@@ -10,6 +10,12 @@ Format selection (``LOG_FORMAT`` env var):
 * ``json``  — force JSON regardless of TTY state.
 * ``text``  — force human-readable regardless of TTY state (e.g. docker run -it).
 
+Structured fields:
+
+* Pass values via ``extra={"key": value, ...}`` rather than ``%s``-interpolating
+  into the message — they become top-level JSON fields and are queryable in
+  CloudWatch Logs Insights (``filter product_id = "SST"``).
+
 Other log-related env vars (defined in their respective modules):
 * ``SLOW_FETCH_THRESHOLD_SECONDS`` — services/loader.py
 """
@@ -23,13 +29,49 @@ from datetime import UTC, datetime
 
 from uvicorn.config import LOGGING_CONFIG
 
+# Standard LogRecord attributes. Anything in record.__dict__ outside this set is
+# treated as a user-supplied extra and promoted to a top-level JSON field.
+_RESERVED_RECORD_ATTRS = frozenset(
+    {
+        "args",
+        "asctime",
+        "created",
+        "exc_info",
+        "exc_text",
+        "filename",
+        "funcName",
+        "levelname",
+        "levelno",
+        "lineno",
+        "message",
+        "module",
+        "msecs",
+        "msg",
+        "name",
+        "pathname",
+        "process",
+        "processName",
+        "relativeCreated",
+        "stack_info",
+        "thread",
+        "threadName",
+        "taskName",
+        # uvicorn occasionally tags records with this for terminal colorisation;
+        # never useful as a JSON field.
+        "color_message",
+    }
+)
+
 
 class JsonFormatter(logging.Formatter):
     """Emit each log record as a single-line JSON object.
 
-    Includes standard fields (time, level, logger, message) plus uvicorn
-    access-log fields (client_addr, request_line, status_code) when present,
-    so both app logs and access logs share one schema.
+    Promotes any non-stdlib attribute on the record to a top-level JSON field.
+    Captures:
+      * extras passed via ``logger.info("event", extra={...})``
+      * fields uvicorn sets on access records (client_addr, request_line,
+        status_code) — picked up by the same generic path rather than being
+        special-cased.
     """
 
     def format(self, record: logging.LogRecord) -> str:
@@ -39,12 +81,13 @@ class JsonFormatter(logging.Formatter):
             "logger": record.name,
             "message": record.getMessage(),
         }
-        for field in ("client_addr", "request_line", "status_code"):
-            if (val := getattr(record, field, None)) is not None:
-                out[field] = val
+        for key, value in record.__dict__.items():
+            if key in _RESERVED_RECORD_ATTRS or key in out:
+                continue
+            out[key] = value
         if record.exc_info:
             out["exc"] = self.formatException(record.exc_info)
-        return json.dumps(out)
+        return json.dumps(out, default=str)
 
 
 class SuppressHealthChecks(logging.Filter):

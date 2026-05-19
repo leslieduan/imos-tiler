@@ -22,8 +22,14 @@ def require_admin_key(request: Request, key: str | None = Security(_api_key_head
         raise HTTPException(status_code=500, detail="ADMIN_API_KEY not configured")
     client = request.client.host if request.client else "unknown"
     if key is None:
-        logger.warning("Admin auth rejected (missing key) from %s %s", client, request.url.path)
+        logger.warning(
+            "Admin auth rejected: missing key",
+            extra={"client": client, "path": request.url.path},
+        )
         raise HTTPException(status_code=401, detail="Missing X-Admin-Key header")
     if key != expected:
-        logger.warning("Admin auth rejected (invalid key) from %s %s", client, request.url.path)
+        logger.warning(
+            "Admin auth rejected: invalid key",
+            extra={"client": client, "path": request.url.path},
+        )
         raise HTTPException(status_code=403, detail="Invalid admin key")

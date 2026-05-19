@@ -66,11 +66,13 @@ def _build_date_index(ds: xr.Dataset, store_url: str = "") -> dict[str, list]:
     for date, timestamps in index.items():
         if len(timestamps) > 1:
             logger.debug(
-                "Multiple timestamps (%d) map to date %r in %s; first will be used: %s",
-                len(timestamps),
-                date,
-                store_url,
-                timestamps[0],
+                "Multiple timestamps map to single date; first will be used",
+                extra={
+                    "count": len(timestamps),
+                    "date": date,
+                    "store_url": store_url,
+                    "first_timestamp": str(timestamps[0]),
+                },
             )
     return index
 
@@ -103,7 +105,10 @@ class StoreRegistry:
                 # TTL expired — return stale store and trigger a background refresh.
                 if store_url not in self._refreshing:
                     self._refreshing.add(store_url)
-                    logger.info("Store TTL expired, refreshing in background: %s", store_url)
+                    logger.info(
+                        "Store TTL expired, refreshing in background",
+                        extra={"store_url": store_url},
+                    )
                     threading.Thread(
                         target=self._refresh_background, args=(store_url,), daemon=True
                     ).start()
@@ -122,7 +127,10 @@ class StoreRegistry:
             ds = _open_store(store_url)
             index = _build_date_index(ds, store_url)
             self._publish(store_url, ds, index)
-            logger.info("Store opened: %s (%d dates)", store_url, len(index))
+            logger.info(
+                "Store opened",
+                extra={"store_url": store_url, "date_count": len(index)},
+            )
             future.set_result(ds)
         except Exception as e:
             future.set_exception(e)
@@ -167,9 +175,9 @@ class StoreRegistry:
             ds = _open_store(store_url)
             index = _build_date_index(ds, store_url)
             self._publish(store_url, ds, index)
-            logger.info("Store refreshed: %s", store_url)
+            logger.info("Store refreshed", extra={"store_url": store_url})
         except Exception:
-            logger.exception("Background refresh failed for %s", store_url)
+            logger.exception("Background refresh failed", extra={"store_url": store_url})
         finally:
             with self._lock:
                 self._refreshing.discard(store_url)

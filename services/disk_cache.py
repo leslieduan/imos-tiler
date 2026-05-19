@@ -82,7 +82,7 @@ def read_slice_from_disk(cache_path: Path) -> xr.Dataset | None:
     try:
         return pickle.loads(lz4.frame.decompress(cache_path.read_bytes()))
     except Exception:
-        logger.warning("Disk cache read failed: %s", cache_path, exc_info=True)
+        logger.warning("Disk cache read failed", extra={"path": str(cache_path)}, exc_info=True)
         return None
 
 
@@ -127,14 +127,19 @@ def _evict_if_over_threshold() -> None:
             total -= size
             evicted_count += 1
             evicted_bytes += size
-            logger.debug("Disk evicted (pressure): %s (%d KB)", f, size // 1024)
+            logger.debug(
+                "Disk pressure: file evicted",
+                extra={"path": str(f), "size_kb": size // 1024},
+            )
         if evicted_count:
             usage_pct = total / limit_bytes * 100 if limit_bytes > 0 else 0.0
             logger.info(
-                "Disk pressure eviction: %d files removed (%.1f MB freed), usage now %.1f%%",
-                evicted_count,
-                evicted_bytes / 1024**2,
-                usage_pct,
+                "Disk pressure eviction completed",
+                extra={
+                    "files_removed": evicted_count,
+                    "mb_freed": round(evicted_bytes / 1024**2, 1),
+                    "usage_pct": round(usage_pct, 1),
+                },
             )
 
 
@@ -150,13 +155,17 @@ def _prewarm_one(product: Product, date: str, variables: list[str]) -> str:
         ds = load_slice(product.source_path, date, variables)
         if cache_path is not None:
             write_slice_to_disk(cache_path, ds)
-            logger.debug("Disk prewarm written: %s / %s", product.id, date)
+            logger.debug("Disk prewarm written", extra={"product_id": product.id, "date": date})
             return "written"
         return "skipped"
     except FileNotFoundError:
         return "skipped"  # date in time index but nearest match is a different local day
     except Exception:
-        logger.warning("Disk prewarm failed: %s / %s", product.id, date, exc_info=True)
+        logger.warning(
+            "Disk prewarm failed",
+            extra={"product_id": product.id, "date": date},
+            exc_info=True,
+        )
         return "failed"
 
 
@@ -184,7 +193,11 @@ def prewarm_disk_slices(products: list[Product]) -> None:
             try:
                 dates = get_available_dates(product.source_path)[-_CACHE_DAYS:]
             except Exception:
-                logger.warning("Prewarm: could not get dates for %s", product.id, exc_info=True)
+                logger.warning(
+                    "Prewarm: could not get dates",
+                    extra={"product_id": product.id},
+                    exc_info=True,
+                )
                 continue
             jobs.extend((product, date, variables) for date in dates)
 
@@ -201,11 +214,13 @@ def prewarm_disk_slices(products: list[Product]) -> None:
         for f in futs:
             counts[f.result()] += 1
         logger.info(
-            "Prewarm complete: %d written, %d skipped, %d failed, %.1fs",
-            counts["written"],
-            counts["skipped"],
-            counts["failed"],
-            time.monotonic() - t0,
+            "Prewarm complete",
+            extra={
+                "written": counts["written"],
+                "skipped": counts["skipped"],
+                "failed": counts["failed"],
+                "seconds": round(time.monotonic() - t0, 1),
+            },
         )
     finally:
         with _prewarm_lock:
@@ -234,7 +249,11 @@ def evict_stale_and_orphans(products: list[Product]) -> None:
         try:
             target_dates = set(get_available_dates(product.source_path)[-_CACHE_DAYS:])
         except Exception:
-            logger.warning("Evict: could not get dates for %s", product.id, exc_info=True)
+            logger.warning(
+                "Evict: could not get dates",
+                extra={"product_id": product.id},
+                exc_info=True,
+            )
             continue
 
         _p = disk_cache_path(product.source_path, "", variables)
@@ -250,7 +269,10 @@ def evict_stale_and_orphans(products: list[Product]) -> None:
             if p is not None and p.exists():
                 p.unlink()
                 stale += 1
-                logger.debug("Disk cache evicted (stale): %s / %s", product.id, date)
+                logger.debug(
+                    "Disk cache evicted (stale)",
+                    extra={"product_id": product.id, "date": date},
+                )
 
     # Remove cache dirs for products no longer registered
     base = os.environ.get("DISK_CACHE_PATH")
@@ -265,10 +287,16 @@ def evict_stale_and_orphans(products: list[Product]) -> None:
             if entry.is_dir() and entry.name not in known_dirs:
                 shutil.rmtree(entry, ignore_errors=True)
                 orphans += 1
-                logger.debug("Disk cache evicted (orphaned product): %s", entry.name)
+                logger.debug(
+                    "Disk cache evicted (orphaned product)",
+                    extra={"dir_name": entry.name},
+                )
 
     if stale or orphans:
-        logger.info("Cache eviction: %d stale dates, %d orphan dirs removed", stale, orphans)
+        logger.info(
+            "Cache eviction complete",
+            extra={"stale_dates": stale, "orphan_dirs": orphans},
+        )
 
 
 def refresh_disk_cache(products: list[Product]) -> None:
@@ -297,7 +325,11 @@ def refresh_disk_cache(products: list[Product]) -> None:
             try:
                 target_dates = set(get_available_dates(product.source_path)[-_CACHE_DAYS:])
             except Exception:
-                logger.warning("Refresh: could not get dates for %s", product.id, exc_info=True)
+                logger.warning(
+                    "Refresh: could not get dates",
+                    extra={"product_id": product.id},
+                    exc_info=True,
+                )
                 continue
 
             _p = disk_cache_path(product.source_path, "", variables)
@@ -314,19 +346,26 @@ def refresh_disk_cache(products: list[Product]) -> None:
                     if p is not None:
                         write_slice_to_disk(p, ds)
                         added += 1
-                        logger.debug("Disk cache added: %s / %s", product.id, date)
+                        logger.debug(
+                            "Disk cache added",
+                            extra={"product_id": product.id, "date": date},
+                        )
                 except Exception:
                     failed += 1
                     logger.warning(
-                        "Disk cache add failed: %s / %s", product.id, date, exc_info=True
+                        "Disk cache add failed",
+                        extra={"product_id": product.id, "date": date},
+                        exc_info=True,
                     )
 
         _evict_if_over_threshold()
         logger.info(
-            "Refresh cycle complete: %d added, %d failed, %.1fs",
-            added,
-            failed,
-            time.monotonic() - t0,
+            "Refresh cycle complete",
+            extra={
+                "added": added,
+                "failed": failed,
+                "seconds": round(time.monotonic() - t0, 1),
+            },
         )
     except Exception as e:
         with _refresh_status_lock:
@@ -455,7 +494,7 @@ def evict_product_dir(product: Product) -> None:
     _p = disk_cache_path(product.source_path, "", product.variables)
     if _p is not None and _p.parent.exists():
         shutil.rmtree(_p.parent, ignore_errors=True)
-        logger.info("Disk cache evicted (product removed): %s", product.id)
+        logger.info("Disk cache evicted (product removed)", extra={"product_id": product.id})
 
 
 def clear_disk_cache() -> dict:
@@ -475,5 +514,5 @@ def clear_disk_cache() -> dict:
             files += sum(1 for _ in entry.rglob("*.pkl.lz4"))
             shutil.rmtree(entry, ignore_errors=True)
             dirs += 1
-    logger.info("Disk cache cleared: %d files in %d directories removed", files, dirs)
+    logger.info("Disk cache cleared", extra={"files": files, "directories": dirs})
     return {"files": files, "directories": dirs}
