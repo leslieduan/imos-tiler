@@ -28,6 +28,7 @@ import sys
 from datetime import UTC, datetime
 
 from uvicorn.config import LOGGING_CONFIG
+from uvicorn.logging import DefaultFormatter as _UvicornDefaultFormatter
 
 # Standard LogRecord attributes. Anything in record.__dict__ outside this set is
 # treated as a user-supplied extra and promoted to a top-level JSON field.
@@ -90,6 +91,25 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(out, default=str)
 
 
+class TextFormatter(_UvicornDefaultFormatter):
+    """Uvicorn's DefaultFormatter with structured extras appended as ``key=value`` pairs.
+
+    Keeps local-dev parity with the JSON path: the values passed via
+    ``extra={...}`` show up in the terminal the same way they show up as JSON
+    fields in CloudWatch. Without this, ``message`` carries only the event name
+    and all context is invisible in TTY mode.
+    """
+
+    def format(self, record: logging.LogRecord) -> str:
+        base = super().format(record)
+        extras = " ".join(
+            f"{key}={record.__dict__[key]}"
+            for key in record.__dict__
+            if key not in _RESERVED_RECORD_ATTRS
+        )
+        return f"{base}  {extras}" if extras else base
+
+
 class SuppressHealthChecks(logging.Filter):
     """Drop GET /health entries from the uvicorn access log (load-balancer noise)."""
 
@@ -115,11 +135,19 @@ def _use_json() -> bool:
 
 def configure_logging() -> None:
     """Apply logging config. Must be called after load_dotenv()."""
-    LOGGING_CONFIG["formatters"]["default"]["fmt"] = "%(levelprefix)s %(asctime)s %(message)s"
-    LOGGING_CONFIG["formatters"]["default"]["datefmt"] = "%H:%M:%S"
     if _use_json():
         LOGGING_CONFIG["formatters"]["default"] = {"()": JsonFormatter}
         LOGGING_CONFIG["formatters"]["access"] = {"()": JsonFormatter}
+    else:
+        # Swap uvicorn's DefaultFormatter for our subclass so extras render as
+        # key=value after the message. Access formatter unchanged — it already
+        # renders client_addr/request_line/status_code via its own fmt string.
+        LOGGING_CONFIG["formatters"]["default"] = {
+            "()": TextFormatter,
+            "fmt": "%(levelprefix)s %(asctime)s %(message)s",
+            "datefmt": "%H:%M:%S",
+            "use_colors": None,
+        }
 
     # Route application loggers through uvicorn's "default" handler so all app
     # logs share one format and destination. Without this, loggers outside
