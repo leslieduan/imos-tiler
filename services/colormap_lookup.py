@@ -17,7 +17,9 @@ import numpy as np
 from services.colormap_config import get_colormap, on_invalidate
 
 
-@lru_cache(maxsize=64)
+@lru_cache(
+    maxsize=64
+)  # called on every tile render in visual_renderer/visual_tiles, even though render_legend's cache means resolve_colormap is never called for repeat legend requests.
 def resolve_colormap(name: str) -> dict[int, tuple[int, int, int, int]]:
     """Return a rio-tiler colormap dict for the given name.
 
