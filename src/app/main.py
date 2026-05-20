@@ -9,7 +9,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from starlette.middleware.cors import CORSMiddleware
 
-from app.constants import PRODUCTS, Product
+from app.constants import DISK_CACHE_PATH, PRODUCTS, Product
 from app.log_config import configure_logging
 from app.routers.admin import admin_router
 from app.routers.data_tiles import router as data_tiles_router
@@ -78,19 +78,15 @@ async def lifespan(app: FastAPI):
     logger.info("Thread pool size set", extra={"thread_pool_size": limiter.total_tokens})
     load_products()
     load_colormaps()
-    disk_path = os.environ.get("DISK_CACHE_PATH")
-    if disk_path:
-        logger.info(
-            "Disk cache enabled",
-            extra={
-                "path": disk_path,
-                "limit_gb": int(os.environ.get("DISK_CACHE_LIMIT_GB", 20)),
-                "days": int(os.environ.get("CACHE_DAYS", 30)),
-                "workers": int(os.environ.get("PREWARM_WORKERS", 8)),
-            },
-        )
-    else:
-        logger.warning("Disk cache disabled: DISK_CACHE_PATH not set")
+    logger.info(
+        "Disk cache enabled",
+        extra={
+            "path": DISK_CACHE_PATH,
+            "limit_gb": int(os.environ.get("DISK_CACHE_LIMIT_GB", 20)),
+            "days": int(os.environ.get("CACHE_DAYS", 30)),
+            "workers": int(os.environ.get("PREWARM_WORKERS", 8)),
+        },
+    )
     logger.info(
         "Memory cache configured",
         extra={
