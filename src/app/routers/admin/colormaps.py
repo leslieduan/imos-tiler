@@ -3,9 +3,9 @@
 import logging
 
 from fastapi import APIRouter, HTTPException, Path
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from app.schemas.admin import ColormapCreatedResponse
 from app.services.colormap_config import ColormapMode, register_colormap, remove_colormap
 from app.utils.colors import build_categorical_lut, interpolate_colormap, parse_color
 
@@ -96,6 +96,7 @@ class ColormapPayload(BaseModel):
     status_code=201,
     summary="Register a custom colormap",
     description="Registers a named colormap from 2–256 color stops, interpolated to 256 entries. Returns 409 if the name already exists.",
+    response_model=ColormapCreatedResponse,
 )
 def add_colormap(payload: ColormapPayload):
     try:
@@ -109,7 +110,7 @@ def add_colormap(payload: ColormapPayload):
         "Colormap registered",
         extra={"colormap": payload.name, "mode": payload.mode},
     )
-    return JSONResponse(status_code=201, content={"name": payload.name})
+    return ColormapCreatedResponse(name=payload.name)
 
 
 @router.delete(

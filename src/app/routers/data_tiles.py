@@ -1,7 +1,7 @@
-from fastapi import APIRouter, HTTPException, Path
+from fastapi import APIRouter, HTTPException, Path, Response
 from fastapi.openapi.models import Example
-from fastapi.responses import JSONResponse, Response
 
+from app.schemas.data_tiles import DataTileManifestResponse
 from app.services.data_renderer import render_manifest, render_tile
 from app.services.loader import get_lod_grids
 
@@ -67,8 +67,11 @@ def get_tile(
         "Returns the LOD grid dimensions and value normalisation ranges for a product on a given date. "
         "Required for decoding raw data tiles — provides `valueRange` for scalar products and `uRange`/`vRange` for UV vector products."
     ),
+    response_model=DataTileManifestResponse,
+    response_model_exclude_none=True,
 )
 def get_manifest(
+    response: Response,
     product_id: str = Path(openapi_examples=PRODUCT_EX),
     date: str = Path(pattern=r"^\d{4}-\d{2}-\d{2}$", openapi_examples=DATE_EX),
 ):
@@ -77,4 +80,5 @@ def get_manifest(
     get_lod_grids(product)
     variables = product.variables
     ds = load_slice_or_404(product.source_path, date, variables)
-    return JSONResponse(content=render_manifest(product, ds), headers=IMMUTABLE_CACHE_HEADERS)
+    response.headers.update(IMMUTABLE_CACHE_HEADERS)
+    return DataTileManifestResponse(**render_manifest(product, ds))

@@ -96,7 +96,13 @@ def test_manifest_missing_date():
 
 
 def test_manifest_ok():
-    payload = {"bounds": {}, "valueRange": [0.0, 1.0], "lods": {"1": {"grid": [1, 1]}}}
+    payload = {
+        "bounds": {"lonMin": 110.0, "lonMax": 160.0, "latMin": -50.0, "latMax": -10.0},
+        "valueRange": [0.0, 1.0],
+        "lods": {
+            "1": {"grid": [2, 2], "chunkPx": [256, 256], "storedPx": [258, 258], "padding": 1}
+        },
+    }
     with (
         patch("app.routers.data_tiles.get_lod_grids", return_value=_LOD_GRIDS),
         patch("app.routers.shared.load_slice", return_value=_make_ds()),

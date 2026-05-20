@@ -15,6 +15,7 @@ import asyncio
 from fastapi import APIRouter, HTTPException
 
 from app.constants import PRODUCTS
+from app.schemas.admin import CacheStateResponse, DiskClearedResponse, MemoryClearedResponse
 from app.services.data_renderer import clear_processed_cache, processed_memo_stats
 from app.services.disk_cache import (
     clear_disk_cache,
@@ -109,9 +110,12 @@ def _build_response() -> dict:
         "are instantaneous — they reflect ongoing work at the moment of the request, not a "
         "rolling window."
     ),
+    response_model=CacheStateResponse,
+    response_model_exclude_unset=True,
 )
 async def get_cache_state():
-    return await asyncio.to_thread(_build_response)
+    result = await asyncio.to_thread(_build_response)
+    return CacheStateResponse.model_validate(result)
 
 
 @router.delete(
@@ -122,14 +126,10 @@ async def get_cache_state():
         "Disk cache is untouched. In-flight computes are not cancelled — they'll just "
         "miss the cache on completion and re-populate it."
     ),
+    response_model=MemoryClearedResponse,
 )
 async def clear_memory_cache():
-    return {
-        "cleared": {
-            "slice": clear_slice_cache(),
-            "processed": clear_processed_cache(),
-        }
-    }
+    return MemoryClearedResponse(slice=clear_slice_cache(), processed=clear_processed_cache())
 
 
 @router.delete(
@@ -140,6 +140,7 @@ async def clear_memory_cache():
         "Memory caches are untouched. In-flight computes are not cancelled — "
         "they may re-populate the disk cache on completion."
     ),
+    response_model=DiskClearedResponse,
 )
 async def clear_disk_cache_endpoint():
     if is_prewarm_running():
@@ -153,4 +154,4 @@ async def clear_disk_cache_endpoint():
             detail="Disk cache refresh is running — please try again once it completes.",
         )
     cleared = await asyncio.to_thread(clear_disk_cache)
-    return {"cleared": {"disk": cleared}}
+    return DiskClearedResponse(**cleared)

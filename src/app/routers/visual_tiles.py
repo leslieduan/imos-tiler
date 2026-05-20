@@ -2,8 +2,9 @@ import asyncio
 
 from fastapi import APIRouter, HTTPException, Path, Query
 from fastapi.openapi.models import Example
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import Response
 
+from app.schemas.visual_tiles import ColormapListResponse
 from app.services.colormap_config import is_categorical, list_colormaps
 from app.services.colormap_lookup import resolve_colormap
 from app.services.legend_renderer import render_legend
@@ -79,9 +80,9 @@ def _reject_webp_for_categorical(colormap_name: str, fmt: ImageFormat) -> None:
         )
 
 
-@router.get("/colormaps", summary="List available colormaps")
+@router.get("/colormaps", summary="List available colormaps", response_model=ColormapListResponse)
 async def get_colormaps():
-    return JSONResponse(content=list_colormaps())
+    return ColormapListResponse(**list_colormaps())
 
 
 @router.get(

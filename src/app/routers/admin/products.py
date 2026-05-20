@@ -4,10 +4,10 @@ import asyncio
 import logging
 
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
 from app.constants import CHUNK_PX, PADDING, PRODUCTS, Product
+from app.schemas.admin import ProductCreatedResponse
 from app.services.disk_cache import prewarm_disk_slices
 from app.services.loader import evict_product_cache
 from app.services.product_config import register_product, remove_product
@@ -80,6 +80,7 @@ class ProductPayload(BaseModel):
         "Registers a new product from a Zarr store and triggers a background cache prewarm. "
         "The store must expose `lat`, `lon`, and `time` coordinates. Returns 409 if the product ID already exists."
     ),
+    response_model=ProductCreatedResponse,
 )
 async def add_product(payload: ProductPayload):
     try:
@@ -94,9 +95,7 @@ async def add_product(payload: ProductPayload):
         extra={"product_id": product.id, "source_path": product.source_path},
     )
     _spawn_prewarm(product)
-    return JSONResponse(
-        status_code=201, content={"id": product.id, "source_path": product.source_path}
-    )
+    return ProductCreatedResponse(id=product.id, source_path=product.source_path)
 
 
 @router.delete(

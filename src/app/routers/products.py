@@ -2,11 +2,19 @@ import asyncio
 import hashlib
 import math
 
-from fastapi import APIRouter, Header, Path, Query
+from fastapi import APIRouter, Header, Path, Query, Response
 from fastapi.openapi.models import Example
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse
 
 from app.constants import CACHE_VERSION, PRODUCTS
+from app.schemas.products import (
+    ManifestResponse,
+    PointResponse,
+    PointSeriesEntry,
+    PointSeriesResponse,
+    ProductConfig,
+    VariableValue,
+)
 from app.services.loader import get_available_dates, load_slice
 from app.services.product_config import list_products
 from app.utils.dates import three_months_ago
@@ -43,9 +51,9 @@ def _etag_response(body: object, etag: str, if_none_match: str | None) -> Respon
     return JSONResponse(content=body, headers=headers)
 
 
-@router.get("/products", summary="List products")
+@router.get("/products", summary="List products", response_model=list[ProductConfig])
 async def get_products():
-    return JSONResponse(content=list_products())
+    return [ProductConfig(**p) for p in list_products()]
 
 
 @router.get(
@@ -55,6 +63,11 @@ async def get_products():
         "Returns available dates for every product. "
         "`from` defaults to 3 months before today; `to` is unbounded by default."
     ),
+    # response_model=ManifestResponse,  # can't use this because of the dynamic ETag-based 304 response
+    responses={
+        200: {"model": ManifestResponse},
+        304: {"description": "Not Modified — ETag matched, response body is empty"},
+    },
 )
 def get_products_availability(
     from_date: str | None = Query(
@@ -102,8 +115,10 @@ def get_products_availability(
     "/{product_id}/{date}/point",
     summary="Point value lookup",
     description="Returns the value(s) of all product variables at the nearest grid cell to the given lat/lon.",
+    response_model=PointResponse,
 )
 def get_point(
+    response: Response,
     product_id: str = Path(openapi_examples=PRODUCT_EX),
     date: str = Path(pattern=r"^\d{4}-\d{2}-\d{2}$", openapi_examples=DATE_EX),
     lat: float = Query(..., openapi_examples={"default": Example(value=-33.8)}),
@@ -116,21 +131,19 @@ def get_point(
 
     point = ds.sel(lat=lat, lon=lon, method="nearest")
 
-    values = {}
+    values: dict[str, VariableValue] = {}
     for var in variables:
         v = float(point[var].squeeze())
-        values[var] = {
-            "value": None if math.isnan(v) else v,
-            "units": point[var].attrs.get("units"),
-        }
+        values[var] = VariableValue(
+            value=None if math.isnan(v) else v,
+            units=point[var].attrs.get("units"),
+        )
 
-    return JSONResponse(
-        content={
-            "lat": float(point.lat.values),
-            "lon": float(point.lon.values),
-            "variables": values,
-        },
-        headers=IMMUTABLE_CACHE_HEADERS,
+    response.headers.update(IMMUTABLE_CACHE_HEADERS)
+    return PointResponse(
+        lat=float(point.lat.values),
+        lon=float(point.lon.values),
+        variables=values,
     )
 
 
@@ -142,9 +155,11 @@ def get_point(
         "given lat/lon across a date range. `from` defaults to 3 months before today; "
         "`to` is unbounded by default. Only dates with available data are included."
     ),
+    response_model=PointSeriesResponse,
 )
 # async because we want to parallelise the per-date load_slice calls, which are the bottleneck for a multi-date request.
 async def get_point_series(
+    response: Response,
     product_id: str = Path(openapi_examples=PRODUCT_EX),
     lat: float = Query(..., openapi_examples={"default": Example(value=-33.8)}),
     lon: float = Query(..., openapi_examples={"default": Example(value=151.2)}),
@@ -185,18 +200,16 @@ async def get_point_series(
         if point_lat is None:
             point_lat = float(point.lat.values)
             point_lon = float(point.lon.values)
-        values = {}
+        values: dict[str, VariableValue] = {}
         for var in variables:
             v = float(point[var].squeeze())
-            values[var] = {
-                "value": None if math.isnan(v) else v,
-                "units": point[var].attrs.get("units"),
-            }
-        series.append({"date": date_str, "variables": values})
+            values[var] = VariableValue(
+                value=None if math.isnan(v) else v,
+                units=point[var].attrs.get("units"),
+            )
+        series.append(PointSeriesEntry(date=date_str, variables=values))
 
     # Revalidate (not immutable): an unbounded `to` window will pick up new dates as
     # they land, so we can't promise the response bytes are pinned to the URL.
-    return JSONResponse(
-        content={"lat": point_lat, "lon": point_lon, "series": series},
-        headers=_REVALIDATE_HEADERS,
-    )
+    response.headers.update(_REVALIDATE_HEADERS)
+    return PointSeriesResponse(lat=point_lat, lon=point_lon, series=series)
