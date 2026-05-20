@@ -110,7 +110,11 @@ def processed_memo_stats() -> dict:
 
 
 def evict_processed_cache(product: Product) -> None:
-    removed = _processed_memo.evict_matching(lambda k: k[0] == product.source_path)
+    vars_tuple = tuple(product.variables)
+    removed = _processed_memo.evict_matching(
+        # Identify product by source_path and variables;
+        lambda k: k[0] == product.source_path and k[2] == vars_tuple
+    )
     if removed:
         logger.info(
             "Processed cache evicted for product",

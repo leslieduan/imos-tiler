@@ -5,8 +5,6 @@ class ProductConfig(BaseModel):
     id: str
     source_path: str
     variable: str | list[str]
-    chunk_px: list[int]
-    padding: int
 
 
 class ProductAvailability(BaseModel):
