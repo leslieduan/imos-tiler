@@ -13,6 +13,9 @@ wheels/
 .env
 titiler-demo-key.pem
 
+# Local Docker overrides (not for EC2)
+docker-compose.override.yml
+
 # Runtime state
 products.json
 colormaps.json

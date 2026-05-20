@@ -14,16 +14,16 @@ import asyncio
 
 from fastapi import APIRouter, HTTPException
 
-from constants import PRODUCTS
-from services.data_renderer import clear_processed_cache, processed_memo_stats
-from services.disk_cache import (
+from app.constants import PRODUCTS
+from app.services.data_renderer import clear_processed_cache, processed_memo_stats
+from app.services.disk_cache import (
     clear_disk_cache,
     collect_disk_stats,
     get_refresh_status,
     is_prewarm_running,
     is_refresh_running,
 )
-from services.loader import clear_slice_cache, slice_memo_stats
+from app.services.loader import clear_slice_cache, slice_memo_stats
 
 router = APIRouter()
 

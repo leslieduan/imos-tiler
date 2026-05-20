@@ -6,10 +6,10 @@ from fastapi import APIRouter, Header, Path, Query
 from fastapi.openapi.models import Example
 from fastapi.responses import JSONResponse, Response
 
-from constants import CACHE_VERSION, PRODUCTS
-from services.loader import get_available_dates, load_slice
-from services.product_config import list_products
-from utils.dates import three_months_ago
+from app.constants import CACHE_VERSION, PRODUCTS
+from app.services.loader import get_available_dates, load_slice
+from app.services.product_config import list_products
+from app.utils.dates import three_months_ago
 
 from .shared import (
     DATE_EX,

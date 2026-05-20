@@ -17,8 +17,8 @@ from rio_tiler.io.xarray import XarrayReader
 from rio_tiler.models import ImageData
 from rioxarray.exceptions import NoDataInBounds
 
-from services.colormap_lookup import resolve_colormap
-from utils.image import (
+from app.services.colormap_lookup import resolve_colormap
+from app.utils.image import (
     AnimatedFormat,
     ImageFormat,
     empty_tile,

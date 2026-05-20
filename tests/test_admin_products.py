@@ -6,9 +6,9 @@ from unittest.mock import patch
 import pytest
 from starlette.testclient import TestClient
 
-from constants import PRODUCTS, Product
-from main import app
-from routers.admin import products as admin_products
+from app.constants import PRODUCTS, Product
+from app.main import app
+from app.routers.admin import products as admin_products
 
 client = TestClient(app, raise_server_exceptions=True)
 
@@ -47,7 +47,7 @@ def _default_quiet(request, monkeypatch):
 def test_add_product_returns_201_and_id():
     payload = {"id": "new_prod", "source_path": "s3://b/x.zarr", "variable": "V"}
     fake = Product(id="new_prod", source_path="s3://b/x.zarr", variable="V")
-    with patch("routers.admin.products.register_product", return_value=fake) as reg:
+    with patch("app.routers.admin.products.register_product", return_value=fake) as reg:
         r = client.post("/admin/products", json=payload, headers=_HEADERS)
     assert r.status_code == 201
     assert r.json() == {"id": "new_prod", "source_path": "s3://b/x.zarr"}
@@ -63,7 +63,7 @@ def test_add_product_with_chunk_px_and_padding():
         "padding": 4,
     }
     fake = Product(id="tuned", source_path="s3://b/x.zarr", variable="V")
-    with patch("routers.admin.products.register_product", return_value=fake):
+    with patch("app.routers.admin.products.register_product", return_value=fake):
         r = client.post("/admin/products", json=payload, headers=_HEADERS)
     assert r.status_code == 201
 
@@ -71,7 +71,7 @@ def test_add_product_with_chunk_px_and_padding():
 def test_add_product_multi_variable():
     payload = {"id": "multi", "source_path": "s3://b/x.zarr", "variable": ["U", "V"]}
     fake = Product(id="multi", source_path="s3://b/x.zarr", variable=["U", "V"])
-    with patch("routers.admin.products.register_product", return_value=fake):
+    with patch("app.routers.admin.products.register_product", return_value=fake):
         r = client.post("/admin/products", json=payload, headers=_HEADERS)
     assert r.status_code == 201
 
@@ -133,7 +133,7 @@ def test_add_product_bad_chunk_px_rejected(chunk_px):
 def test_add_product_duplicate_returns_409():
     payload = {"id": "dup", "source_path": "s3://b/x.zarr", "variable": "V"}
     with patch(
-        "routers.admin.products.register_product",
+        "app.routers.admin.products.register_product",
         side_effect=ValueError("Product 'dup' already exists"),
     ):
         r = client.post("/admin/products", json=payload, headers=_HEADERS)
@@ -144,7 +144,7 @@ def test_add_product_duplicate_returns_409():
 def test_add_product_persistence_failure_returns_500():
     payload = {"id": "p", "source_path": "s3://b/x.zarr", "variable": "V"}
     with patch(
-        "routers.admin.products.register_product",
+        "app.routers.admin.products.register_product",
         side_effect=OSError("disk full"),
     ):
         r = client.post("/admin/products", json=payload, headers=_HEADERS)
@@ -162,8 +162,8 @@ def test_delete_product_returns_204_and_evicts_cache(monkeypatch):
     monkeypatch.setitem(PRODUCTS, "to_delete", target)
 
     with (
-        patch("routers.admin.products.remove_product") as rem,
-        patch("routers.admin.products.evict_product_cache") as evict,
+        patch("app.routers.admin.products.remove_product") as rem,
+        patch("app.routers.admin.products.evict_product_cache") as evict,
     ):
         r = client.delete("/admin/products/to_delete", headers=_HEADERS)
 
@@ -173,14 +173,14 @@ def test_delete_product_returns_204_and_evicts_cache(monkeypatch):
 
 
 def test_delete_product_unknown_returns_404():
-    with patch("routers.admin.products.remove_product", side_effect=KeyError("not found")):
+    with patch("app.routers.admin.products.remove_product", side_effect=KeyError("not found")):
         r = client.delete("/admin/products/never_existed", headers=_HEADERS)
     assert r.status_code == 404
 
 
 def test_delete_product_persistence_failure_returns_500(monkeypatch):
     monkeypatch.setitem(PRODUCTS, "p", Product(id="p", source_path="s3://b/x.zarr", variable="V"))
-    with patch("routers.admin.products.remove_product", side_effect=OSError("disk")):
+    with patch("app.routers.admin.products.remove_product", side_effect=OSError("disk")):
         r = client.delete("/admin/products/p", headers=_HEADERS)
     assert r.status_code == 500
 
@@ -189,7 +189,7 @@ def test_delete_product_value_error_returns_403(monkeypatch):
     """ValueError from remove_product (e.g. permission/policy) maps to 403."""
     monkeypatch.setitem(PRODUCTS, "p", Product(id="p", source_path="s3://b/x.zarr", variable="V"))
     with patch(
-        "routers.admin.products.remove_product",
+        "app.routers.admin.products.remove_product",
         side_effect=ValueError("policy denied"),
     ):
         r = client.delete("/admin/products/p", headers=_HEADERS)
@@ -232,7 +232,7 @@ async def test_spawn_prewarm_anchors_task_and_cleans_up_on_completion():
     def fake_prewarm(_products):
         completed.set()
 
-    with patch("routers.admin.products.prewarm_disk_slices", side_effect=fake_prewarm):
+    with patch("app.routers.admin.products.prewarm_disk_slices", side_effect=fake_prewarm):
         admin_products._background_tasks.clear()
         p = Product(id="bg", source_path="s3://b/x.zarr", variable="V")
         admin_products._spawn_prewarm(p)

@@ -11,8 +11,8 @@ import numpy as np
 import pytest
 import xarray as xr
 
-from constants import Product
-from services import disk_cache
+import app.services.disk_cache as disk_cache
+from app.constants import Product
 
 
 @pytest.fixture
@@ -151,7 +151,7 @@ def test_evict_pressure_disabled_when_env_unset(monkeypatch):
 def test_prewarm_disabled_when_env_unset(monkeypatch):
     monkeypatch.delenv("DISK_CACHE_PATH", raising=False)
     # Should NOT call get_available_dates because the whole function early-returns.
-    with patch("services.loader.get_available_dates") as get_dates:
+    with patch("app.services.loader.get_available_dates") as get_dates:
         disk_cache.prewarm_disk_slices([_product()])
     get_dates.assert_not_called()
 
@@ -161,8 +161,8 @@ def test_prewarm_writes_files_for_each_date(cache_root):
     ds = _make_slice()
 
     with (
-        patch("services.loader.get_available_dates", return_value=["2024-01-01", "2024-01-02"]),
-        patch("services.loader.load_slice", return_value=ds),
+        patch("app.services.loader.get_available_dates", return_value=["2024-01-01", "2024-01-02"]),
+        patch("app.services.loader.load_slice", return_value=ds),
     ):
         disk_cache.prewarm_disk_slices([p])
 
@@ -179,8 +179,8 @@ def test_prewarm_skips_existing_files(cache_root):
     disk_cache.write_slice_to_disk(existing, _make_slice(value=5.0))
 
     with (
-        patch("services.loader.get_available_dates", return_value=["2024-01-01"]),
-        patch("services.loader.load_slice") as load,
+        patch("app.services.loader.get_available_dates", return_value=["2024-01-01"]),
+        patch("app.services.loader.load_slice") as load,
     ):
         disk_cache.prewarm_disk_slices([p])
     load.assert_not_called()
@@ -200,8 +200,8 @@ def test_prewarm_swallows_per_product_date_errors(cache_root):
         return ["2024-01-01"]
 
     with (
-        patch("services.loader.get_available_dates", side_effect=dates_for),
-        patch("services.loader.load_slice", return_value=_make_slice()),
+        patch("app.services.loader.get_available_dates", side_effect=dates_for),
+        patch("app.services.loader.load_slice", return_value=_make_slice()),
     ):
         disk_cache.prewarm_disk_slices([bad, good])
 
@@ -221,8 +221,8 @@ def test_prewarm_swallows_filenotfound_for_individual_slice(cache_root):
         return _make_slice()
 
     with (
-        patch("services.loader.get_available_dates", return_value=["2024-01-01", "2024-01-02"]),
-        patch("services.loader.load_slice", side_effect=load_one),
+        patch("app.services.loader.get_available_dates", return_value=["2024-01-01", "2024-01-02"]),
+        patch("app.services.loader.load_slice", side_effect=load_one),
     ):
         disk_cache.prewarm_disk_slices([p])
 
@@ -247,7 +247,7 @@ def test_evict_stale_removes_dates_outside_window(cache_root):
     keep.write_bytes(b"k")
     drop.write_bytes(b"d")
 
-    with patch("services.loader.get_available_dates", return_value=["2024-06-01"]):
+    with patch("app.services.loader.get_available_dates", return_value=["2024-06-01"]):
         disk_cache.evict_stale_and_orphans([p])
 
     assert keep.exists()
@@ -265,7 +265,7 @@ def test_evict_orphans_drops_unknown_product_dirs(cache_root):
     orphan_dir.mkdir()
     (orphan_dir / "2024-01-01.pkl.lz4").write_bytes(b"o")
 
-    with patch("services.loader.get_available_dates", return_value=["2024-01-01"]):
+    with patch("app.services.loader.get_available_dates", return_value=["2024-01-01"]):
         disk_cache.evict_stale_and_orphans([p])
 
     assert keep_dir.exists()
@@ -275,7 +275,7 @@ def test_evict_orphans_drops_unknown_product_dirs(cache_root):
 def test_evict_stale_disabled_when_env_unset(monkeypatch):
     monkeypatch.delenv("DISK_CACHE_PATH", raising=False)
     # No crash and no calls to get_available_dates.
-    with patch("services.loader.get_available_dates") as gad:
+    with patch("app.services.loader.get_available_dates") as gad:
         disk_cache.evict_stale_and_orphans([_product()])
     gad.assert_not_called()
 
@@ -293,10 +293,10 @@ def test_refresh_adds_new_dates(cache_root):
 
     with (
         patch(
-            "services.loader.get_available_dates",
+            "app.services.loader.get_available_dates",
             return_value=["2024-01-01", "2024-01-02"],
         ),
-        patch("services.loader.load_slice", return_value=_make_slice()),
+        patch("app.services.loader.load_slice", return_value=_make_slice()),
     ):
         disk_cache.refresh_disk_cache([p])
 
@@ -306,7 +306,7 @@ def test_refresh_adds_new_dates(cache_root):
 
 def test_refresh_disabled_when_env_unset(monkeypatch):
     monkeypatch.delenv("DISK_CACHE_PATH", raising=False)
-    with patch("services.loader.get_available_dates") as gad:
+    with patch("app.services.loader.get_available_dates") as gad:
         disk_cache.refresh_disk_cache([_product()])
     gad.assert_not_called()
 

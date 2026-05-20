@@ -157,8 +157,42 @@ S3 cold   → load_slice (S3 .compute(), ~2s)  → _to_scalar_parts → XarrayRe
 
 ```
 imos-tiler/
-  main.py                        ← mounts all routers, CORS middleware, lifespan startup
-  constants.py                   ← Product dataclass + LOD algorithm + LODConfig (server-shader contract)
+  src/app/
+    main.py                      ← mounts all routers, CORS middleware, lifespan startup
+    constants.py                 ← Product dataclass + LOD algorithm + LODConfig (server-shader contract)
+    log_config.py                ← logging setup (JSON in Docker, coloured text locally)
+    routers/
+      data_tiles.py              ← /data_tiles — raw value-encoded RGBA tiles for WebGL
+      visual_tiles.py            ← /visual_tiles — colourised Web Mercator XYZ tiles + bbox + colormap listing/legend
+      products.py                ← shared: /products, /manifest, /{id}/{date}/point, /{id}/point (time series) — included by both tile routers
+      shared.py                  ← shared router helpers (PRODUCT_EX/DATE_EX examples, get_product_or_404, load_slice_or_404)
+      admin/                     ← /admin — product, colormap, and cache-state endpoints (key-protected, package)
+        __init__.py              ← assembles admin_router and applies require_admin_key
+        auth.py                  ← X-Admin-Key dependency
+        products.py              ← POST/DELETE /admin/products
+        colormaps.py             ← POST/DELETE /admin/colormaps
+        cache.py                 ← GET /admin/cache (state snapshot) + DELETE /admin/cache/memory (clear L1+L2) + DELETE /admin/cache/disk (clear L3)
+    services/
+      store_registry.py          ← Zarr store singleton (stale-while-revalidate) + per-URL date index
+      disk_cache.py              ← L3 disk cache lifecycle: path, read/write, prewarm, refresh, eviction
+      loader.py                  ← load_slice (L2 LRU) + get_available_dates + get_lod_grids + evict_product_cache
+      data_renderer.py           ← processed grid cache + chunk extract + PNG encode (data tiles)
+      visual_renderer.py         ← Web Mercator tile/bbox render (visual tiles) — encodes PNG or WebP
+      colormap_lookup.py         ← resolve_colormap() — custom→rio-tiler→matplotlib fallback chain
+      legend_renderer.py         ← render_legend() — color bar + tick labels
+      colormap_config.py         ← colormaps.json read/write + in-memory colormap registry + ColormapMode type + invalidation hooks
+      product_config.py          ← products.json read/write + in-memory PRODUCTS dict management
+    utils/
+      dates.py                   ← LOCAL_TZ + ts_to_local_date + three_months_ago
+      geo.py                     ← dataset_bounds + json_safe_float
+      colors.py                  ← hex parsing + ramp/categorical LUT builders
+      memoizer.py                ← shared dedup+cache helper used by load_slice, processed cache, visual-tile dedup
+      image.py                   ← encode_rgba(arr, fmt) + empty_tile(fmt) + media_type(fmt) — PNG/WebP encoders shared by both renderers
+  docker/
+    Dockerfile
+    docker-entrypoint.sh
+    nginx.conf
+  tests/
   products.json                  ← persisted product registrations (runtime, gitignored; local-dev default)
   colormaps.json                 ← persisted custom colormap registrations (runtime, gitignored; local-dev default)
   data/
@@ -170,33 +204,6 @@ imos-tiler/
     dataset.md                   ← per-store variable / dimension / chunking reference
     netcdf-vs-zarr.md            ← format comparison, IMOS product file analysis, performance data
     security.md                  ← admin endpoint protection (key + nginx + EC2 security group)
-  routers/
-    data_tiles.py                ← /data_tiles — raw value-encoded RGBA tiles for WebGL
-    visual_tiles.py              ← /visual_tiles — colourised Web Mercator XYZ tiles + bbox + colormap listing/legend
-    products.py                  ← shared: /products, /manifest, /{id}/{date}/point, /{id}/point (time series) — included by both tile routers
-    shared.py                    ← shared router helpers (PRODUCT_EX/DATE_EX examples, get_product_or_404, load_slice_or_404)
-    admin/                       ← /admin — product, colormap, and cache-state endpoints (key-protected, package)
-      __init__.py                ← assembles admin_router and applies require_admin_key
-      auth.py                    ← X-Admin-Key dependency
-      products.py                ← POST/DELETE /admin/products
-      colormaps.py               ← POST/DELETE /admin/colormaps
-      cache.py                   ← GET /admin/cache (state snapshot) + DELETE /admin/cache/memory (clear L1+L2) + DELETE /admin/cache/disk (clear L3)
-  services/
-    store_registry.py            ← Zarr store singleton (stale-while-revalidate) + per-URL date index
-    disk_cache.py                ← L3 disk cache lifecycle: path, read/write, prewarm, refresh, eviction
-    loader.py                    ← load_slice (L2 LRU) + get_available_dates + get_lod_grids + evict_product_cache
-    data_renderer.py             ← processed grid cache + chunk extract + PNG encode (data tiles)
-    visual_renderer.py           ← Web Mercator tile/bbox render (visual tiles) — encodes PNG or WebP
-    colormap_lookup.py           ← resolve_colormap() — custom→rio-tiler→matplotlib fallback chain
-    legend_renderer.py           ← render_legend() — color bar + tick labels
-    colormap_config.py           ← colormaps.json read/write + in-memory colormap registry + ColormapMode type + invalidation hooks
-    product_config.py            ← products.json read/write + in-memory PRODUCTS dict management
-  utils/
-    dates.py                     ← LOCAL_TZ + ts_to_local_date + three_months_ago
-    geo.py                       ← dataset_bounds + json_safe_float
-    colors.py                    ← hex parsing + ramp/categorical LUT builders
-    memoizer.py                  ← shared dedup+cache helper used by load_slice, processed cache, visual-tile dedup
-    image.py                     ← encode_rgba(arr, fmt) + empty_tile(fmt) + media_type(fmt) — PNG/WebP encoders shared by both renderers
 ```
 
 `products.json` and `colormaps.json` default to the project root in local dev. In Docker (`docker-compose.yml`), they are overridden to `data/products.json` and `data/colormaps.json`, backed by a `./data` host volume. The L3 disk-cache directory is set via `DISK_CACHE_PATH` (default: unset in local dev; `/app/slice_cache` in Docker, backed by a `./slice_cache` host volume).

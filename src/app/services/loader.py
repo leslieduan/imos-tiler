@@ -23,14 +23,14 @@ import pandas as pd
 import xarray as xr
 from cachetools import LRUCache
 
-from constants import Product
-from services.disk_cache import (
+from app.constants import Product
+from app.services.disk_cache import (
     disk_cache_path,
     evict_product_dir,
     read_slice_from_disk,
 )
-from services.store_registry import get_store, store_registry
-from utils.memoizer import Memoizer
+from app.services.store_registry import get_store, store_registry
+from app.utils.memoizer import Memoizer
 
 logger = logging.getLogger(__name__)
 
@@ -168,7 +168,7 @@ def clear_slice_cache() -> int:
 
 def evict_product_cache(product: Product) -> None:
     """Remove all in-memory and disk cache entries for a deleted product."""
-    from services.data_renderer import evict_processed_cache
+    from app.services.data_renderer import evict_processed_cache
 
     vars_tuple = tuple(sorted(product.variables))
 

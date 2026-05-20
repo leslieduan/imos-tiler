@@ -9,19 +9,19 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from starlette.middleware.cors import CORSMiddleware
 
-from constants import PRODUCTS, Product
-from log_config import configure_logging
-from routers.admin import admin_router
-from routers.data_tiles import router as data_tiles_router
-from routers.visual_tiles import router as visual_tiles_router
-from services.colormap_config import load_colormaps
-from services.disk_cache import (
+from app.constants import PRODUCTS, Product
+from app.log_config import configure_logging
+from app.routers.admin import admin_router
+from app.routers.data_tiles import router as data_tiles_router
+from app.routers.visual_tiles import router as visual_tiles_router
+from app.services.colormap_config import load_colormaps
+from app.services.disk_cache import (
     evict_stale_and_orphans,
     prewarm_disk_slices,
     refresh_disk_cache,
 )
-from services.product_config import load_products
-from services.store_registry import prewarm_stores
+from app.services.product_config import load_products
+from app.services.store_registry import prewarm_stores
 
 load_dotenv()
 configure_logging()

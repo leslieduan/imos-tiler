@@ -19,13 +19,13 @@ ADMIN_API_KEY=your-secret-key
 
 ```bash
 # Run the development server (.env is loaded automatically)
-uv run uvicorn main:app --reload
+uv run uvicorn app.main:app --reload
 ```
 
 To enable debug-level application logs (e.g. to see sub-daily timestamp collisions or cache internals):
 
 ```bash
-LOG_LEVEL=DEBUG uv run uvicorn main:app --reload
+LOG_LEVEL=DEBUG uv run uvicorn app.main:app --reload
 ```
 
 `LOG_LEVEL` accepts any standard Python log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`). Default is `INFO`.
@@ -229,7 +229,7 @@ uv run pytest          # run tests
 uv run pytest --cov    # run tests with coverage report
 uv run ruff check .    # lint
 uv run ruff format .   # format
-uv run mypy .          # type check
+uv run mypy src/app tests  # type check
 ```
 
 ### Pre-commit hooks

@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import pytest
 
-from utils import dates as dates_mod
+from app.utils import dates as dates_mod
 
 
 def test_ts_to_local_date_converts_utc_to_sydney():

@@ -14,7 +14,7 @@ from functools import lru_cache
 
 import numpy as np
 
-from services.colormap_config import get_colormap, on_invalidate
+from app.services.colormap_config import get_colormap, on_invalidate
 
 
 @lru_cache(

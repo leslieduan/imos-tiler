@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 import pytest
 
-import main
+import app.main as main
 
 
 @pytest.mark.anyio
@@ -23,9 +23,9 @@ async def test_startup_cache_sync_offloads_via_to_thread():
         return fn(*args, **kwargs)
 
     with (
-        patch("main.evict_stale_and_orphans") as evict,
-        patch("main.prewarm_disk_slices") as prewarm,
-        patch("main.asyncio.to_thread", side_effect=fake_to_thread),
+        patch("app.main.evict_stale_and_orphans") as evict,
+        patch("app.main.prewarm_disk_slices") as prewarm,
+        patch("app.main.asyncio.to_thread", side_effect=fake_to_thread),
     ):
         await main._startup_cache_sync([])
 
@@ -43,9 +43,9 @@ async def test_startup_cache_sync_continues_after_eviction_failure():
         return fn(*args, **kwargs)
 
     with (
-        patch("main.evict_stale_and_orphans", side_effect=RuntimeError("boom")),
-        patch("main.prewarm_disk_slices") as prewarm,
-        patch("main.asyncio.to_thread", side_effect=passthrough),
+        patch("app.main.evict_stale_and_orphans", side_effect=RuntimeError("boom")),
+        patch("app.main.prewarm_disk_slices") as prewarm,
+        patch("app.main.asyncio.to_thread", side_effect=passthrough),
     ):
         # Should NOT raise — the function swallows the eviction failure.
         await main._startup_cache_sync([])
@@ -70,9 +70,9 @@ async def test_cache_refresh_loop_offloads_refresh():
         return fn(*args, **kwargs)
 
     with (
-        patch("main.refresh_disk_cache") as refresh,
-        patch("main.asyncio.sleep", side_effect=fake_sleep),
-        patch("main.asyncio.to_thread", side_effect=fake_to_thread),
+        patch("app.main.refresh_disk_cache") as refresh,
+        patch("app.main.asyncio.sleep", side_effect=fake_sleep),
+        patch("app.main.asyncio.to_thread", side_effect=fake_to_thread),
     ):
         with pytest.raises(asyncio.CancelledError):
             await main._cache_refresh_loop(interval=1)
@@ -104,9 +104,9 @@ async def test_cache_refresh_loop_survives_refresh_exception():
         return fn(*args, **kwargs)
 
     with (
-        patch("main.refresh_disk_cache", side_effect=flaky_refresh),
-        patch("main.asyncio.sleep", side_effect=fake_sleep),
-        patch("main.asyncio.to_thread", side_effect=passthrough),
+        patch("app.main.refresh_disk_cache", side_effect=flaky_refresh),
+        patch("app.main.asyncio.sleep", side_effect=fake_sleep),
+        patch("app.main.asyncio.to_thread", side_effect=passthrough),
     ):
         with pytest.raises(asyncio.CancelledError):
             await main._cache_refresh_loop(interval=1)

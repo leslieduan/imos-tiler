@@ -4,7 +4,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
 
-from constants import COLORMAPS_CONFIG_PATH
+from app.constants import COLORMAPS_CONFIG_PATH
 
 ColormapMode = Literal["ramp", "categorical"]
 

@@ -149,17 +149,16 @@ def configure_logging() -> None:
             "use_colors": None,
         }
 
-    # Route application loggers through uvicorn's "default" handler so all app
-    # logs share one format and destination. Without this, loggers outside
-    # "services.*" (e.g. "main", "routers.admin.products") fall through to the
-    # root logger which has no handlers configured by uvicorn's LOGGING_CONFIG.
+    # Route all app.* loggers through uvicorn's "default" handler. Registering
+    # the "app" namespace as the parent means app.main, app.services.*, and
+    # app.routers.* all propagate here and stop (propagate=False prevents
+    # further fallthrough to the root logger, which uvicorn leaves unconfigured).
     app_level = os.environ.get("LOG_LEVEL", "INFO").upper()
-    for namespace in ("services", "routers", "main"):
-        LOGGING_CONFIG["loggers"][namespace] = {
-            "handlers": ["default"],
-            "level": app_level,
-            "propagate": False,
-        }
+    LOGGING_CONFIG["loggers"]["app"] = {
+        "handlers": ["default"],
+        "level": app_level,
+        "propagate": False,
+    }
 
     logging.config.dictConfig(LOGGING_CONFIG)
     logging.getLogger("uvicorn.access").addFilter(SuppressHealthChecks())

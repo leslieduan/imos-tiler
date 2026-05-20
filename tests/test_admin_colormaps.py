@@ -3,7 +3,7 @@ from unittest.mock import patch
 import pytest
 from starlette.testclient import TestClient
 
-from main import app
+from app.main import app
 
 client = TestClient(app, raise_server_exceptions=True)
 
@@ -27,7 +27,7 @@ def test_add_ramp_colormap_hex_stops():
         "mode": "ramp",
         "entries": ["#000080", "#00ffff", "#ffffff", "#ff8c00", "#8b0000"],
     }
-    with patch("routers.admin.colormaps.register_colormap") as mock_reg:
+    with patch("app.routers.admin.colormaps.register_colormap") as mock_reg:
         response = client.post("/admin/colormaps", json=payload, headers=_HEADERS)
     assert response.status_code == 201
     assert response.json() == {"name": "imos_sst"}
@@ -44,7 +44,7 @@ def test_add_ramp_colormap_rgba_stops():
         "mode": "ramp",
         "entries": [[0, 0, 128, 255], [0, 255, 255, 255], [255, 255, 255, 255]],
     }
-    with patch("routers.admin.colormaps.register_colormap") as mock_reg:
+    with patch("app.routers.admin.colormaps.register_colormap") as mock_reg:
         response = client.post("/admin/colormaps", json=payload, headers=_HEADERS)
     assert response.status_code == 201
     mock_reg.assert_called_once()
@@ -59,7 +59,7 @@ def test_add_ramp_colormap_mode_defaults_to_ramp():
         "name": "implicit_ramp",
         "entries": ["#000000", "#ffffff"],
     }
-    with patch("routers.admin.colormaps.register_colormap") as mock_reg:
+    with patch("app.routers.admin.colormaps.register_colormap") as mock_reg:
         response = client.post("/admin/colormaps", json=payload, headers=_HEADERS)
     assert response.status_code == 201
     _, lut, mode = mock_reg.call_args.args
@@ -73,7 +73,7 @@ def test_add_categorical_colormap():
         "mode": "categorical",
         "entries": {"1": "#ffff00", "2": "#0000ff", "3": "#ff0000", "4": "#000000"},
     }
-    with patch("routers.admin.colormaps.register_colormap") as mock_reg:
+    with patch("app.routers.admin.colormaps.register_colormap") as mock_reg:
         response = client.post("/admin/colormaps", json=payload, headers=_HEADERS)
     assert response.status_code == 201
     assert response.json() == {"name": "land_cover"}
@@ -88,7 +88,7 @@ def test_add_categorical_colormap_rgba_values():
         "mode": "categorical",
         "entries": {"1": [255, 255, 0, 255], "2": [0, 0, 255, 255]},
     }
-    with patch("routers.admin.colormaps.register_colormap") as mock_reg:
+    with patch("app.routers.admin.colormaps.register_colormap") as mock_reg:
         response = client.post("/admin/colormaps", json=payload, headers=_HEADERS)
     assert response.status_code == 201
     mock_reg.assert_called_once()
@@ -106,7 +106,7 @@ def test_add_colormap_duplicate_returns_409():
         "entries": ["#000000", "#ffffff"],
     }
     with patch(
-        "routers.admin.colormaps.register_colormap", side_effect=ValueError("already exists")
+        "app.routers.admin.colormaps.register_colormap", side_effect=ValueError("already exists")
     ):
         response = client.post("/admin/colormaps", json=payload, headers=_HEADERS)
     assert response.status_code == 409
@@ -164,14 +164,14 @@ def test_add_colormap_dict_entries_with_ramp_mode():
 
 
 def test_delete_colormap():
-    with patch("routers.admin.colormaps.remove_colormap") as mock_rem:
+    with patch("app.routers.admin.colormaps.remove_colormap") as mock_rem:
         response = client.delete("/admin/colormaps/imos_sst", headers=_HEADERS)
     assert response.status_code == 204
     mock_rem.assert_called_once_with("imos_sst")
 
 
 def test_delete_colormap_not_found():
-    with patch("routers.admin.colormaps.remove_colormap", side_effect=KeyError("imos_sst")):
+    with patch("app.routers.admin.colormaps.remove_colormap", side_effect=KeyError("imos_sst")):
         response = client.delete("/admin/colormaps/imos_sst", headers=_HEADERS)
     assert response.status_code == 404
 
