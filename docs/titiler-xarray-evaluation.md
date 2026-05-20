@@ -50,4 +50,4 @@ This project's LOD system derives a pyramid of chunk grids from the native data 
 
 titiler.xarray is designed for standard map visualisation — colourmap applied on the server, tiles served into a Mercator map. This project is a data tile server for a custom WebGL visualisation system where the GPU handles projection, data decoding, and colour mapping client-side. The two approaches are architecturally incompatible on every axis that matters: tile scheme, PNG encoding, coordinate system, and API contract.
 
-The project uses titiler as a FastAPI foundation (routing, OpenAPI) but the tile-serving logic is intentionally custom.
+The project is built directly on FastAPI (not titiler) and uses `rio_tiler` for the Web Mercator visual-tile path. The tile-serving logic is intentionally custom.
