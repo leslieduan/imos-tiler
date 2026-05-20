@@ -342,7 +342,7 @@ def test_delete_disk_cache_removes_files_and_dirs(cache_root):
     r = client.delete("/admin/cache/disk", headers=_HEADERS)
     assert r.status_code == 200
     body = r.json()
-    assert body["cleared"]["disk"] == {"files": 2, "directories": 1}
+    assert body == {"files": 2, "directories": 1}
     assert not d.exists()
     assert cache_root.exists()  # base dir preserved
 
@@ -351,10 +351,10 @@ def test_delete_disk_cache_disabled_returns_zeros(monkeypatch):
     monkeypatch.setattr(disk_cache, "DISK_CACHE_PATH", None)
     r = client.delete("/admin/cache/disk", headers=_HEADERS)
     assert r.status_code == 200
-    assert r.json()["cleared"]["disk"] == {"files": 0, "directories": 0}
+    assert r.json() == {"files": 0, "directories": 0}
 
 
 def test_delete_disk_cache_empty_cache_returns_zeros(cache_root):
     r = client.delete("/admin/cache/disk", headers=_HEADERS)
     assert r.status_code == 200
-    assert r.json()["cleared"]["disk"] == {"files": 0, "directories": 0}
+    assert r.json() == {"files": 0, "directories": 0}
