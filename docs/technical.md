@@ -156,7 +156,7 @@ S3 cold   → load_slice (S3 .compute(), ~2s)  → _to_scalar_parts → XarrayRe
 ## 4. File layout
 
 ```
-titiler-project/
+imos-tiler/
   main.py                        ← mounts all routers, CORS middleware, lifespan startup
   constants.py                   ← Product dataclass + LOD algorithm + LODConfig (server-shader contract)
   products.json                  ← persisted product registrations (runtime, gitignored; local-dev default)

@@ -66,14 +66,14 @@ docker buildx version
 # Create /app directory and clone
 sudo mkdir -p /app
 sudo chown ec2-user:ec2-user /app
-git clone https://github.com/your-username/titiler-project.git /app/titiler-project
-cd /app/titiler-project
+git clone https://github.com/your-username/imos-tiler.git /app/imos-tiler
+cd /app/imos-tiler
 ```
 
 > If the repo is private, use a [GitHub personal access token](https://github.com/settings/tokens):
 >
 > ```bash
-> git clone https://your-token@github.com/your-username/titiler-project.git /app/titiler-project
+> git clone https://your-token@github.com/your-username/imos-tiler.git /app/imos-tiler
 > ```
 
 ---
@@ -85,8 +85,8 @@ On first start the container automatically creates `data/products.json` (empty `
 To start with the default products already registered instead of an empty product list:
 
 ```bash
-mkdir -p /app/titiler-project/data
-cat > /app/titiler-project/data/products.json << 'EOF'
+mkdir -p /app/imos-tiler/data
+cat > /app/imos-tiler/data/products.json << 'EOF'
 [
   {"id":"sea_level_anomaly","source_path":"s3://aodn-cloud-optimised/model_sea_level_anomaly_gridded_realtime.zarr/","variable":"GSLA","chunk_px":[240,192],"padding":1},
   {"id":"ocean_current","source_path":"s3://aodn-cloud-optimised/model_sea_level_anomaly_gridded_realtime.zarr/","variable":["UCUR","VCUR"],"chunk_px":[240,192],"padding":1},
@@ -102,7 +102,7 @@ EOF
 The Zarr stores are on a public S3 bucket so no AWS credentials are needed. All variables below have working defaults — only `ADMIN_API_KEY` is required.
 
 ```bash
-cat > /app/titiler-project/.env << 'EOF'
+cat > /app/imos-tiler/.env << 'EOF'
 ADMIN_API_KEY=titiler_imos_admin
 
 # Timezone used to convert UTC store timestamps to local dates for the manifest and tile endpoints.
@@ -144,7 +144,7 @@ EOF
 ## Step 7 — Build and Start
 
 ```bash
-cd /app/titiler-project
+cd /app/imos-tiler
 docker compose up -d --build
 ```
 
@@ -175,7 +175,7 @@ curl http://<your-ec2-public-ip>/data_tiles/products
 ## Step 9 — Future Updates (re-deploy)
 
 ```bash
-cd /app/titiler-project
+cd /app/imos-tiler
 git pull
 docker compose up -d --build
 ```
@@ -192,6 +192,6 @@ Both `data/` (products, colormaps) and `slice_cache/` are preserved across redep
 | Stop                      | `docker compose down`                       |
 | Restart                   | `docker compose restart`                    |
 | Rebuild after code change | `docker compose up -d --build`              |
-| Check disk cache size     | `du -sh /app/titiler-project/slice_cache`   |
-| Clear disk cache          | `rm -rf /app/titiler-project/slice_cache/*` |
+| Check disk cache size     | `du -sh /app/imos-tiler/slice_cache`   |
+| Clear disk cache          | `rm -rf /app/imos-tiler/slice_cache/*` |
 | Check disk usage          | `df -h`                                     |

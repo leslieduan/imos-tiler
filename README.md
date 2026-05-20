@@ -1,4 +1,4 @@
-# titiler-project
+# imos-tiler
 
 On-demand tile server for IMOS ocean data products. **Scope: gridded data stored as Zarr on S3 only**.  Tiles are generated in real time without pre-rendering. A three-tier cache — processed grids (in-memory LRU) → slice cache (in-memory LRU) → slice files (disk) — absorbs cold S3 reads: disk-warm slices serve in ~30ms vs ~2s from S3. Products are managed at runtime via the admin API (or pre-populated in `products.json` before startup) — no redeploy required.
 
