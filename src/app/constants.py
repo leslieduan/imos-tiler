@@ -1,5 +1,4 @@
 import math
-import os
 from dataclasses import dataclass, field
 
 # Applied in loaders to normalise coordinate names across all products.
@@ -32,8 +31,9 @@ LOD = LODConfig()
 PADDING = 1
 CHUNK_PX = (240, 192)
 
-PRODUCTS_CONFIG_PATH = os.environ.get("PRODUCTS_CONFIG_PATH", "products.json")
-COLORMAPS_CONFIG_PATH = os.environ.get("COLORMAPS_CONFIG_PATH", "colormaps.json")
+PRODUCTS_CONFIG_PATH = "data/products.json"
+COLORMAPS_CONFIG_PATH = "data/colormaps.json"
+DISK_CACHE_PATH = "slice_cache"
 
 # Bump when anything changes that would make the server render different bytes for an
 # existing URL: renderer code (colormap interpolation, PNG encoder, projection algorithm,

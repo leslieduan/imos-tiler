@@ -3,7 +3,6 @@
 Mocks load_slice / get_available_dates so tests don't touch any real Zarr store.
 """
 
-import os
 from unittest.mock import patch
 
 import lz4.frame
@@ -17,7 +16,7 @@ from app.constants import Product
 
 @pytest.fixture
 def cache_root(tmp_path, monkeypatch):
-    monkeypatch.setenv("DISK_CACHE_PATH", str(tmp_path))
+    monkeypatch.setattr(disk_cache, "DISK_CACHE_PATH", str(tmp_path))
     yield tmp_path
 
 
@@ -38,7 +37,7 @@ def _product(pid="p1", source="s3://bucket/x.zarr", variable="v"):
 
 
 def test_disk_cache_path_returns_none_when_disabled(monkeypatch):
-    monkeypatch.delenv("DISK_CACHE_PATH", raising=False)
+    monkeypatch.setattr(disk_cache, "DISK_CACHE_PATH", None)
     assert disk_cache.disk_cache_path("s3://x/y.zarr", "2024-01-01", ["v"]) is None
 
 
@@ -51,15 +50,12 @@ def test_disk_cache_path_encodes_url_into_dirname(cache_root):
     assert p.name == "2024-01-01.pkl.lz4"
 
 
-def test_disk_cache_path_sorts_variables_for_stability():
+def test_disk_cache_path_sorts_variables_for_stability(monkeypatch):
     """Same variable set must produce same path regardless of order — cache keys."""
-    os.environ["DISK_CACHE_PATH"] = "/tmp/x"
-    try:
-        a = disk_cache.disk_cache_path("s3://b/x.zarr", "d", ["u", "v"])
-        b = disk_cache.disk_cache_path("s3://b/x.zarr", "d", ["v", "u"])
-        assert a == b
-    finally:
-        del os.environ["DISK_CACHE_PATH"]
+    monkeypatch.setattr(disk_cache, "DISK_CACHE_PATH", "/tmp/x")
+    a = disk_cache.disk_cache_path("s3://b/x.zarr", "d", ["u", "v"])
+    b = disk_cache.disk_cache_path("s3://b/x.zarr", "d", ["v", "u"])
+    assert a == b
 
 
 def test_disk_cache_path_different_buckets_dont_collide(cache_root):
@@ -138,8 +134,7 @@ def test_evict_pressure_removes_smallest_first(cache_root, monkeypatch):
 
 
 def test_evict_pressure_disabled_when_env_unset(monkeypatch):
-    monkeypatch.delenv("DISK_CACHE_PATH", raising=False)
-    # Should silently return without crashing — no DISK_CACHE_PATH means disabled.
+    monkeypatch.setattr(disk_cache, "DISK_CACHE_PATH", None)
     disk_cache._evict_if_over_threshold()
 
 
@@ -149,8 +144,7 @@ def test_evict_pressure_disabled_when_env_unset(monkeypatch):
 
 
 def test_prewarm_disabled_when_env_unset(monkeypatch):
-    monkeypatch.delenv("DISK_CACHE_PATH", raising=False)
-    # Should NOT call get_available_dates because the whole function early-returns.
+    monkeypatch.setattr(disk_cache, "DISK_CACHE_PATH", None)
     with patch("app.services.loader.get_available_dates") as get_dates:
         disk_cache.prewarm_disk_slices([_product()])
     get_dates.assert_not_called()
@@ -273,8 +267,7 @@ def test_evict_orphans_drops_unknown_product_dirs(cache_root):
 
 
 def test_evict_stale_disabled_when_env_unset(monkeypatch):
-    monkeypatch.delenv("DISK_CACHE_PATH", raising=False)
-    # No crash and no calls to get_available_dates.
+    monkeypatch.setattr(disk_cache, "DISK_CACHE_PATH", None)
     with patch("app.services.loader.get_available_dates") as gad:
         disk_cache.evict_stale_and_orphans([_product()])
     gad.assert_not_called()
@@ -305,7 +298,7 @@ def test_refresh_adds_new_dates(cache_root):
 
 
 def test_refresh_disabled_when_env_unset(monkeypatch):
-    monkeypatch.delenv("DISK_CACHE_PATH", raising=False)
+    monkeypatch.setattr(disk_cache, "DISK_CACHE_PATH", None)
     with patch("app.services.loader.get_available_dates") as gad:
         disk_cache.refresh_disk_cache([_product()])
     gad.assert_not_called()
@@ -328,8 +321,7 @@ def test_evict_product_dir_removes_whole_dir(cache_root):
 
 
 def test_evict_product_dir_when_disabled_is_noop(monkeypatch):
-    monkeypatch.delenv("DISK_CACHE_PATH", raising=False)
-    # Should not crash even though no path is configured.
+    monkeypatch.setattr(disk_cache, "DISK_CACHE_PATH", None)
     disk_cache.evict_product_dir(_product())
 
 
@@ -344,7 +336,7 @@ def test_evict_product_dir_when_missing_is_noop(cache_root):
 
 
 def test_clear_disk_cache_disabled_returns_zeros(monkeypatch):
-    monkeypatch.delenv("DISK_CACHE_PATH", raising=False)
+    monkeypatch.setattr(disk_cache, "DISK_CACHE_PATH", None)
     assert disk_cache.clear_disk_cache() == {"files": 0, "directories": 0}
 
 

@@ -193,11 +193,9 @@ imos-tiler/
     docker-entrypoint.sh
     nginx.conf
   tests/
-  products.json                  ← persisted product registrations (runtime, gitignored; local-dev default)
-  colormaps.json                 ← persisted custom colormap registrations (runtime, gitignored; local-dev default)
   data/
-    products.json                ← Docker: mounted volume, set via PRODUCTS_CONFIG_PATH=data/products.json
-    colormaps.json               ← Docker: mounted volume, set via COLORMAPS_CONFIG_PATH=data/colormaps.json
+    products.json                ← persisted product registrations (runtime, gitignored; mounted volume in Docker)
+    colormaps.json               ← persisted custom colormap registrations (runtime, gitignored; mounted volume in Docker)
   docs/
     technical.md                 ← this file
     cache_analysis.md            ← cache design decision record (Redis vs EFS vs EBS vs ephemeral)
@@ -206,7 +204,13 @@ imos-tiler/
     security.md                  ← admin endpoint protection (key + nginx + EC2 security group)
 ```
 
-`products.json` and `colormaps.json` default to the project root in local dev. In Docker (`docker-compose.yml`), they are overridden to `data/products.json` and `data/colormaps.json`, backed by a `./data` host volume. The L3 disk-cache directory is set via `DISK_CACHE_PATH` (default: unset in local dev; `/app/slice_cache` in Docker, backed by a `./slice_cache` host volume).
+All three runtime paths are hardcoded constants in `src/app/constants.py` — not env vars:
+
+| Constant | Value | Notes |
+| -------- | ----- | ----- |
+| `PRODUCTS_CONFIG_PATH` | `data/products.json` | Auto-created by `docker-entrypoint.sh` if absent; `./data` bind-mounted in Docker. |
+| `COLORMAPS_CONFIG_PATH` | `data/colormaps.json` | Same as above. |
+| `DISK_CACHE_PATH` | `slice_cache` | Relative to working directory (`/app` in Docker); `./slice_cache` bind-mounted in Docker. |
 
 ---
 
@@ -803,7 +807,7 @@ Per-product compression ratios, lz4-vs-zstd-vs-snappy measurements, and the disk
 
 File layout: `{DISK_CACHE_PATH}/{store_name}-{var_str}/{date}.pkl.lz4`.
 
-Enabled by setting `DISK_CACHE_PATH` (e.g. `/app/slice_cache`). If unset, disk caching is disabled and all cold reads go directly to S3.
+Always enabled; path is the hardcoded constant `DISK_CACHE_PATH = "slice_cache"` (relative to the working directory — resolves to `/app/slice_cache` in Docker).
 
 **Eviction:**
 
@@ -829,7 +833,7 @@ The first thread to miss the cache creates the Future and does the work; all oth
 
 A single read-only admin endpoint surfaces everything a production debugger usually wants to know about the cache. It returns five sections:
 
-- **`disk`** — global L3 footprint: total bytes, configured limit (`DISK_CACHE_LIMIT_GB`), eviction threshold, utilisation %, and an `over_eviction_threshold` flag so pressure is visible at a glance. `{"enabled": false}` when `DISK_CACHE_PATH` is unset.
+- **`disk`** — global L3 footprint: total bytes, configured limit (`DISK_CACHE_LIMIT_GB`), eviction threshold, utilisation %, and an `over_eviction_threshold` flag so pressure is visible at a glance.
 - **`disk_writes`** — live state of the two background disk writers: `prewarm.running` (boolean) and `refresh` (status `never_run`/`running`/`ok`/`error`, start + completion timestamps, last error message, configured interval). Useful for spotting a stalled refresh or a prewarm still in progress after startup.
 - **`in_flight`** — instantaneous count of computations currently mid-flight in each Memoizer (`current`), high-water mark since process start (`peak`), and total computes started since startup (`total_computes`). Slice and processed-grid memoizers reported separately. **Not** a rolling window — values reflect the moment of the request and drop to 0 when nothing is running.
 - **`memory_cache`** — current size and max for the slice and processed-grid LRUs.
@@ -851,7 +855,7 @@ Deletes every `.pkl.lz4` slice file from the L3 disk cache directory and returns
 
 If `prewarm_disk_slices` or `refresh_disk_cache` is currently running the endpoint returns **409 Conflict** immediately without touching the disk — both operations write slice files, so clearing during either is pointless. Wait for the operation to complete before retrying.
 
-Implemented in `services/disk_cache.clear_disk_cache` — iterates the per-product subdirectories under `DISK_CACHE_PATH` and removes each with `shutil.rmtree`, leaving the base directory itself intact. The filesystem walk runs in a thread via `asyncio.to_thread` so the event loop stays free. Returns 0 (no-op) if `DISK_CACHE_PATH` is unset. In-flight computes are not cancelled — they may re-populate the disk cache on completion.
+Implemented in `services/disk_cache.clear_disk_cache` — iterates the per-product subdirectories under `DISK_CACHE_PATH` and removes each with `shutil.rmtree`, leaving the base directory itself intact. The filesystem walk runs in a thread via `asyncio.to_thread` so the event loop stays free. In-flight computes are not cancelled — they may re-populate the disk cache on completion.
 
 Use cases: forcing a full cold repopulation from S3 (e.g. after the underlying Zarr data has been rewritten), recovering disk space during debugging, or resetting a corrupted cache state without restarting the server. After a flush, the next request for any date will fall through to S3 (~2 s) and the disk cache will be repopulated gradually — or trigger `prewarm_disk_slices` via a server restart to repopulate in bulk.
 
@@ -1191,7 +1195,7 @@ Concurrency pressure on the origin is therefore much lower than the theoretical 
 | **Bootstrap** — write `products.json` before `docker-compose up` | Fresh deployment, infra-as-code, or any reproducible bootstrap. | `load_products()` reads the file into `PRODUCTS` during lifespan startup; `_startup_cache_sync` then prewarms disk for every product. |
 | **Admin API** — `POST /admin/products` to the running server     | Adding or removing products without a restart in an already-deployed system.       | The admin handler appends to `products.json`, reloads `PRODUCTS`, and fires a background `prewarm_disk_slices` for the new product. |
 
-Both flows produce identical in-memory state. The bootstrap flow skips the admin-key + network round-trip but requires you to have file-system access to `data/products.json` (the path Docker bind-mounts via `PRODUCTS_CONFIG_PATH=data/products.json`). The admin-API flow works once the server is running and is the only option in environments where you cannot touch the host filesystem.
+Both flows produce identical in-memory state. The bootstrap flow skips the admin-key + network round-trip but requires file-system access to `data/products.json`. The admin-API flow works once the server is running and is the only option in environments where you cannot touch the host filesystem.
 
 ### 13.1 Bootstrap flow — pre-populate `products.json`
 
@@ -1472,7 +1476,7 @@ This codebase holds configuration in three places. Both env vars and code consta
 
 | Layer                                                | What lives here                                                                                              | Change discipline                                                               | Examples                                                                                           |
 | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| **Env vars** (this section)                          | Operational knobs — perf, resource limits, paths, secrets. Do **not** affect wire format or shader contract. | Rotate freely at deploy; the value itself doesn't need code review.             | `THREAD_POOL_SIZE`, `SLICE_CACHE_SIZE`, `CACHE_DAYS`, `DISK_CACHE_PATH`, `ADMIN_API_KEY`           |
+| **Env vars** (this section)                          | Operational knobs — perf, resource limits, secrets. Do **not** affect wire format or shader contract. | Rotate freely at deploy; the value itself doesn't need code review.             | `THREAD_POOL_SIZE`, `SLICE_CACHE_SIZE`, `CACHE_DAYS`, `ADMIN_API_KEY`           |
 | **Code constants** (`constants.py`)                  | Wire / shader contracts — values that must stay in lockstep with the frontend or with the data encoding.     | Change via PR so frontend and server stay in sync; the diff is the audit trail. | `LOD.max_lods`, `LOD.min_coarsest`, `LOD.zoom_thresholds`, `CHUNK_PX`, `PADDING` (global defaults) |
 | **Per-product fields** (`Product` dataclass + admin) | Data characteristics that legitimately vary across products.                                                 | Set per product via `POST /admin/products`; no code change needed.              | `chunk_px`, `padding`, `variable`, `source_path`                                                   |
 
@@ -1490,8 +1494,6 @@ A wrong-layer choice has real costs: making `max_lods` an env var would let an o
 | ----------------------- | ------------------ | ------------------------------------------------------------------------------------------ |
 | `TILE_TIMEZONE`         | `Australia/Sydney` | IANA timezone for date conversion. See [§9](#9-date-timezone-and-coordinate-normalisation). |
 | `ADMIN_API_KEY`         | _(required)_       | Secret value compared against the `X-Admin-Key` header on every `/admin` request.          |
-| `PRODUCTS_CONFIG_PATH`  | `products.json`    | Path to the persisted product registry. Docker overrides to `data/products.json`.          |
-| `COLORMAPS_CONFIG_PATH` | `colormaps.json`   | Path to the persisted custom-colormap registry. Docker overrides to `data/colormaps.json`. |
 
 ### 15.3 Threading and cache sizing
 
@@ -1506,7 +1508,6 @@ A wrong-layer choice has real costs: making `max_lods` an env var would let an o
 
 | Variable                         | Default   | Description                                                                               |
 | -------------------------------- | --------- | ----------------------------------------------------------------------------------------- |
-| `DISK_CACHE_PATH`                | _(unset)_ | Absolute path for the disk cache. Disk caching is disabled if unset.                      |
 | `DISK_CACHE_LIMIT_GB`            | `20`      | Maximum total disk usage before pressure-based eviction runs.                             |
 | `DISK_EVICTION_THRESHOLD`        | `0.85`    | Fraction of limit at which pressure eviction triggers (0.0–1.0).                          |
 | `CACHE_DAYS`                     | `30`      | How many recent dates per product to keep on disk; dates outside this window are evicted. |
@@ -1581,7 +1582,7 @@ A clean startup produces these `message` values in order (all `INFO` unless note
 Thread pool size set            thread_pool_size=100
 Loaded products from disk       count=3, path=data/products.json
 Loaded colormaps from disk      count=2, path=data/colormaps.json
-Disk cache enabled              path=/cache, limit_gb=20, days=30, workers=8   ← or WARNING "Disk cache disabled: DISK_CACHE_PATH not set"
+Disk cache enabled              path=slice_cache, limit_gb=20, days=30, workers=8
 Memory cache configured         slice_cache_size=10, processed_cache_size=50, store_ttl_seconds=600
 Store opened                    store_url=s3://..., date_count=365             ← one per product, from prewarm threads
 Cache refresh interval set      interval_seconds=14400
@@ -1596,7 +1597,6 @@ Lines to watch for in production. Filter on `message` for the event name; the li
 
 | Level | `message` | Key fields | What it means |
 |---|---|---|---|
-| `WARNING` | `Disk cache disabled: DISK_CACHE_PATH not set` | — | L3 cache is off — all slices go cold to S3. Set `DISK_CACHE_PATH`. |
 | `WARNING` | `Slow S3 fetch` | `store_url`, `date`, `seconds` | A cold `.compute()` exceeded `SLOW_FETCH_THRESHOLD_SECONDS`. S3 is slow for this key — check S3 region, VPC endpoints, or increase `DISK_CACHE_PATH` capacity so the date gets prewarmed. |
 | `WARNING` | `Disk cache add failed` | `product_id`, `date` | Refresh cycle couldn't write a slice — check disk space and `DISK_CACHE_LIMIT_GB`. |
 | `WARNING` | `Admin auth rejected: invalid key` | `client`, `path` | Failed admin authentication attempt. Unexpected `client` IPs warrant investigation. |

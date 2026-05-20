@@ -59,7 +59,7 @@ def reset_prewarm_running():
 
 @pytest.fixture
 def cache_root(tmp_path, monkeypatch):
-    monkeypatch.setenv("DISK_CACHE_PATH", str(tmp_path))
+    monkeypatch.setattr(disk_cache, "DISK_CACHE_PATH", str(tmp_path))
     yield tmp_path
 
 
@@ -84,7 +84,6 @@ def test_get_cache_wrong_admin_key_returns_403():
 
 
 def test_get_cache_returns_top_level_keys(monkeypatch):
-    monkeypatch.delenv("DISK_CACHE_PATH", raising=False)
     r = client.get("/admin/cache", headers=_HEADERS)
     assert r.status_code == 200
     body = r.json()
@@ -92,7 +91,7 @@ def test_get_cache_returns_top_level_keys(monkeypatch):
 
 
 def test_disk_disabled_when_env_unset(monkeypatch):
-    monkeypatch.delenv("DISK_CACHE_PATH", raising=False)
+    monkeypatch.setattr(disk_cache, "DISK_CACHE_PATH", None)
     body = client.get("/admin/cache", headers=_HEADERS).json()
     assert body["disk"] == {"enabled": False}
 
@@ -349,7 +348,7 @@ def test_delete_disk_cache_removes_files_and_dirs(cache_root):
 
 
 def test_delete_disk_cache_disabled_returns_zeros(monkeypatch):
-    monkeypatch.delenv("DISK_CACHE_PATH", raising=False)
+    monkeypatch.setattr(disk_cache, "DISK_CACHE_PATH", None)
     r = client.delete("/admin/cache/disk", headers=_HEADERS)
     assert r.status_code == 200
     assert r.json()["cleared"]["disk"] == {"files": 0, "directories": 0}

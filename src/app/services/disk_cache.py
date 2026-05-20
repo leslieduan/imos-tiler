@@ -31,7 +31,7 @@ from pathlib import Path
 import lz4.frame
 import xarray as xr
 
-from app.constants import Product
+from app.constants import DISK_CACHE_PATH, Product
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +65,7 @@ def is_refresh_running() -> bool:
 
 def disk_cache_path(store_url: str, date: str, variables: list[str]) -> Path | None:
     """Return the L3 cache path for a slice, or None if disk caching is disabled."""
-    base = os.environ.get("DISK_CACHE_PATH")
+    base = DISK_CACHE_PATH
     if not base:
         return None
     # Encode the full URL into a single directory name so two stores with the same
@@ -99,7 +99,7 @@ _evict_lock = threading.Lock()
 
 
 def _evict_if_over_threshold() -> None:
-    base = os.environ.get("DISK_CACHE_PATH")
+    base = DISK_CACHE_PATH
     if not base:
         return
     limit_bytes = int(os.environ.get("DISK_CACHE_LIMIT_GB", 20)) * 1024**3
@@ -176,7 +176,7 @@ def prewarm_disk_slices(products: list[Product]) -> None:
     (default 8). Cold S3 reads for different keys run concurrently; the slice
     Memoizer deduplicates any accidental overlap on the same key.
     """
-    if not os.environ.get("DISK_CACHE_PATH"):
+    if not DISK_CACHE_PATH:
         return
 
     from app.services.loader import get_available_dates
@@ -236,7 +236,7 @@ def evict_stale_and_orphans(products: list[Product]) -> None:
     `products` is treated as orphaned and removed — passing a single-product list (as
     admin POST does) would wipe every other product's cache.
     """
-    if not os.environ.get("DISK_CACHE_PATH"):
+    if not DISK_CACHE_PATH:
         return
     _evict_if_over_threshold()
 
@@ -275,7 +275,7 @@ def evict_stale_and_orphans(products: list[Product]) -> None:
                 )
 
     # Remove cache dirs for products no longer registered
-    base = os.environ.get("DISK_CACHE_PATH")
+    base = DISK_CACHE_PATH
     base_path = Path(base) if base else None
     if base_path and base_path.exists():
         known_dirs = set()
@@ -305,7 +305,7 @@ def refresh_disk_cache(products: list[Product]) -> None:
     Callers MUST pass the full set of currently registered products — see
     [[evict_stale_and_orphans]] for why.
     """
-    if not os.environ.get("DISK_CACHE_PATH"):
+    if not DISK_CACHE_PATH:
         return
 
     with _refresh_status_lock:
@@ -422,7 +422,7 @@ def collect_disk_stats(products: list[Product]) -> dict:
     caching is disabled, ``global`` is ``{"enabled": False}`` and every product
     gets the zero stats.
     """
-    base = os.environ.get("DISK_CACHE_PATH")
+    base = DISK_CACHE_PATH
     if not base:
         return {
             "global": {"enabled": False},
@@ -502,7 +502,7 @@ def clear_disk_cache() -> dict:
 
     Returns ``{"files": N, "directories": M}`` — or zeros when disk caching is disabled.
     """
-    base = os.environ.get("DISK_CACHE_PATH")
+    base = DISK_CACHE_PATH
     if not base:
         return {"files": 0, "directories": 0}
     base_path = Path(base)

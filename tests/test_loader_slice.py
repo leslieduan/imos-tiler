@@ -20,7 +20,7 @@ from app.services.store_registry import store_registry
 @pytest.fixture(autouse=True)
 def isolate_caches(monkeypatch, tmp_path):
     """Clear in-memory caches and isolate disk cache to tmp before/after each test."""
-    monkeypatch.setenv("DISK_CACHE_PATH", str(tmp_path))
+    monkeypatch.setattr(disk_cache, "DISK_CACHE_PATH", str(tmp_path))
     store_registry.clear()
     loader._slice_cache.clear()
     loader._slice_memo._inflight.clear()

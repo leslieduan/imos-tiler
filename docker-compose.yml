@@ -12,8 +12,6 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - ADMIN_API_KEY=${ADMIN_API_KEY}
-      - PRODUCTS_CONFIG_PATH=data/products.json
-      - COLORMAPS_CONFIG_PATH=data/colormaps.json
       - TILE_TIMEZONE=${TILE_TIMEZONE:-Australia/Sydney}
       - STORE_TTL_SECONDS=${STORE_TTL_SECONDS:-600}
       # S3_ANON=true (default) uses anonymous access for s3:// URLs — correct for IMOS's
@@ -23,7 +21,6 @@ services:
       - THREAD_POOL_SIZE=${THREAD_POOL_SIZE:-100}
       - SLICE_CACHE_SIZE=${SLICE_CACHE_SIZE:-10}
       - PROCESSED_CACHE_SIZE=${PROCESSED_CACHE_SIZE:-50}
-      - DISK_CACHE_PATH=/app/slice_cache
       - DISK_CACHE_LIMIT_GB=${DISK_CACHE_LIMIT_GB:-20}
       - DISK_EVICTION_THRESHOLD=${DISK_EVICTION_THRESHOLD:-0.85}
       - CACHE_DAYS=${CACHE_DAYS:-30}
