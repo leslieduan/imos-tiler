@@ -144,15 +144,17 @@ def _evict_if_over_threshold() -> None:
 
 
 def _prewarm_one(product: Product, date: str, variables: list[str]) -> str:
-    # Local import: load_slice lives in services.loader, which depends on this
-    # module — keep the cycle out of import time.
-    from app.services.loader import load_slice
+    # Local import: load_slice_uncached lives in services.loader, which depends on
+    # this module — keep the cycle out of import time.
+    from app.services.loader import load_slice_uncached
 
     try:
         cache_path = disk_cache_path(product.source_path, date, variables)
         if cache_path is not None and cache_path.exists():
             return "skipped"
-        ds = load_slice(product.source_path, date, variables)
+        # Uncached: prewarm processes many dates and would otherwise evict live-request
+        # entries from the 10-slot L2 LRU.
+        ds = load_slice_uncached(product.source_path, date, variables)
         if cache_path is not None:
             write_slice_to_disk(cache_path, ds)
             logger.debug("Disk prewarm written", extra={"product_id": product.id, "date": date})
@@ -316,7 +318,7 @@ def refresh_disk_cache(products: list[Product]) -> None:
     try:
         evict_stale_and_orphans(products)
 
-        from app.services.loader import get_available_dates, load_slice
+        from app.services.loader import get_available_dates, load_slice_uncached
 
         added = 0
         failed = 0
@@ -341,7 +343,7 @@ def refresh_disk_cache(products: list[Product]) -> None:
 
             for date in sorted(target_dates - cached_dates):
                 try:
-                    ds = load_slice(product.source_path, date, variables)
+                    ds = load_slice_uncached(product.source_path, date, variables)
                     p = disk_cache_path(product.source_path, date, variables)
                     if p is not None:
                         write_slice_to_disk(p, ds)
