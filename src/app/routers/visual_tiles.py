@@ -4,19 +4,19 @@ from fastapi import APIRouter, HTTPException, Path, Query
 from fastapi.openapi.models import Example
 from fastapi.responses import JSONResponse, Response
 
-from services.colormap_config import is_categorical, list_colormaps
-from services.colormap_lookup import resolve_colormap
-from services.legend_renderer import render_legend
-from services.loader import get_available_dates, load_slice_uncached
-from services.store_registry import get_store
-from services.visual_renderer import (
+from app.services.colormap_config import is_categorical, list_colormaps
+from app.services.colormap_lookup import resolve_colormap
+from app.services.legend_renderer import render_legend
+from app.services.loader import get_available_dates, load_slice_uncached
+from app.services.store_registry import get_store
+from app.services.visual_renderer import (
     _bbox_to_wgs84,
     render_bbox,
     render_bbox_animation,
     render_tile,
 )
-from utils.image import AnimatedFormat, ImageFormat, animated_media_type, media_type
-from utils.memoizer import Memoizer
+from app.utils.image import AnimatedFormat, ImageFormat, animated_media_type, media_type
+from app.utils.memoizer import Memoizer
 
 from .products import router as products_router
 from .shared import (

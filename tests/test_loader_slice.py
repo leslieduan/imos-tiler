@@ -10,10 +10,11 @@ import pandas as pd
 import pytest
 import xarray as xr
 
-from constants import Product
-from services import disk_cache, loader
-from services import store_registry as store_registry_module
-from services.store_registry import store_registry
+import app.services.disk_cache as disk_cache
+import app.services.loader as loader
+import app.services.store_registry as store_registry_module
+from app.constants import Product
+from app.services.store_registry import store_registry
 
 
 @pytest.fixture(autouse=True)

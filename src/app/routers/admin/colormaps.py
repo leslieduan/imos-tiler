@@ -6,8 +6,8 @@ from fastapi import APIRouter, HTTPException, Path
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from services.colormap_config import ColormapMode, register_colormap, remove_colormap
-from utils.colors import build_categorical_lut, interpolate_colormap, parse_color
+from app.services.colormap_config import ColormapMode, register_colormap, remove_colormap
+from app.utils.colors import build_categorical_lut, interpolate_colormap, parse_color
 
 logger = logging.getLogger(__name__)
 

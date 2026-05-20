@@ -2,7 +2,7 @@ import json
 import logging
 from pathlib import Path
 
-from constants import CHUNK_PX, PADDING, PRODUCTS, PRODUCTS_CONFIG_PATH, Product
+from app.constants import CHUNK_PX, PADDING, PRODUCTS, PRODUCTS_CONFIG_PATH, Product
 
 logger = logging.getLogger(__name__)
 

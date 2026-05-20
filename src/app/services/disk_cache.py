@@ -31,7 +31,7 @@ from pathlib import Path
 import lz4.frame
 import xarray as xr
 
-from constants import Product
+from app.constants import Product
 
 logger = logging.getLogger(__name__)
 
@@ -146,7 +146,7 @@ def _evict_if_over_threshold() -> None:
 def _prewarm_one(product: Product, date: str, variables: list[str]) -> str:
     # Local import: load_slice lives in services.loader, which depends on this
     # module — keep the cycle out of import time.
-    from services.loader import load_slice
+    from app.services.loader import load_slice
 
     try:
         cache_path = disk_cache_path(product.source_path, date, variables)
@@ -179,7 +179,7 @@ def prewarm_disk_slices(products: list[Product]) -> None:
     if not os.environ.get("DISK_CACHE_PATH"):
         return
 
-    from services.loader import get_available_dates
+    from app.services.loader import get_available_dates
 
     global _prewarm_running
     with _prewarm_lock:
@@ -240,7 +240,7 @@ def evict_stale_and_orphans(products: list[Product]) -> None:
         return
     _evict_if_over_threshold()
 
-    from services.loader import get_available_dates
+    from app.services.loader import get_available_dates
 
     stale = 0
     orphans = 0
@@ -316,7 +316,7 @@ def refresh_disk_cache(products: list[Product]) -> None:
     try:
         evict_stale_and_orphans(products)
 
-        from services.loader import get_available_dates, load_slice
+        from app.services.loader import get_available_dates, load_slice
 
         added = 0
         failed = 0

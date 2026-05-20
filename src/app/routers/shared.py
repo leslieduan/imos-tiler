@@ -5,8 +5,8 @@ from datetime import date as _Date
 from fastapi import HTTPException
 from fastapi.openapi.models import Example
 
-from constants import PRODUCTS, Product
-from services.loader import load_slice
+from app.constants import PRODUCTS, Product
+from app.services.loader import load_slice
 
 PRODUCT_EX: dict[str, Example] = {"default": Example(value="sea_level_anomaly")}
 DATE_EX: dict[str, Example] = {"default": Example(value="2024-02-24")}

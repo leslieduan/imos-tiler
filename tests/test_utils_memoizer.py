@@ -10,7 +10,7 @@ import time
 import pytest
 from cachetools import LRUCache
 
-from utils.memoizer import Memoizer
+from app.utils.memoizer import Memoizer
 
 
 def test_cache_hit_skips_factory():

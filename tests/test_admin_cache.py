@@ -5,9 +5,11 @@ from unittest.mock import patch
 import pytest
 from starlette.testclient import TestClient
 
-from constants import PRODUCTS, Product
-from main import app
-from services import data_renderer, disk_cache, loader
+import app.services.data_renderer as data_renderer
+import app.services.disk_cache as disk_cache
+import app.services.loader as loader
+from app.constants import PRODUCTS, Product
+from app.main import app
 
 client = TestClient(app, raise_server_exceptions=True)
 
@@ -203,8 +205,8 @@ def test_global_disk_stats_aggregate_across_products(cache_root, monkeypatch):
 def test_refresh_status_ok_after_successful_run(cache_root):
     p = PRODUCTS["sea_level_anomaly"]
     with (
-        patch("services.loader.get_available_dates", return_value=[]),
-        patch("services.loader.load_slice"),
+        patch("app.services.loader.get_available_dates", return_value=[]),
+        patch("app.services.loader.load_slice"),
     ):
         disk_cache.refresh_disk_cache([p])
 

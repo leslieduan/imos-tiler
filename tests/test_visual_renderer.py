@@ -12,8 +12,8 @@ import pytest
 import xarray as xr
 from PIL import Image
 
-from services import visual_renderer
-from utils.image import TILE_SIZE
+import app.services.visual_renderer as visual_renderer
+from app.utils.image import TILE_SIZE
 
 
 def _scalar_ds(

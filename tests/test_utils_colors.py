@@ -2,7 +2,7 @@
 
 import pytest
 
-from utils.colors import build_categorical_lut, hex_to_rgba, interpolate_colormap, parse_color
+from app.utils.colors import build_categorical_lut, hex_to_rgba, interpolate_colormap, parse_color
 
 
 def test_hex_to_rgba_6_char():

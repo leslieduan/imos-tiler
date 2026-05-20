@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from services import colormap_config
+import app.services.colormap_config as colormap_config
 
 
 @pytest.fixture

@@ -18,8 +18,8 @@ import time
 
 import xarray as xr
 
-from constants import COORD_NAMES
-from utils.dates import ts_to_local_date
+from app.constants import COORD_NAMES
+from app.utils.dates import ts_to_local_date
 
 logger = logging.getLogger(__name__)
 

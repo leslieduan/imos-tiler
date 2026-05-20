@@ -9,8 +9,8 @@ import json
 
 import pytest
 
-from constants import PRODUCTS, Product
-from services import product_config
+import app.services.product_config as product_config
+from app.constants import PRODUCTS, Product
 
 
 @pytest.fixture
@@ -120,7 +120,7 @@ def test_load_products_never_exposes_empty_state(isolated_products, monkeypatch)
     spy["b"] = product_config._from_dict(_entry("b", source="s3://bucket/y.zarr"))
 
     # Both module-level references must point to the spy so load_products mutates it.
-    monkeypatch.setattr("constants.PRODUCTS", spy)
+    monkeypatch.setattr("app.constants.PRODUCTS", spy)
     monkeypatch.setattr(product_config, "PRODUCTS", spy)
 
     # On-disk replaces both with 'c'.

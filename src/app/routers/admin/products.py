@@ -7,10 +7,10 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
-from constants import CHUNK_PX, PADDING, PRODUCTS, Product
-from services.disk_cache import prewarm_disk_slices
-from services.loader import evict_product_cache
-from services.product_config import register_product, remove_product
+from app.constants import CHUNK_PX, PADDING, PRODUCTS, Product
+from app.services.disk_cache import prewarm_disk_slices
+from app.services.loader import evict_product_cache
+from app.services.product_config import register_product, remove_product
 
 logger = logging.getLogger(__name__)
 
