@@ -44,7 +44,11 @@
 
 ## 1. Overview
 
-The server is a FastAPI application that produces on-demand PNG tiles for IMOS ocean data products held in Zarr stores on S3. It exposes **two independent tile pipelines** from the same underlying data:
+The server is a FastAPI application that produces on-demand PNG tiles for IMOS ocean data products held in Zarr stores on S3.
+
+**Scope.** This server serves **gridded data stored as Zarr** only. Every product is expected to be a Zarr store on S3 with a regular lat/lon grid (`time`, `lat`, `lon` dimensions, optionally with depth/variable axes). Non-gridded data (point observations, vessel tracks, swath/orbit data) and non-Zarr formats (NetCDF, HDF5, COG, GeoTIFF) are out of scope — the entire pipeline, from `load_slice` through the LOD algorithm to the WebGL atlas, assumes a regular gridded Zarr source. See [§2](#2-why-zarr) for *why* Zarr, and [`docs/netcdf-vs-zarr.md`](netcdf-vs-zarr.md) for the format-comparison data behind that choice.
+
+It exposes **two independent tile pipelines** from the same underlying data:
 
 | Pipeline        | Output CRS               | Coordinate convention                                        | Consumer                                             |
 | --------------- | ------------------------ | ------------------------------------------------------------ | ---------------------------------------------------- |
