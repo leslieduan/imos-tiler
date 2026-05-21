@@ -164,7 +164,7 @@ imos-tiler/
     routers/
       data_tiles.py              ← /data_tiles — raw value-encoded RGBA tiles for WebGL
       visual_tiles.py            ← /visual_tiles — colourised Web Mercator XYZ tiles + bbox + colormap listing/legend
-      products.py                ← shared: /products, /manifest, /{id}/{date}/point, /{id}/point (time series) — included by both tile routers
+      products.py                ← shared: /products, /manifest, /{id}/{date}/point — included by both tile routers
       shared.py                  ← shared router helpers (PRODUCT_EX/DATE_EX examples, get_product_or_404, load_slice_or_404)
       admin/                     ← /admin — product, colormap, and cache-state endpoints (key-protected, package)
         __init__.py              ← assembles admin_router and applies require_admin_key
@@ -321,7 +321,6 @@ The manifest (data-tile pipeline only) is the interface between the server's coo
 GET /{prefix}/products                                          → list all registered products
 GET /{prefix}/manifest?from=YYYY-MM-DD&to=YYYY-MM-DD             → available dates for all products
 GET /{prefix}/{product_id}/{date}/point?lat=&lon=                → variable value at one date
-GET /{prefix}/{product_id}/point?lat=&lon=&from=&to=             → variable values at a point across a date range (time series)
 ```
 
 `/manifest` parameters:
@@ -342,26 +341,7 @@ GET /{prefix}/{product_id}/point?lat=&lon=&from=&to=             → variable va
 
 **Performance**: dates are read from the `time` coordinate of each Zarr store — a 1-D array held in the store singleton. No spatial data chunks are touched. Filtering is an in-memory string comparison. Responses are sub-millisecond once the store is warm.
 
-**`/point` time-series variant** — the dateless form (`/{prefix}/{product_id}/point?lat=&lon=&from=&to=`) returns one entry per available date in `[from, to]`:
-
-```json
-{
-  "lat": -33.8, "lon": 151.2,
-  "series": [
-    { "date": "2024-01-01", "variables": { "GSLA": { "value": 0.12, "units": "m" } } },
-    { "date": "2024-01-02", "variables": { "GSLA": { "value": 0.14, "units": "m" } } }
-  ]
-}
-```
-
-`from`/`to` follow the same defaults as `/manifest` (3 months before today / unbounded). The handler is `async def` and fans the per-date `load_slice` calls out via `asyncio.gather(asyncio.to_thread(...))` so total latency is ~max(per-date) instead of the serial sum; concurrent identical requests still share one compute through the L2 slice memoizer. Empty range → `200` with `series: []` (not `404`).
-
-**Cache headers — revalidate, not immutable.** This endpoint emits `Cache-Control: public, max-age=300, must-revalidate` (the same `_REVALIDATE_HEADERS` used by `/manifest`), whereas the single-date `/{product_id}/{date}/point` form uses `IMMUTABLE_CACHE_HEADERS` (`max-age=31536000, immutable`). The reason is that the time-series response is **not truly content-addressed by its URL**:
-
-- `to` is optional. When the client omits `to` (or sets it past the latest available date), the response includes "every available date from `from` onwards". New dates landing on the Zarr store after the response is cached would silently change what the URL *should* return — pinning a year-long immutable copy in browser/CDN caches would serve stale results.
-- `/manifest` has the same shape and uses the same headers — both endpoints answer "what is available right now in this date range" and need a revalidation window to pick up newly-arrived dates. The 5-minute `must-revalidate` window is the same trade-off: a series update can be invisible for up to 5 minutes, acceptable because date arrivals are not real-time-critical.
-
-The single-date variant can use immutable headers because the date is in the **path**, so once that date's data exists the URL → bytes mapping is pinned forever. A conditional optimisation is possible — emit immutable headers when `to_date` is explicitly provided and is older than "today" in the local TZ, since no new dates can land inside a closed past window — but it is not implemented: the savings are limited (clients rarely pre-commit to a closed `to` until they have finished an interaction) and conditional cache headers are a sharp edge that interacts with the TZ/date-rollover rules in [§9](#9-date-timezone-and-coordinate-normalisation).
+**`/point` cache headers — immutable.** The single-date `/{product_id}/{date}/point` form uses `IMMUTABLE_CACHE_HEADERS` (`max-age=31536000, immutable`) because the date is in the **path** — once that date's data exists, the URL → bytes mapping is pinned forever.
 
 ### 6.2 Data tiles (`/data_tiles`)
 
@@ -453,7 +433,7 @@ GET /visual_tiles/{product_id}/{from_date}/{to_date}/animation.{ext}
 | Disk cache (L3)            | **Read-through.** If the prewarmed disk slice exists it is reused; otherwise the slice is fetched directly from the Zarr store. Animations never **write** to L3 — they may request dates outside the prewarmed window and we don't want to pollute L3 or trigger an eviction cycle. |
 | HTTP cache headers         | **None.** No `Cache-Control` set. CloudFront/CDN configurations should treat this path as no-cache; otherwise rare requests would still incur full origin cost while occupying CDN storage. |
 
-**Frame loading** — the handler is `async def`. Per-frame `load_slice_uncached` calls are dispatched in parallel via `asyncio.gather(asyncio.to_thread(...))`, so a cold N-frame request blocks on roughly the slowest single-frame S3 read rather than the serial sum. Frame order is preserved because `gather` returns results in input order. The thread pool is the asyncio default executor (see [§12.4](#124-three-thread-pools-not-one)), not the anyio handler pool — a 60-frame fan-out can't starve tile-handler slots.
+**Frame loading** — the handler is `async def`. Per-frame `load_slice_uncached` calls are dispatched in parallel via `asyncio.gather(asyncio.to_thread(...))`, so a cold N-frame request blocks on roughly the slowest single-frame S3 read rather than the serial sum. Frame order is preserved because `gather` returns results in input order. The thread pool is the asyncio default executor (see [§12.6](#126-one-pool-two-capacity-budgets)), not the anyio handler pool — a 60-frame fan-out can't starve tile-handler slots.
 
 The end-user experience: cold requests are still slow (every missing date is an S3 round-trip), repeat requests don't get faster, but no other endpoint is affected.
 
@@ -762,30 +742,6 @@ Size is controlled by `SLICE_CACHE_SIZE` (default `10`). Entry size varies signi
 
 Primary consumers are **visual_tiles** (no L1 above it — every tile request calls `load_slice`) and **data_tiles manifest/point** (always need `ds` directly). For data_tiles tile requests, the slice is only loaded on an L1 miss; once the processed grid is warm, L2 is bypassed entirely.
 
-#### 10.3.1 Oscillating latency on time-series requests that straddle the L3 window
-
-The `/point` time-series endpoint loads one slice per available date in `[from, to]`. When the requested range is **larger than `SLICE_CACHE_SIZE`** *and* **extends past the `CACHE_DAYS` prewarm boundary**, the same request alternates between fast (~tens of ms) and slow (~seconds) on every other hit — even though no other traffic is touching the server. This is a structural property of the L2/L3 interaction, not a bug.
-
-**Concrete scenario.** `SLICE_CACHE_SIZE = 10`, `CACHE_DAYS = 30`, today is 2026-05-18. A client requests `/{product_id}/point?from=2026-04-15&to=2026-05-15` (31 dates). L3 prewarm covers the most recent 30 dates (~2026-04-18 → 2026-05-17), so **3 dates** at the start of the range (2026-04-15, 16, 17) are **outside L3** — call them the *orphan* dates. They live only on S3.
-
-Two design facts make these orphans persistently expensive:
-
-1. **`load_slice` reads from L3 but never writes to it.** A `factory()` miss falls through to `store[...].sel(time=t).compute()`, returns the slice, and lets L2 cache it — but the on-disk pickle is never created. Only `prewarm_disk_slices` and `refresh_disk_cache` (in `services/disk_cache.py`) write to L3, and they only touch dates within the `[-_CACHE_DAYS:]` window.
-2. **Zarr's atomic read unit is the chunk, not the timestep.** For products chunked `(time=5, lat=full, lon=full)`, an S3 read for one orphan date downloads ~5 timesteps' worth of compressed bytes; xarray decodes the chunk and discards 4/5 of it. fsspec's chunk cache may absorb the cost across `.compute()` calls *inside* one Python process if they happen close together, but it is not a reliable cross-request cache. In practice the three contiguous orphans typically share one chunk, so the S3 cost per cold request is roughly **one chunk download** — but it's still ~1–2 s wall-clock, dominating the response.
-
-**Why the latency oscillates.** With 31 dates fanning out through `asyncio.gather(asyncio.to_thread(load_slice, ...))`, each per-date result is inserted into the size-10 L2 LRU as it completes. The 3 orphans finish slowest (S3 vs disk), so they are the **last** entries inserted and survive in L2.
-
-| Hit | L2 state at start                    | What happens                                                                                                                      | Wall time |
-| --- | ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------- | --------- |
-| 1   | empty                                | 28 L3-disk reads + 1 S3 chunk download (covers all 3 orphans). Last 10 inserts survive in L2 → **all 3 orphans + 7 disk dates**.   | ~2.6 s    |
-| 2   | 3 orphans + 7 disk dates             | 10 L2 hits (incl. all 3 orphans) → no S3. 21 misses → L3-disk reads, all fast. **The 21 inserts evict every orphan from L2.**      | ~19 ms    |
-| 3   | 10 disk-backed dates, no orphans     | 10 L2 hits + 18 L3 reads + 3 S3 fetches for the orphan chunk. Same as hit 1, with 7 fewer L2 misses. After: orphans back in L2.    | ~2.7 s    |
-| 4   | same as hit 2                        | same as hit 2                                                                                                                     | ~19 ms    |
-
-The pattern repeats indefinitely. The asymmetry is that **the orphans are L2 *hits* in hit 2 but fresh *inserts* in hit 3** — and the 21 inserts done during hit 2 (for the disk-backed misses) flush the orphans out of L2 entirely, because hit count doesn't protect against eviction once 21 fresh inserts have rotated through a size-10 cache.
-
-**General shape of the trap.** Any request that needs **K distinct slices** where `K > SLICE_CACHE_SIZE` *and* some subset `O ⊂ K` is outside the L3 prewarm window will exhibit this oscillation. Each repeat hit alternates between "orphans still in L2 from the previous fetch" (fast) and "orphans got evicted by the disk-backed inserts" (slow → re-fetch from S3 → orphans land back in L2 → next hit is fast again). The thrash is invisible to `/admin/cache` because L2's stats only report size and inflight counts, not key-level churn.
-
 ### 10.4 L3 — Slice cache, disk (`DISK_CACHE_PATH` directory)
 
 Persists fully-computed slices as lz4-compressed pickles to survive server restarts. On an L2 miss, `load_slice` checks disk before going to S3. A disk hit (~30 ms read + decompress) is ~60× faster than a cold S3 fetch.
@@ -839,7 +795,7 @@ A single read-only admin endpoint surfaces everything a production debugger usua
 - **`memory_cache`** — current size and max for the slice and processed-grid LRUs.
 - **`products`** — per-product breakdown: disk file count, total bytes, oldest/newest cached date, most recent write mtime, and in-flight counts attributed by `(source_path, sorted_variables)` so two products sharing a Zarr don't collide.
 
-The handler runs the filesystem walk via `asyncio.to_thread` (single-pass — every cache file is stat'd once, then attributed to a product via parent-dir-name lookup in `services/disk_cache.collect_disk_stats`), so a thousand-file cache costs at most a few milliseconds of thread-pool time and never blocks tile requests. Peak/total counters are bumped under the Memoizer's existing lock; ambient cost on the tile-serving path is two integer ops per cache miss.
+The handler runs the filesystem walk via `anyio.to_thread.run_sync` (single-pass — every cache file is stat'd once, then attributed to a product via parent-dir-name lookup in `services/disk_cache.collect_disk_stats`), so a thousand-file cache costs at most a few milliseconds of thread-pool time and never blocks tile requests. Peak/total counters are bumped under the Memoizer's existing lock; ambient cost on the tile-serving path is two integer ops per cache miss.
 
 ### 10.7 In-memory cache flush (`DELETE /admin/cache/memory`)
 
@@ -855,7 +811,7 @@ Deletes every `.pkl.lz4` slice file from the L3 disk cache directory and returns
 
 If `prewarm_disk_slices` or `refresh_disk_cache` is currently running the endpoint returns **409 Conflict** immediately without touching the disk — both operations write slice files, so clearing during either is pointless. Wait for the operation to complete before retrying.
 
-Implemented in `services/disk_cache.clear_disk_cache` — iterates the per-product subdirectories under `DISK_CACHE_PATH` and removes each with `shutil.rmtree`, leaving the base directory itself intact. The filesystem walk runs in a thread via `asyncio.to_thread` so the event loop stays free. In-flight computes are not cancelled — they may re-populate the disk cache on completion.
+Implemented in `services/disk_cache.clear_disk_cache` — iterates the per-product subdirectories under `DISK_CACHE_PATH` and removes each with `shutil.rmtree`, leaving the base directory itself intact. The filesystem walk runs in a thread via `anyio.to_thread.run_sync` so the event loop stays free. In-flight computes are not cancelled — they may re-populate the disk cache on completion.
 
 Use cases: forcing a full cold repopulation from S3 (e.g. after the underlying Zarr data has been rewritten), recovering disk space during debugging, or resetting a corrupted cache state without restarting the server. After a flush, the next request for any date will fall through to S3 (~2 s) and the disk cache will be repopulated gradually — or trigger `prewarm_disk_slices` via a server restart to repopulate in bulk.
 
@@ -895,15 +851,15 @@ Everything before `yield` runs on startup; everything after runs on shutdown. **
 
 ### 11.2 `prewarm_task` — startup cache sync (one-shot)
 
-Wraps `_startup_cache_sync(products)`, which does two sequential phases off the event loop via `asyncio.to_thread`:
+Wraps `_startup_cache_sync(products)`, which does two sequential phases:
 
-1. **`evict_stale_and_orphans(products)`** — removes
+1. **`evict_stale_and_orphans(products)`** — a sync function called via `await anyio.to_thread.run_sync(evict_stale_and_orphans, products)`, so the filesystem walk runs off the event loop. It removes
    - any cached `.pkl.lz4` files for dates outside the `CACHE_DAYS` window for each product, **and**
    - any cache sub-directory whose name doesn't match a currently registered product (orphans left over after a product was removed in a previous run).
 
    This ensures the disk cache reflects the current product/date state from the moment the server starts serving, not just after the first refresh cycle.
 
-2. **`prewarm_disk_slices(products)`** — for each `(product, date)` pair in the last `CACHE_DAYS` dates, calls `load_slice`. Disk-cached pairs return instantly; missing ones are fetched from S3 and written to disk. Parallelised across `PREWARM_WORKERS` workers (default `8`) using a `ThreadPoolExecutor`. The pool's `__exit__` calls `shutdown(wait=True)` so the function returns only after every job has finished.
+2. **`prewarm_disk_slices(products)`** — itself `async def`; awaited directly, it manages its own offload. For each `(product, date)` pair in the last `CACHE_DAYS` dates, calls `_prewarm_one` (sync). Pairs are fanned out via `asyncio.gather(*(anyio.to_thread.run_sync(_prewarm_one, p, d, v, limiter=_PREWARM_LIMITER) for ...))`, with `_PREWARM_LIMITER = anyio.CapacityLimiter(PREWARM_WORKERS)` capping concurrent S3 fetches at 8 by default. Disk-cached pairs return instantly; missing ones are fetched from S3 and written to disk. `gather` returns only once every job has finished.
 
 If eviction fails for any reason it is logged and prewarm proceeds anyway — partial cache is better than no cache.
 
@@ -918,7 +874,7 @@ async def _cache_refresh_loop(interval: int) -> None:
     while True:
         await asyncio.sleep(interval)
         try:
-            await asyncio.to_thread(refresh_disk_cache, list(PRODUCTS.values()))
+            await refresh_disk_cache(list(PRODUCTS.values()))
         except Exception:
             logger.exception("Cache refresh cycle failed; will retry next interval")
 ```
@@ -928,7 +884,7 @@ Key properties:
 - **Re-reads `PRODUCTS` every cycle** — products added or removed via the admin API are picked up automatically on the next tick; no restart required.
 - **Broad exception handling** — an unhandled exception inside the loop would kill it for the lifetime of the process and silently disable all future refreshes. The broad `except` keeps the loop alive across transient failures.
 - **`asyncio.sleep` yields to the event loop** — other tasks and requests run freely during the wait.
-- **`asyncio.to_thread` for the heavy work** — `refresh_disk_cache` does disk I/O, S3 fetches, and `.compute()` calls; running it inline on the event loop would freeze the server for tens of seconds.
+- **`refresh_disk_cache` is `async def` and offloads internally** — its sync work (eviction, S3 fetches, `.compute()` calls) is wrapped in `anyio.to_thread.run_sync` per phase, so the event loop stays free without the caller needing a `to_thread` wrapper.
 
 `refresh_disk_cache` itself:
 
@@ -943,7 +899,7 @@ Default interval is `CACHE_REFRESH_INTERVAL_SECONDS = 14400` (4 hours). In stead
 | --------------------------- | -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
 | `prewarm_stores` at startup | Open each unique Zarr store URL (metadata only) so first requests don't pay the cost         | One `threading.Thread(daemon=True)` per URL                              |
 | Store TTL expiry            | Re-open Zarr store in the background to pick up new timestamps; stale store served meanwhile | `StoreRegistry._refresh_background` via `threading.Thread`               |
-| `POST /admin/products`      | Prewarm the disk cache for the newly registered product                                      | `asyncio.create_task(asyncio.to_thread(prewarm_disk_slices, [product]))` |
+| `POST /admin/products`      | Prewarm the disk cache for the newly registered product                                      | `asyncio.create_task(prewarm_disk_slices([product]))` — `prewarm_disk_slices` is `async def` and offloads internally |
 | `DELETE /admin/products`    | Evict the product's in-memory L1/L2 entries and remove its disk directory                    | Synchronous on the request thread (fast — file delete + dict pop)        |
 
 ### 11.5 Graceful shutdown
@@ -954,13 +910,13 @@ On shutdown (Uvicorn signal handler), the lifespan `finally` block:
 - `await`s each one to handle `asyncio.CancelledError` cleanly.
 - Logs any other exception that escaped.
 
-Daemon threads (store prewarm, store TTL refresh, disk-prewarm executor inside `prewarm_disk_slices` once it has returned) do not need explicit cleanup — they exit with the process.
+Daemon threads (store prewarm, store TTL refresh) do not need explicit cleanup — they exit with the process. Anyio worker threads used by the prewarm fan-out are released back to the shared pool when their job returns; there is no separate pool to drain.
 
 ---
 
 ## 12. Concurrency: event loop and threading
 
-The server combines an **asyncio event loop** (for FastAPI/Uvicorn request multiplexing and the two long-lived background tasks) with a **bounded thread pool** (for all CPU- and I/O-heavy work). Understanding which work runs where is essential when reasoning about latency, throughput, and capacity.
+The server combines an **asyncio event loop** (for FastAPI/Uvicorn request multiplexing and the two long-lived background tasks) with a **single bounded thread pool** (anyio's, for all CPU- and I/O-heavy work). Two `CapacityLimiter` gates split that one pool into independent concurrency budgets — one for tile-handler traffic, one for the prewarm/refresh S3 fan-out — so background work cannot starve request serving. Understanding which work runs where is essential when reasoning about latency, throughput, and capacity.
 
 ### 12.1 Why most endpoints are `def`, not `async def`
 
@@ -995,85 +951,88 @@ The pool has `THREAD_POOL_SIZE` slots (default 100). Each in-flight sync request
 
 Stampede protection (`_slice_memo`, `_processed_memo`, `StoreRegistry._in_flight`) means that if 10 requests arrive for the same cold key, only 1 thread does the work; the other 9 hold their slots blocked on the Future. This caps peak unique work and peak RAM, but the held slots do count toward `THREAD_POOL_SIZE`. See [§12.8](#128-per-request-capacity-origin-server-ec2ecs-in-region) and [§12.9](#129-scaling-thread_pool_size) for the full capacity analysis.
 
-### 12.3 Background tasks run on the event loop and offload work via `asyncio.to_thread`
+### 12.3 Background tasks run on the event loop and offload work via `anyio.to_thread.run_sync`
 
 The two `asyncio.create_task(...)` calls in `lifespan` create coroutines that run on the event loop:
 
-- `_startup_cache_sync` — awaits `asyncio.to_thread(evict_stale_and_orphans, products)`, then `asyncio.to_thread(prewarm_disk_slices, products)`.
-- `_cache_refresh_loop` — awaits `asyncio.sleep(interval)`, then `asyncio.to_thread(refresh_disk_cache, ...)`.
+- `_startup_cache_sync` — awaits `anyio.to_thread.run_sync(evict_stale_and_orphans, products)` (eviction is sync), then `await prewarm_disk_slices(products)` (prewarm is itself `async def` and handles its own offload internally).
+- `_cache_refresh_loop` — awaits `asyncio.sleep(interval)`, then `await refresh_disk_cache(...)` directly.
 
-Each `await` is a yield point: the event loop is free to dispatch other tasks (including incoming HTTP requests) until the awaited operation completes. The blocking work itself (S3 fetches, disk reads, `.compute()`) runs on a thread from the pool — it does **not** run on the event loop.
+Each `await` is a yield point: the event loop is free to dispatch other tasks (including incoming HTTP requests) until the awaited operation completes. The blocking work itself (S3 fetches, disk reads, `.compute()`) runs on a thread from the anyio pool — it does **not** run on the event loop.
 
-This is why a 60-second prewarm at startup does not delay the first request by 60 seconds. The event loop yields at the `await asyncio.to_thread(...)` boundary, the prewarm threads run in the background, and the event loop continues to handle requests on other threads.
+This is why a 60-second prewarm at startup does not delay the first request by 60 seconds. The event loop yields at each `await anyio.to_thread.run_sync(...)` boundary, the prewarm work runs in the background, and the event loop continues to handle requests on other threads.
 
-`prewarm_disk_slices` itself further parallelises across `(product, date)` pairs using `concurrent.futures.ThreadPoolExecutor(max_workers=PREWARM_WORKERS)` — those workers are _separate_ from the anyio request pool. They share CPU and S3 bandwidth but not slot accounting.
+`prewarm_disk_slices` and `refresh_disk_cache` further parallelise across `(product, date)` pairs using `asyncio.gather(*(anyio.to_thread.run_sync(_prewarm_one, p, d, v, limiter=_PREWARM_LIMITER) for ...))`. The `_PREWARM_LIMITER` is a module-level `anyio.CapacityLimiter(PREWARM_WORKERS)` (default 8) that caps how many S3 fetches run concurrently. Crucially, it is a **separate concurrency budget** from the default tile-handler limiter — prewarm jobs do not consume slots that tile handlers would otherwise use. See [§12.6](#126-one-pool-two-capacity-budgets) for why.
 
 ### 12.4 Quick reference
 
-| Component                         | Runs on                                           | Why                                                                        |
-| --------------------------------- | ------------------------------------------------- | -------------------------------------------------------------------------- |
-| HTTP accept / parse / route       | Event loop                                        | Pure async I/O; never blocks                                               |
-| Tile/manifest/point handlers      | Anyio thread pool (`THREAD_POOL_SIZE`)            | Sync `def` so blocking xarray/rio-tiler/PIL calls don't freeze the loop    |
-| `/point` time-series, `/animation` | Event-loop coroutine → `asyncio.to_thread` per date | `async def` so per-date `load_slice` calls fan out via `asyncio.gather`; latency drops to ~max(per-date) instead of the serial sum, and the parallel slices run on the asyncio executor — separate from the anyio handler pool |
-| `/admin/products` POST/DELETE     | Event loop (`async def`)                          | Fast JSON read/write only; admin product prewarm offloaded via `to_thread` |
-| `DELETE /admin/cache/disk`        | Event-loop coroutine → `asyncio.to_thread`        | `async def`; filesystem walk offloaded to asyncio executor so the event loop stays free |
-| `/products`, `/colormaps` listing | Event loop (`async def`)                          | In-memory dict reads only                                                  |
-| Store prewarm at startup          | One daemon thread per URL                         | Fire-and-forget metadata fetch                                             |
-| Store TTL refresh                 | One daemon thread per URL on TTL expiry           | Stale store returned immediately; fresh open happens in the background     |
-| `_startup_cache_sync`             | Event-loop task → `asyncio.to_thread`             | Coroutine yields while the actual eviction + prewarm work runs on threads  |
-| `_cache_refresh_loop`             | Event-loop task → `asyncio.to_thread`             | Coroutine yields during sleep + refresh; never blocks the loop             |
-| `prewarm_disk_slices` parallelism | Internal `ThreadPoolExecutor` (`PREWARM_WORKERS`) | Parallel S3 fetches independent of request thread pool                     |
-| In-flight stampede dedup          | Anyio thread pool (callers block on `Future`)     | Holds a slot but does no work — see §12.2                                  |
+| Component                         | Runs on                                                                       | Why                                                                        |
+| --------------------------------- | ----------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| HTTP accept / parse / route       | Event loop                                                                    | Pure async I/O; never blocks                                               |
+| Tile/manifest/point handlers      | Anyio pool, default limiter (`THREAD_POOL_SIZE`)                              | Sync `def` so blocking xarray/rio-tiler/PIL calls don't freeze the loop    |
+| `/animation` | Event-loop coroutine → `anyio.to_thread.run_sync` per frame, gated by `_ANIMATION_LIMITER` (`ANIMATION_WORKERS`, default 16) | `async def` so per-frame `load_slice_uncached` calls fan out via `asyncio.gather`; latency drops to ~max(per-frame) instead of the serial sum. Limiter keeps a many-frame request from monopolising the tile-handler budget — see [§12.6](#126-one-pool-two-capacity-budgets) |
+| `/admin/products` POST            | Event loop (`async def`) → spawns `prewarm_disk_slices` as a background task  | Admin prewarm is itself `async def`; fire-and-forget via `asyncio.create_task` |
+| `/admin/products` DELETE          | Event loop (sync `def`)                                                       | In-memory removal + sync cache eviction                                    |
+| `GET /admin/cache`                | Event-loop coroutine → `anyio.to_thread.run_sync`                             | Filesystem walk offloaded to anyio pool, default limiter                   |
+| `DELETE /admin/cache/disk`        | Event-loop coroutine → `anyio.to_thread.run_sync`                             | Filesystem walk offloaded to anyio pool, default limiter                   |
+| `/products`, `/colormaps` listing | Event loop (`async def`)                                                      | In-memory dict reads only                                                  |
+| Store prewarm at startup          | One daemon thread per URL                                                     | Fire-and-forget metadata fetch                                             |
+| Store TTL refresh                 | One daemon thread per URL on TTL expiry                                       | Stale store returned immediately; fresh open happens in the background     |
+| `_startup_cache_sync`             | Event-loop task; `evict` via `anyio.to_thread.run_sync`; `prewarm` is `async def` awaited directly | Coroutine yields while the actual eviction + prewarm work runs on threads |
+| `_cache_refresh_loop`             | Event-loop task; `refresh_disk_cache` is `async def` awaited directly         | Coroutine yields during sleep + refresh; never blocks the loop             |
+| `prewarm_disk_slices` fan-out     | Anyio pool, gated by `_PREWARM_LIMITER` (`PREWARM_WORKERS`)                   | Parallel S3 fetches on a separate concurrency budget from tile handlers    |
+| In-flight stampede dedup          | Anyio pool (callers block on `Future`)                                        | Holds a slot but does no work — see §12.2                                  |
 
 ### 12.5 Failure modes to watch
 
 - **`async def` an endpoint by accident.** If a future contributor turns a `def` handler into `async def`, blocking calls inside it (any `xarray`/`rio-tiler` call) will freeze the event loop and serialise every request behind the slowest one. There is no static check for this — review carefully.
-- **Forget `asyncio.to_thread` inside a background task.** A future addition like `await some_sync_function()` would suspend the coroutine forever (no awaitable) or, worse, run the sync function inline on the event loop. Anything CPU/IO-heavy must be wrapped in `asyncio.to_thread`.
+- **Forget `anyio.to_thread.run_sync` inside an `async def` function.** `prewarm_disk_slices`, `refresh_disk_cache`, and the admin coroutines all run on the event loop. Any blocking call inside their body — `get_available_dates`, `evict_stale_and_orphans`, `_evict_if_over_threshold`, filesystem walks — must be wrapped in `anyio.to_thread.run_sync(...)` or it freezes the loop. The `async def` shape converts a one-time offload (at the call site of a sync function) into a per-call discipline (every blocking line inside the body); review additions to these functions carefully.
 - **Unbounded background tasks.** Both lifespan tasks have a top-level `try/except`. New background tasks must do the same — an unhandled exception in an `asyncio.Task` is silent until the task is awaited.
+- **Saturate `_PREWARM_LIMITER` with the wrong workload.** The limiter is sized to the S3 connection ceiling for slice fetches (`PREWARM_WORKERS=8`). Don't pass it to filesystem ops, metadata reads, or anything else not bound by that resource — semantically wrong and accidentally serialises unrelated work.
 
-### 12.6 Thread pools: the layering
+### 12.6 One pool, two capacity budgets
 
-§12.2 talks about "the thread pool" singular, which is fine as a first-order model — every tile request runs on it. But this server actually has **three distinct thread pools**, plus a couple of one-off worker threads. They're separate by design, not by accident; the layering buys isolation between the tile-serving hot path, admin/debug endpoints, and startup S3 fan-out.
+§12.2 talks about "the thread pool" singular. With one carve-out (see end of section), that framing is now accurate at the OS level: nearly every offload in this app lands in **one** anyio worker pool. What's split into two is the **concurrency budget** on that pool — two `anyio.CapacityLimiter` instances acting as independent gates.
 
-#### Why there's more than one pool (the history)
+#### Why a single pool, not three
 
-Python's async ecosystem grew in layers, and each layer kept its own pool:
+Earlier versions of this server used three thread pools:
 
-1. **`concurrent.futures.ThreadPoolExecutor`** (Python 3.2) — the original primitive. Everything else wraps it.
-2. **asyncio's default executor** (Python 3.4) — asyncio needed a way to offload blocking work, so it added a default `ThreadPoolExecutor` accessed via `loop.run_in_executor(None, ...)`. `asyncio.to_thread()` (3.9) is a thin wrapper over it.
-3. **anyio's own pool** (2018) — anyio is a portability layer over both `asyncio` and `trio`. Since trio has no asyncio executor, anyio manages its own `WorkerThread` instances with a `CapacityLimiter`. This is **not** the same pool as asyncio's executor.
-4. **Starlette/FastAPI** chose anyio as their concurrency layer, which is why every sync `def` handler runs on anyio's pool — not asyncio's.
+1. anyio's pool for sync `def` tile handlers (size 100).
+2. asyncio's default executor for `asyncio.to_thread(...)` calls (~32) — used by admin endpoints and background tasks.
+3. A `concurrent.futures.ThreadPoolExecutor(max_workers=PREWARM_WORKERS)` built inside `prewarm_disk_slices` for the S3 fan-out (size 8).
 
-The net effect: `asyncio.to_thread(...)` and `anyio.to_thread.run_sync(...)` look interchangeable but route to **different pools**. Both work, both are non-blocking, but they don't share slots.
+The three-pool layout bought isolation but at the cost of conceptual overhead — three different APIs (`anyio.to_thread.run_sync`, `asyncio.to_thread`, manual `ThreadPoolExecutor`), three different sizing knobs, and the subtle pitfall that `asyncio.to_thread` and `anyio.to_thread.run_sync` look interchangeable but route to **different pools**. Reviewers had to keep that distinction in mind on every async-related change.
 
-#### The pools in this app
+The current design collapses this to one pool with three limiters:
 
-| Pool                                   | Default size                              | Configured by                                          | Used by                                                                                                                       |
-| -------------------------------------- | ----------------------------------------- | ------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------- |
-| **anyio default pool**                 | `100`                                     | `THREAD_POOL_SIZE` (set in `main.py` lifespan)         | Every FastAPI `def` handler — all `/data_tiles`, `/visual_tiles`, `/admin/products`, `/admin/colormaps` calls. The hot path. |
-| **asyncio default executor**           | `min(32, os.cpu_count() + 4)`             | not configured                                         | Every `asyncio.to_thread(...)` call — `GET /admin/cache`, `DELETE /admin/cache/disk`, `_startup_cache_sync`, `_cache_refresh_loop`. (`DELETE /admin/cache/memory` runs inline on the event loop — its cache-clear ops are just in-memory lock acquisitions.)                |
-| **prewarm `ThreadPoolExecutor`**       | `PREWARM_WORKERS` (default `8`)           | env var                                                | Built and torn down inside `prewarm_disk_slices`. One-shot S3 fan-out at startup and on each refresh cycle.                  |
+- **Default limiter** (size `THREAD_POOL_SIZE`, default 100) — the limiter `anyio.to_thread.current_default_thread_limiter()` returns. Used by every sync `def` tile handler (dispatched automatically by FastAPI) and by every `anyio.to_thread.run_sync(...)` call that doesn't pass an explicit limiter.
+- **`_PREWARM_LIMITER`** (size `PREWARM_WORKERS`, default 8) — a module-level `anyio.CapacityLimiter` in `services/disk_cache.py`. Used only by `_prewarm_one` fan-out calls inside `prewarm_disk_slices` and `refresh_disk_cache`, via the explicit `limiter=_PREWARM_LIMITER` argument. Sized to the S3 connection-pool ceiling.
+- **`_ANIMATION_LIMITER`** (size `ANIMATION_WORKERS`, default 16) — a module-level `anyio.CapacityLimiter` in `routers/visual_tiles.py`. Used by the per-frame `load_slice_uncached` fan-out inside `/animation`, via the explicit `limiter=_ANIMATION_LIMITER` argument. Sized higher than prewarm because the user is waiting for the response — latency matters — while still bounded so a many-frame request cannot monopolise the tile-handler budget.
 
-Plus non-pool worker threads:
+All three limiters live over the **same** anyio worker pool. Anyio creates worker threads on demand and they're shared across limiters — but each call only acquires the limiter it was passed, so the budgets are independent. A prewarm burst saturating its 8-slot budget does not reduce the tile-handler budget of 100, and a 60-frame animation does not steal from prewarm either.
+
+#### Why three budgets, not one
+
+| Concern | What the layout buys |
+| --- | --- |
+| **Tile traffic isolated from background work** | A 150-slice prewarm doesn't consume tile-handler capacity. Without `_PREWARM_LIMITER`, the same fan-out would either flood the default 100-slot limiter (starving requests) or need a `Semaphore` rebuilt by hand inside the prewarm coroutine. |
+| **Tile traffic isolated from animation requests** | A 60-frame `/animation` request consumes at most 16 anyio slots, not all 100. Without `_ANIMATION_LIMITER`, a couple of concurrent animation requests could saturate the tile budget. |
+| **Resource ceilings decoupled from request capacity** | `PREWARM_WORKERS=8` matches the S3 connection pool and the bandwidth you want to spend on background warmup. `ANIMATION_WORKERS=16` is sized for foreground latency (waiting user). Both are independent of how many tile requests can run concurrently. |
+| **Admin endpoints answer under tile-pool pressure** | `/admin/cache` GET and `DELETE /admin/cache/disk` use `anyio.to_thread.run_sync` with the default limiter. They share the 100-slot budget with tile handlers — but admin endpoints are one-shot filesystem walks; the practical chance of contention is negligible, and the simplicity is worth more than a fourth dedicated limiter. |
+
+#### Non-pool worker threads (unchanged)
 
 - **Store-prewarm daemon threads** — `prewarm_stores` spawns one bare `threading.Thread` per unique Zarr store URL at startup. They exit when each store is open. Not a reusable pool.
-- **C-extension threads** — Zarr decompression, NumPy via BLAS, and PIL/libpng all release the GIL and may use their own internal threads. Total OS thread count is always higher than the sum of the Python pools above.
-
-#### Why the separation is intentional
-
-| Concern                                                                 | What the layout buys                                                                                                                                                            |
-| ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Admin/debug visibility under overload**                               | `/admin/cache` runs on the asyncio executor. When tile load fully saturates the anyio pool, the cache-state endpoint still answers — exactly when you'd want to inspect it.    |
-| **Background tasks not starving tile traffic**                          | `_cache_refresh_loop` and `_startup_cache_sync` also use the asyncio executor. Refresh cycles don't compete with tile rendering for anyio slots.                                |
-| **Prewarm S3 fan-out bounded independently of request capacity**       | `PREWARM_WORKERS = 8` caps simultaneous S3 connections during startup. If prewarm shared the anyio pool, it would either starve tile traffic at startup or under-utilise S3.    |
+- **C-extension threads** — Zarr decompression, NumPy via BLAS, and PIL/libpng all release the GIL and may use their own internal threads. Total OS thread count is always higher than the sum of the Python-managed threads above.
 
 #### Convention: which to use where
 
-- **Inside a `def` handler** — already on the anyio pool. Don't offload further unless the work is unusually heavy and would block other anyio-pool requests.
-- **Inside an `async def` handler or coroutine task** — wrap any blocking call in `asyncio.to_thread(...)`. This keeps the work off the event loop **and** off the anyio pool, preserving tile-handler capacity.
-- **For bounded parallel fan-out** (e.g. S3 prewarm) — create a dedicated `ThreadPoolExecutor` with `max_workers` set to the resource ceiling you care about (connection pool, S3 quota, etc.). Don't reuse the anyio or asyncio pools for this — they're not sized for resource gating.
+- **Inside a `def` handler** — already on the anyio pool under the default limiter. Don't offload further unless the work is unusually heavy and would block other tile requests.
+- **Inside an `async def` function** — wrap any blocking call in `anyio.to_thread.run_sync(...)`. By default this runs under the default limiter (shared with tile handlers, which is fine for one-shot ops). For batch fan-out, pass an appropriate `limiter=` (or define a new module-level `CapacityLimiter` sized to *that* workload's bottleneck — don't reuse `_PREWARM_LIMITER` or `_ANIMATION_LIMITER` for unrelated work; see §12.5).
+- **For background coroutines** (prewarm, refresh) — call them with plain `await`. They're `async def` and handle their own offload via `anyio.to_thread.run_sync` internally.
 
-The trade-off of this layering is conceptual overhead — you have to know which call uses which pool. The alternative (route everything through anyio by switching admin/background to `def` + `anyio.to_thread.run_sync`) would simplify the mental model but lose the isolation: a fully-loaded tile pool would block admin endpoints, and a long refresh cycle could delay tile requests. The current layout treats isolation as more valuable than uniformity.
+The trade-off compared to the old three-pool design: admin endpoints and the refresh loop no longer have a dedicated executor isolated from tiles. In exchange, the mental model is much simpler — one pool, named limiters where isolation matters. Tile-vs-prewarm and tile-vs-animation isolation, the properties that actually matter for capacity planning, are preserved by their dedicated limiters.
 
 ### 12.7 Per-request paths
 
@@ -1239,7 +1198,7 @@ On registration:
 
 - `products.json` is written and `PRODUCTS` is reloaded.
 - `evict_product_cache` is **not** called for new products (nothing to evict).
-- A disk-cache prewarm for the new product is fired with `asyncio.create_task(asyncio.to_thread(prewarm_disk_slices, [product]))`.
+- A disk-cache prewarm for the new product is fired with `asyncio.create_task(prewarm_disk_slices([product]))` — `prewarm_disk_slices` is `async def` and offloads its sync work internally.
 
 On the first request after registration:
 

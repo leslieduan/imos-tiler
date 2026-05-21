@@ -1,5 +1,8 @@
 import asyncio
+import functools
+import os
 
+import anyio
 from fastapi import APIRouter, HTTPException, Path, Query
 from fastapi.openapi.models import Example
 from fastapi.responses import Response
@@ -30,6 +33,13 @@ from .shared import (
 )
 
 _MAX_ANIMATION_FRAMES = 60
+
+# Capacity gate for /animation per-frame S3 fan-out. Sits on the shared anyio
+# pool as a *separate* concurrency budget from tile handlers — a 60-frame
+# request cannot starve tile-handler slots. Sized higher than _PREWARM_LIMITER
+# because animation is user-facing (latency matters) but still capped so one
+# request does not monopolise the pool.
+_ANIMATION_LIMITER = anyio.CapacityLimiter(int(os.environ.get("ANIMATION_WORKERS", 16)))
 
 router = APIRouter()
 router.include_router(products_router)
@@ -268,6 +278,26 @@ def _default_bbox_from_store(product_source_path: str) -> tuple[float, float, fl
     return (lon_min, lat_min, lon_max, lat_max)
 
 
+def _parse_bbox_and_crs(
+    bbox: str | None, crs: str, source_path: str
+) -> tuple[tuple[float, float, float, float], str]:
+    """Validate the crs param and parse the bbox string.
+
+    When bbox is None, falls back to the dataset's native bounds and forces
+    crs back to EPSG:4326 (the bounds are always reported in WGS84).
+    """
+    crs = crs.upper()
+    if crs not in ("EPSG:4326", "EPSG:3857"):
+        raise HTTPException(status_code=400, detail="crs must be 'EPSG:4326' or 'EPSG:3857'")
+    if bbox is None:
+        return _default_bbox_from_store(source_path), "EPSG:4326"
+    try:
+        minx, miny, maxx, maxy = (float(v) for v in bbox.split(","))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail="bbox must be 'minx,miny,maxx,maxy'") from e
+    return (minx, miny, maxx, maxy), crs
+
+
 @router.get(
     "/{product_id}/{date}/bbox.{ext}",
     summary="Visualisation tile by bbox",
@@ -312,14 +342,7 @@ def get_bbox(
         )
     variable: str = product.variable  # narrowed by the isinstance check above
 
-    crs = crs.upper()
-    if crs not in ("EPSG:4326", "EPSG:3857"):
-        raise HTTPException(status_code=400, detail="crs must be 'EPSG:4326' or 'EPSG:3857'")
-
-    try:
-        minx, miny, maxx, maxy = (float(v) for v in bbox.split(","))
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail="bbox must be 'minx,miny,maxx,maxy'") from e
+    bbox_tuple, crs = _parse_bbox_and_crs(bbox, crs, product.source_path)
 
     rescale_range = _parse_rescale(rescale)
     _require_rescale_if_categorical(colormap_name, rescale_range)
@@ -329,7 +352,7 @@ def get_bbox(
         product.source_path,
         date,
         variable,
-        (minx, miny, maxx, maxy),
+        bbox_tuple,
         width,
         height,
         crs,
@@ -343,7 +366,7 @@ def get_bbox(
         return render_bbox(
             ds,
             variable,
-            (minx, miny, maxx, maxy),
+            bbox_tuple,
             width,
             height,
             colormap_name,
@@ -376,7 +399,6 @@ def get_bbox(
         f"and the response is not cached. Expect cold requests to be slow."
     ),
 )
-# async because we want to parallelise the per-frame S3 reads, which are the bottleneck for a multi-frame animation.
 async def get_animation(
     product_id: str = Path(openapi_examples=PRODUCT_EX),
     from_date: str = Path(pattern=r"^\d{4}-\d{2}-\d{2}$", openapi_examples=DATE_EX),
@@ -442,20 +464,7 @@ async def get_animation(
         )
     variable: str = product.variable
 
-    crs = crs.upper()
-    if crs not in ("EPSG:4326", "EPSG:3857"):
-        raise HTTPException(status_code=400, detail="crs must be 'EPSG:4326' or 'EPSG:3857'")
-
-    if bbox is None:
-        bbox_tuple = _default_bbox_from_store(product.source_path)
-        # Default bbox is in EPSG:4326 regardless of the crs query param.
-        crs = "EPSG:4326"
-    else:
-        try:
-            minx, miny, maxx, maxy = (float(v) for v in bbox.split(","))
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail="bbox must be 'minx,miny,maxx,maxy'") from e
-        bbox_tuple = (minx, miny, maxx, maxy)
+    bbox_tuple, crs = _parse_bbox_and_crs(bbox, crs, product.source_path)
 
     rescale_range = _parse_rescale(rescale)
     _require_rescale_if_categorical(colormap_name, rescale_range)
@@ -469,11 +478,28 @@ async def get_animation(
         )
 
     available = get_available_dates(product.source_path)
+    if not available:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No data available for product {product_id!r}.",
+        )
+    earliest, latest = available[0], available[-1]
+    if from_date < earliest or to_date > latest:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"Requested range [{from_date}, {to_date}] is outside the available dates "
+                f"for product {product_id!r} ([{earliest}, {latest}])."
+            ),
+        )
     dates = [d for d in available if from_date <= d <= to_date]
     if not dates:
         raise HTTPException(
             status_code=404,
-            detail=f"No data for product {product_id!r} in [{from_date}, {to_date}].",
+            detail=(
+                f"No data for product {product_id!r} between {from_date} and {to_date} "
+                f"(available range: [{earliest}, {latest}])."
+            ),
         )
     if len(dates) > _MAX_ANIMATION_FRAMES:
         raise HTTPException(
@@ -488,26 +514,37 @@ async def get_animation(
         product.source_path, bbox_tuple, crs, width, height
     )
 
-    # Fan out the per-frame S3 reads in parallel: each load_slice_uncached call blocks
-    # on Zarr/S3, so asyncio.to_thread frees the event loop and asyncio.gather drops
-    # total latency to ~max(per-frame) instead of the serial sum. Frames stay in the
-    # original date order because gather preserves the input order.
+    # Fan out the per-frame S3 reads in parallel on the anyio pool, gated by
+    # _ANIMATION_LIMITER so a many-frame request does not consume tile-handler
+    # slots. asyncio.gather preserves input order so frames stay in date order.
     datasets = await asyncio.gather(
-        *(asyncio.to_thread(load_slice_uncached, product.source_path, d, [variable]) for d in dates)
+        *(
+            anyio.to_thread.run_sync(
+                load_slice_uncached,
+                product.source_path,
+                d,
+                [variable],
+                limiter=_ANIMATION_LIMITER,
+            )
+            for d in dates
+        )
     )
 
     try:
-        body = render_bbox_animation(
-            datasets,
-            variable,
-            bbox_tuple,
-            resolved_w,
-            resolved_h,
-            colormap_name,
-            rescale_range,
-            crs=crs,
-            fmt=ext,
-            duration_ms=duration,
+        body = await anyio.to_thread.run_sync(
+            functools.partial(
+                render_bbox_animation,
+                datasets,
+                variable,
+                bbox_tuple,
+                resolved_w,
+                resolved_h,
+                colormap_name,
+                rescale_range,
+                crs=crs,
+                fmt=ext,
+                duration_ms=duration,
+            )
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e

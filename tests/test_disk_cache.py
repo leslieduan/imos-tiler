@@ -5,6 +5,7 @@ Mocks load_slice / get_available_dates so tests don't touch any real Zarr store.
 
 from unittest.mock import patch
 
+import anyio
 import lz4.frame
 import numpy as np
 import pytest
@@ -146,7 +147,7 @@ def test_evict_pressure_disabled_when_env_unset(monkeypatch):
 def test_prewarm_disabled_when_env_unset(monkeypatch):
     monkeypatch.setattr(disk_cache, "DISK_CACHE_PATH", None)
     with patch("app.services.loader.get_available_dates") as get_dates:
-        disk_cache.prewarm_disk_slices([_product()])
+        anyio.run(disk_cache.prewarm_disk_slices, [_product()])
     get_dates.assert_not_called()
 
 
@@ -156,9 +157,9 @@ def test_prewarm_writes_files_for_each_date(cache_root):
 
     with (
         patch("app.services.loader.get_available_dates", return_value=["2024-01-01", "2024-01-02"]),
-        patch("app.services.loader.load_slice", return_value=ds),
+        patch("app.services.loader.load_slice_uncached", return_value=ds),
     ):
-        disk_cache.prewarm_disk_slices([p])
+        anyio.run(disk_cache.prewarm_disk_slices, [p])
 
     cache_dir = disk_cache.disk_cache_path(p.source_path, "x", ["v"]).parent
     files = sorted(f.name for f in cache_dir.glob("*.pkl.lz4"))
@@ -174,9 +175,9 @@ def test_prewarm_skips_existing_files(cache_root):
 
     with (
         patch("app.services.loader.get_available_dates", return_value=["2024-01-01"]),
-        patch("app.services.loader.load_slice") as load,
+        patch("app.services.loader.load_slice_uncached") as load,
     ):
-        disk_cache.prewarm_disk_slices([p])
+        anyio.run(disk_cache.prewarm_disk_slices, [p])
     load.assert_not_called()
     # File still has the original value (not overwritten).
     out = disk_cache.read_slice_from_disk(existing)
@@ -195,9 +196,9 @@ def test_prewarm_swallows_per_product_date_errors(cache_root):
 
     with (
         patch("app.services.loader.get_available_dates", side_effect=dates_for),
-        patch("app.services.loader.load_slice", return_value=_make_slice()),
+        patch("app.services.loader.load_slice_uncached", return_value=_make_slice()),
     ):
-        disk_cache.prewarm_disk_slices([bad, good])
+        anyio.run(disk_cache.prewarm_disk_slices, [bad, good])
 
     good_dir = disk_cache.disk_cache_path(good.source_path, "x", ["v"]).parent
     assert any(good_dir.glob("*.pkl.lz4")), "good product should still be cached"
@@ -216,9 +217,9 @@ def test_prewarm_swallows_filenotfound_for_individual_slice(cache_root):
 
     with (
         patch("app.services.loader.get_available_dates", return_value=["2024-01-01", "2024-01-02"]),
-        patch("app.services.loader.load_slice", side_effect=load_one),
+        patch("app.services.loader.load_slice_uncached", side_effect=load_one),
     ):
-        disk_cache.prewarm_disk_slices([p])
+        anyio.run(disk_cache.prewarm_disk_slices, [p])
 
     # Both dates attempted; 01 cached, 02 not.
     assert "2024-01-01" in seen and "2024-01-02" in seen
@@ -289,9 +290,9 @@ def test_refresh_adds_new_dates(cache_root):
             "app.services.loader.get_available_dates",
             return_value=["2024-01-01", "2024-01-02"],
         ),
-        patch("app.services.loader.load_slice", return_value=_make_slice()),
+        patch("app.services.loader.load_slice_uncached", return_value=_make_slice()),
     ):
-        disk_cache.refresh_disk_cache([p])
+        anyio.run(disk_cache.refresh_disk_cache, [p])
 
     cached = sorted(f.name for f in cache_dir.glob("*.pkl.lz4"))
     assert "2024-01-02.pkl.lz4" in cached
@@ -300,7 +301,7 @@ def test_refresh_adds_new_dates(cache_root):
 def test_refresh_disabled_when_env_unset(monkeypatch):
     monkeypatch.setattr(disk_cache, "DISK_CACHE_PATH", None)
     with patch("app.services.loader.get_available_dates") as gad:
-        disk_cache.refresh_disk_cache([_product()])
+        anyio.run(disk_cache.refresh_disk_cache, [_product()])
     gad.assert_not_called()
 
 

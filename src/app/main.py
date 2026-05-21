@@ -40,12 +40,13 @@ logger = logging.getLogger(__name__)
 async def _startup_cache_sync(products: list[Product]) -> None:
     # Evict stale dates and orphan product dirs first so the cache reflects the current
     # product/date state from the moment the server starts serving, then prewarm in
-    # parallel. Both run in threads so the event loop stays free for requests.
+    # parallel. Eviction is a sync function and must be offloaded; prewarm is async
+    # and does its own offloading internally via anyio.to_thread.run_sync.
     try:
-        await asyncio.to_thread(evict_stale_and_orphans, products)
+        await anyio.to_thread.run_sync(evict_stale_and_orphans, products)
     except Exception:
         logger.exception("Startup cache eviction failed; continuing to prewarm")
-    await asyncio.to_thread(prewarm_disk_slices, products)
+    await prewarm_disk_slices(products)
 
 
 async def _cache_refresh_loop(interval: int) -> None:
@@ -56,21 +57,13 @@ async def _cache_refresh_loop(interval: int) -> None:
         # Catch broadly: an unhandled exception here would kill the loop for the lifetime
         # of the process, silently disabling all future refreshes.
         try:
-            await asyncio.to_thread(refresh_disk_cache, list(PRODUCTS.values()))
+            await refresh_disk_cache(list(PRODUCTS.values()))
         except Exception:
             logger.exception("Cache refresh cycle failed; will retry next interval")
 
 
 # Lifespan manages server startup and shutdown. Everything before yield runs on startup,
 # everything after yield runs on shutdown. The server handles requests while paused at yield.
-#
-# prewarm_task and refresh_task are async tasks scheduled on the event loop via create_task.
-# They run concurrently with incoming requests — pausing at await points so the event loop
-# stays free to handle requests. They are NOT blocked by each other or by request handling.
-#
-# The only blocking risk is CPU/IO-heavy work inside these tasks. That's why prewarm_disk_slices
-# and refresh_disk_cache are wrapped in asyncio.to_thread — offloading them to a thread pool
-# so the event loop is never frozen.
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     limiter = anyio.to_thread.current_default_thread_limiter()

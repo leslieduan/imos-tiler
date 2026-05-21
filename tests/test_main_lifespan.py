@@ -1,12 +1,14 @@
 """Lifespan tests for main.py.
 
-CLAUDE.md flags this as a hot landmine: any CPU/IO-heavy work inside the
-background tasks MUST be wrapped in asyncio.to_thread or the event loop
-freezes and in-flight requests stall. These tests pin that contract.
+The hot landmine: sync work inside background tasks MUST be offloaded
+(``anyio.to_thread.run_sync``) or the event loop freezes. After the
+asyncio→anyio refactor, ``prewarm_disk_slices`` and ``refresh_disk_cache``
+are themselves async and offload internally; only ``evict_stale_and_orphans``
+remains sync and must be wrapped at the call site.
 """
 
 import asyncio
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -14,25 +16,25 @@ import app.main as main
 
 
 @pytest.mark.anyio
-async def test_startup_cache_sync_offloads_via_to_thread():
-    """evict_stale_and_orphans and prewarm_disk_slices must be wrapped in to_thread."""
+async def test_startup_cache_sync_offloads_evict_and_awaits_prewarm():
+    """evict_stale_and_orphans is sync → must go through anyio.to_thread.run_sync.
+    prewarm_disk_slices is async → must be awaited directly."""
     threaded: list = []
 
-    async def fake_to_thread(fn, *args, **kwargs):
+    async def fake_run_sync(fn, *args, **kwargs):
         threaded.append(fn)
         return fn(*args, **kwargs)
 
     with (
         patch("app.main.evict_stale_and_orphans") as evict,
-        patch("app.main.prewarm_disk_slices") as prewarm,
-        patch("app.main.asyncio.to_thread", side_effect=fake_to_thread),
+        patch("app.main.prewarm_disk_slices", new_callable=AsyncMock) as prewarm,
+        patch("app.main.anyio.to_thread.run_sync", side_effect=fake_run_sync),
     ):
         await main._startup_cache_sync([])
 
-    assert evict in threaded, "evict_stale_and_orphans was called outside asyncio.to_thread"
-    assert prewarm in threaded, "prewarm_disk_slices was called outside asyncio.to_thread"
+    assert evict in threaded, "evict_stale_and_orphans was called outside anyio.to_thread.run_sync"
     evict.assert_called_once_with([])
-    prewarm.assert_called_once_with([])
+    prewarm.assert_awaited_once_with([])
 
 
 @pytest.mark.anyio
@@ -44,18 +46,17 @@ async def test_startup_cache_sync_continues_after_eviction_failure():
 
     with (
         patch("app.main.evict_stale_and_orphans", side_effect=RuntimeError("boom")),
-        patch("app.main.prewarm_disk_slices") as prewarm,
-        patch("app.main.asyncio.to_thread", side_effect=passthrough),
+        patch("app.main.prewarm_disk_slices", new_callable=AsyncMock) as prewarm,
+        patch("app.main.anyio.to_thread.run_sync", side_effect=passthrough),
     ):
         # Should NOT raise — the function swallows the eviction failure.
         await main._startup_cache_sync([])
-    prewarm.assert_called_once()
+    prewarm.assert_awaited_once()
 
 
 @pytest.mark.anyio
-async def test_cache_refresh_loop_offloads_refresh():
-    """refresh_disk_cache must run via asyncio.to_thread, not block the loop."""
-    threaded: list = []
+async def test_cache_refresh_loop_awaits_refresh():
+    """refresh_disk_cache is async and must be awaited each cycle."""
     iterations = 0
 
     async def fake_sleep(_seconds):
@@ -65,20 +66,14 @@ async def test_cache_refresh_loop_offloads_refresh():
         if iterations >= 2:
             raise asyncio.CancelledError
 
-    async def fake_to_thread(fn, *args, **kwargs):
-        threaded.append(fn)
-        return fn(*args, **kwargs)
-
     with (
-        patch("app.main.refresh_disk_cache") as refresh,
+        patch("app.main.refresh_disk_cache", new_callable=AsyncMock) as refresh,
         patch("app.main.asyncio.sleep", side_effect=fake_sleep),
-        patch("app.main.asyncio.to_thread", side_effect=fake_to_thread),
     ):
         with pytest.raises(asyncio.CancelledError):
             await main._cache_refresh_loop(interval=1)
 
-    assert threaded == [refresh], "refresh_disk_cache must be wrapped in asyncio.to_thread"
-    assert refresh.call_count == 1  # one full body before the second sleep cancelled
+    refresh.assert_awaited_once()  # one full body before the second sleep cancelled
 
 
 @pytest.mark.anyio
@@ -94,19 +89,15 @@ async def test_cache_refresh_loop_survives_refresh_exception():
 
     call_count = 0
 
-    def flaky_refresh(_products):
+    async def flaky_refresh(_products):
         nonlocal call_count
         call_count += 1
         if call_count == 1:
             raise RuntimeError("first cycle fails")
 
-    async def passthrough(fn, *args, **kwargs):
-        return fn(*args, **kwargs)
-
     with (
         patch("app.main.refresh_disk_cache", side_effect=flaky_refresh),
         patch("app.main.asyncio.sleep", side_effect=fake_sleep),
-        patch("app.main.asyncio.to_thread", side_effect=passthrough),
     ):
         with pytest.raises(asyncio.CancelledError):
             await main._cache_refresh_loop(interval=1)

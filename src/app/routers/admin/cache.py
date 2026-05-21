@@ -6,12 +6,11 @@ processed grid). Per-product in-flight breakdown is computed by mapping each
 in-flight key's store_url back to its product id — useful for spotting one
 product saturating S3 fetches.
 
-Heavy work (filesystem walks) runs via ``asyncio.to_thread`` so the event loop
-stays free; the response itself is small.
+Heavy work (filesystem walks) runs via ``anyio.to_thread.run_sync`` so the event
+loop stays free; the response itself is small.
 """
 
-import asyncio
-
+import anyio
 from fastapi import APIRouter, HTTPException
 
 from app.constants import PRODUCTS
@@ -114,7 +113,7 @@ def _build_response() -> dict:
     response_model_exclude_unset=True,
 )
 async def get_cache_state():
-    result = await asyncio.to_thread(_build_response)
+    result = await anyio.to_thread.run_sync(_build_response)
     return CacheStateResponse.model_validate(result)
 
 
@@ -153,5 +152,5 @@ async def clear_disk_cache_endpoint():
             status_code=409,
             detail="Disk cache refresh is running — please try again once it completes.",
         )
-    cleared = await asyncio.to_thread(clear_disk_cache)
+    cleared = await anyio.to_thread.run_sync(clear_disk_cache)
     return DiskClearedResponse(**cleared)

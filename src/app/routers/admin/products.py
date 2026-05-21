@@ -24,7 +24,7 @@ _background_tasks: set[asyncio.Task] = set()
 
 
 def _spawn_prewarm(product: Product) -> None:
-    task = asyncio.create_task(asyncio.to_thread(prewarm_disk_slices, [product]))
+    task = asyncio.create_task(prewarm_disk_slices([product]))
     _background_tasks.add(task)
 
     def _on_done(t: asyncio.Task) -> None:

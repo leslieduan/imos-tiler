@@ -5,8 +5,6 @@ class ProductConfig(BaseModel):
     id: str
     source_path: str
     variable: str | list[str]
-    chunk_px: list[int]
-    padding: int
 
 
 class ProductAvailability(BaseModel):
@@ -27,14 +25,3 @@ class PointResponse(BaseModel):
     lat: float
     lon: float
     variables: dict[str, VariableValue]
-
-
-class PointSeriesEntry(BaseModel):
-    date: str
-    variables: dict[str, VariableValue]
-
-
-class PointSeriesResponse(BaseModel):
-    lat: float | None
-    lon: float | None
-    series: list[PointSeriesEntry]
