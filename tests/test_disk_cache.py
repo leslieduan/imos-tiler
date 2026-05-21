@@ -157,7 +157,7 @@ def test_prewarm_writes_files_for_each_date(cache_root):
 
     with (
         patch("app.services.loader.get_available_dates", return_value=["2024-01-01", "2024-01-02"]),
-        patch("app.services.loader.load_slice", return_value=ds),
+        patch("app.services.loader.load_slice_uncached", return_value=ds),
     ):
         anyio.run(disk_cache.prewarm_disk_slices, [p])
 
@@ -175,7 +175,7 @@ def test_prewarm_skips_existing_files(cache_root):
 
     with (
         patch("app.services.loader.get_available_dates", return_value=["2024-01-01"]),
-        patch("app.services.loader.load_slice") as load,
+        patch("app.services.loader.load_slice_uncached") as load,
     ):
         anyio.run(disk_cache.prewarm_disk_slices, [p])
     load.assert_not_called()
@@ -196,7 +196,7 @@ def test_prewarm_swallows_per_product_date_errors(cache_root):
 
     with (
         patch("app.services.loader.get_available_dates", side_effect=dates_for),
-        patch("app.services.loader.load_slice", return_value=_make_slice()),
+        patch("app.services.loader.load_slice_uncached", return_value=_make_slice()),
     ):
         anyio.run(disk_cache.prewarm_disk_slices, [bad, good])
 
@@ -217,7 +217,7 @@ def test_prewarm_swallows_filenotfound_for_individual_slice(cache_root):
 
     with (
         patch("app.services.loader.get_available_dates", return_value=["2024-01-01", "2024-01-02"]),
-        patch("app.services.loader.load_slice", side_effect=load_one),
+        patch("app.services.loader.load_slice_uncached", side_effect=load_one),
     ):
         anyio.run(disk_cache.prewarm_disk_slices, [p])
 
@@ -290,7 +290,7 @@ def test_refresh_adds_new_dates(cache_root):
             "app.services.loader.get_available_dates",
             return_value=["2024-01-01", "2024-01-02"],
         ),
-        patch("app.services.loader.load_slice", return_value=_make_slice()),
+        patch("app.services.loader.load_slice_uncached", return_value=_make_slice()),
     ):
         anyio.run(disk_cache.refresh_disk_cache, [p])
 
