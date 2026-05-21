@@ -40,12 +40,13 @@ logger = logging.getLogger(__name__)
 async def _startup_cache_sync(products: list[Product]) -> None:
     # Evict stale dates and orphan product dirs first so the cache reflects the current
     # product/date state from the moment the server starts serving, then prewarm in
-    # parallel. Both run in threads so the event loop stays free for requests.
+    # parallel. Eviction is a sync function and must be offloaded; prewarm is async
+    # and does its own offloading internally via anyio.to_thread.run_sync.
     try:
-        await asyncio.to_thread(evict_stale_and_orphans, products)
+        await anyio.to_thread.run_sync(evict_stale_and_orphans, products)
     except Exception:
         logger.exception("Startup cache eviction failed; continuing to prewarm")
-    await asyncio.to_thread(prewarm_disk_slices, products)
+    await prewarm_disk_slices(products)
 
 
 async def _cache_refresh_loop(interval: int) -> None:
@@ -56,7 +57,7 @@ async def _cache_refresh_loop(interval: int) -> None:
         # Catch broadly: an unhandled exception here would kill the loop for the lifetime
         # of the process, silently disabling all future refreshes.
         try:
-            await asyncio.to_thread(refresh_disk_cache, list(PRODUCTS.values()))
+            await refresh_disk_cache(list(PRODUCTS.values()))
         except Exception:
             logger.exception("Cache refresh cycle failed; will retry next interval")
 

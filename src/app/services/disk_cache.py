@@ -18,7 +18,7 @@ subset (e.g. a single product from an admin POST) would wipe every other
 product's cache. Callers must respect this.
 """
 
-import concurrent.futures
+import asyncio
 import logging
 import os
 import pickle
@@ -28,6 +28,7 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
+import anyio
 import lz4.frame
 import xarray as xr
 
@@ -36,6 +37,12 @@ from app.constants import DISK_CACHE_PATH, Product
 logger = logging.getLogger(__name__)
 
 _CACHE_DAYS = int(os.environ.get("CACHE_DAYS", 30))
+
+# Capacity gate for prewarm/refresh S3 fan-out. Sits on the same anyio thread
+# pool that serves tile requests; the limiter is a *separate* concurrency budget
+# from the default one (so prewarm jobs do not consume tile-handler slots).
+# Bound to the S3 connection ceiling, not CPU.
+_PREWARM_LIMITER = anyio.CapacityLimiter(int(os.environ.get("PREWARM_WORKERS", 8)))
 
 # Status of the most recent refresh_disk_cache run, surfaced via /admin/cache.
 # "never_run" until the first cycle starts; flips to "running" while in progress,
@@ -171,12 +178,13 @@ def _prewarm_one(product: Product, date: str, variables: list[str]) -> str:
         return "failed"
 
 
-def prewarm_disk_slices(products: list[Product]) -> None:
+async def prewarm_disk_slices(products: list[Product]) -> None:
     """Populate L2 from disk on startup; write to disk for any dates not yet cached.
 
-    Parallelises across (product, date) pairs — PREWARM_WORKERS controls concurrency
-    (default 8). Cold S3 reads for different keys run concurrently; the slice
-    Memoizer deduplicates any accidental overlap on the same key.
+    Parallelises across (product, date) pairs via the anyio thread pool, gated by
+    ``_PREWARM_LIMITER`` (PREWARM_WORKERS, default 8) so at most N S3 fetches run
+    concurrently. The limiter is a separate budget from the default tile-handler
+    limiter, so prewarm does not steal tile-serving slots.
     """
     if not DISK_CACHE_PATH:
         return
@@ -193,7 +201,8 @@ def prewarm_disk_slices(products: list[Product]) -> None:
         for product in products:
             variables = product.variables
             try:
-                dates = get_available_dates(product.source_path)[-_CACHE_DAYS:]
+                dates = await anyio.to_thread.run_sync(get_available_dates, product.source_path)
+                dates = dates[-_CACHE_DAYS:]
             except Exception:
                 logger.warning(
                     "Prewarm: could not get dates",
@@ -203,18 +212,16 @@ def prewarm_disk_slices(products: list[Product]) -> None:
                 continue
             jobs.extend((product, date, variables) for date in dates)
 
-        max_workers = int(os.environ.get("PREWARM_WORKERS", 8))
-        futs: list[concurrent.futures.Future[str]] = []
-        with concurrent.futures.ThreadPoolExecutor(
-            max_workers=max_workers, thread_name_prefix="prewarm"
-        ) as pool:
-            for p, d, v in jobs:
-                futs.append(pool.submit(_prewarm_one, p, d, v))
-            # pool.__exit__ calls shutdown(wait=True) — all jobs complete before returning
+        results = await asyncio.gather(
+            *(
+                anyio.to_thread.run_sync(_prewarm_one, p, d, v, limiter=_PREWARM_LIMITER)
+                for p, d, v in jobs
+            )
+        )
 
         counts: dict[str, int] = {"written": 0, "skipped": 0, "failed": 0}
-        for f in futs:
-            counts[f.result()] += 1
+        for r in results:
+            counts[r] += 1
         logger.info(
             "Prewarm complete",
             extra={
@@ -228,7 +235,7 @@ def prewarm_disk_slices(products: list[Product]) -> None:
         with _prewarm_lock:
             _prewarm_running = False
 
-    _evict_if_over_threshold()
+    await anyio.to_thread.run_sync(_evict_if_over_threshold)
 
 
 def evict_stale_and_orphans(products: list[Product]) -> None:
@@ -301,7 +308,7 @@ def evict_stale_and_orphans(products: list[Product]) -> None:
         )
 
 
-def refresh_disk_cache(products: list[Product]) -> None:
+async def refresh_disk_cache(products: list[Product]) -> None:
     """Add newly available dates to disk cache; evict dates outside each product's window.
 
     Callers MUST pass the full set of currently registered products — see
@@ -316,7 +323,7 @@ def refresh_disk_cache(products: list[Product]) -> None:
 
     t0 = time.monotonic()
     try:
-        evict_stale_and_orphans(products)
+        await anyio.to_thread.run_sync(evict_stale_and_orphans, products)
 
         from app.services.loader import get_available_dates
 
@@ -324,7 +331,10 @@ def refresh_disk_cache(products: list[Product]) -> None:
         for product in products:
             variables = product.variables
             try:
-                target_dates = set(get_available_dates(product.source_path)[-_CACHE_DAYS:])
+                target_dates_list = await anyio.to_thread.run_sync(
+                    get_available_dates, product.source_path
+                )
+                target_dates = set(target_dates_list[-_CACHE_DAYS:])
             except Exception:
                 logger.warning(
                     "Refresh: could not get dates",
@@ -342,23 +352,16 @@ def refresh_disk_cache(products: list[Product]) -> None:
 
             jobs.extend((product, date, variables) for date in sorted(target_dates - cached_dates))
 
-        # Parallelise S3 fetches the same way prewarm does — a backfill of many missing
-        # dates would otherwise pay one round trip per date serially.
-        max_workers = int(os.environ.get("PREWARM_WORKERS", 8))
-        added = 0
-        failed = 0
-        with concurrent.futures.ThreadPoolExecutor(
-            max_workers=max_workers, thread_name_prefix="refresh"
-        ) as pool:
-            futs = [pool.submit(_prewarm_one, p, d, v) for p, d, v in jobs]
-        for f in futs:
-            result = f.result()
-            if result == "written":
-                added += 1
-            elif result == "failed":
-                failed += 1
+        results = await asyncio.gather(
+            *(
+                anyio.to_thread.run_sync(_prewarm_one, p, d, v, limiter=_PREWARM_LIMITER)
+                for p, d, v in jobs
+            )
+        )
+        added = sum(1 for r in results if r == "written")
+        failed = sum(1 for r in results if r == "failed")
 
-        _evict_if_over_threshold()
+        await anyio.to_thread.run_sync(_evict_if_over_threshold)
         logger.info(
             "Refresh cycle complete",
             extra={

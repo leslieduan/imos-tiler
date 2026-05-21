@@ -2,6 +2,7 @@
 
 from unittest.mock import patch
 
+import anyio
 import pytest
 from starlette.testclient import TestClient
 
@@ -207,7 +208,7 @@ def test_refresh_status_ok_after_successful_run(cache_root):
         patch("app.services.loader.get_available_dates", return_value=[]),
         patch("app.services.loader.load_slice"),
     ):
-        disk_cache.refresh_disk_cache([p])
+        anyio.run(disk_cache.refresh_disk_cache, [p])
 
     body = client.get("/admin/cache", headers=_HEADERS).json()
     assert body["disk_writes"]["refresh"]["status"] == "ok"
@@ -223,7 +224,7 @@ def test_refresh_status_error_when_run_raises(cache_root):
         patch.object(disk_cache, "evict_stale_and_orphans", side_effect=RuntimeError("boom")),
         pytest.raises(RuntimeError),
     ):
-        disk_cache.refresh_disk_cache([p])
+        anyio.run(disk_cache.refresh_disk_cache, [p])
 
     body = client.get("/admin/cache", headers=_HEADERS).json()
     assert body["disk_writes"]["refresh"]["status"] == "error"
