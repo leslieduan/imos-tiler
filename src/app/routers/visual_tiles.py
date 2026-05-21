@@ -1,4 +1,5 @@
 import asyncio
+import functools
 import os
 
 import anyio
@@ -277,6 +278,26 @@ def _default_bbox_from_store(product_source_path: str) -> tuple[float, float, fl
     return (lon_min, lat_min, lon_max, lat_max)
 
 
+def _parse_bbox_and_crs(
+    bbox: str | None, crs: str, source_path: str
+) -> tuple[tuple[float, float, float, float], str]:
+    """Validate the crs param and parse the bbox string.
+
+    When bbox is None, falls back to the dataset's native bounds and forces
+    crs back to EPSG:4326 (the bounds are always reported in WGS84).
+    """
+    crs = crs.upper()
+    if crs not in ("EPSG:4326", "EPSG:3857"):
+        raise HTTPException(status_code=400, detail="crs must be 'EPSG:4326' or 'EPSG:3857'")
+    if bbox is None:
+        return _default_bbox_from_store(source_path), "EPSG:4326"
+    try:
+        minx, miny, maxx, maxy = (float(v) for v in bbox.split(","))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail="bbox must be 'minx,miny,maxx,maxy'") from e
+    return (minx, miny, maxx, maxy), crs
+
+
 @router.get(
     "/{product_id}/{date}/bbox.{ext}",
     summary="Visualisation tile by bbox",
@@ -321,14 +342,7 @@ def get_bbox(
         )
     variable: str = product.variable  # narrowed by the isinstance check above
 
-    crs = crs.upper()
-    if crs not in ("EPSG:4326", "EPSG:3857"):
-        raise HTTPException(status_code=400, detail="crs must be 'EPSG:4326' or 'EPSG:3857'")
-
-    try:
-        minx, miny, maxx, maxy = (float(v) for v in bbox.split(","))
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail="bbox must be 'minx,miny,maxx,maxy'") from e
+    bbox_tuple, crs = _parse_bbox_and_crs(bbox, crs, product.source_path)
 
     rescale_range = _parse_rescale(rescale)
     _require_rescale_if_categorical(colormap_name, rescale_range)
@@ -338,7 +352,7 @@ def get_bbox(
         product.source_path,
         date,
         variable,
-        (minx, miny, maxx, maxy),
+        bbox_tuple,
         width,
         height,
         crs,
@@ -352,7 +366,7 @@ def get_bbox(
         return render_bbox(
             ds,
             variable,
-            (minx, miny, maxx, maxy),
+            bbox_tuple,
             width,
             height,
             colormap_name,
@@ -385,7 +399,6 @@ def get_bbox(
         f"and the response is not cached. Expect cold requests to be slow."
     ),
 )
-# async because we want to parallelise the per-frame S3 reads, which are the bottleneck for a multi-frame animation.
 async def get_animation(
     product_id: str = Path(openapi_examples=PRODUCT_EX),
     from_date: str = Path(pattern=r"^\d{4}-\d{2}-\d{2}$", openapi_examples=DATE_EX),
@@ -451,20 +464,7 @@ async def get_animation(
         )
     variable: str = product.variable
 
-    crs = crs.upper()
-    if crs not in ("EPSG:4326", "EPSG:3857"):
-        raise HTTPException(status_code=400, detail="crs must be 'EPSG:4326' or 'EPSG:3857'")
-
-    if bbox is None:
-        bbox_tuple = _default_bbox_from_store(product.source_path)
-        # Default bbox is in EPSG:4326 regardless of the crs query param.
-        crs = "EPSG:4326"
-    else:
-        try:
-            minx, miny, maxx, maxy = (float(v) for v in bbox.split(","))
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail="bbox must be 'minx,miny,maxx,maxy'") from e
-        bbox_tuple = (minx, miny, maxx, maxy)
+    bbox_tuple, crs = _parse_bbox_and_crs(bbox, crs, product.source_path)
 
     rescale_range = _parse_rescale(rescale)
     _require_rescale_if_categorical(colormap_name, rescale_range)
@@ -496,7 +496,10 @@ async def get_animation(
     if not dates:
         raise HTTPException(
             status_code=404,
-            detail=f"No data for product {product_id!r} in [{from_date}, {to_date}].",
+            detail=(
+                f"No data for product {product_id!r} between {from_date} and {to_date} "
+                f"(available range: [{earliest}, {latest}])."
+            ),
         )
     if len(dates) > _MAX_ANIMATION_FRAMES:
         raise HTTPException(
@@ -528,17 +531,20 @@ async def get_animation(
     )
 
     try:
-        body = render_bbox_animation(
-            datasets,
-            variable,
-            bbox_tuple,
-            resolved_w,
-            resolved_h,
-            colormap_name,
-            rescale_range,
-            crs=crs,
-            fmt=ext,
-            duration_ms=duration,
+        body = await anyio.to_thread.run_sync(
+            functools.partial(
+                render_bbox_animation,
+                datasets,
+                variable,
+                bbox_tuple,
+                resolved_w,
+                resolved_h,
+                colormap_name,
+                rescale_range,
+                crs=crs,
+                fmt=ext,
+                duration_ms=duration,
+            )
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
