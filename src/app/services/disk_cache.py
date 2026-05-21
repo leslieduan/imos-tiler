@@ -318,10 +318,9 @@ def refresh_disk_cache(products: list[Product]) -> None:
     try:
         evict_stale_and_orphans(products)
 
-        from app.services.loader import get_available_dates, load_slice_uncached
+        from app.services.loader import get_available_dates
 
-        added = 0
-        failed = 0
+        jobs: list[tuple[Product, str, list[str]]] = []
         for product in products:
             variables = product.variables
             try:
@@ -341,24 +340,23 @@ def refresh_disk_cache(products: list[Product]) -> None:
             cache_dir.mkdir(parents=True, exist_ok=True)
             cached_dates = {f.name.split(".")[0] for f in cache_dir.glob("*.pkl.lz4")}
 
-            for date in sorted(target_dates - cached_dates):
-                try:
-                    ds = load_slice_uncached(product.source_path, date, variables)
-                    p = disk_cache_path(product.source_path, date, variables)
-                    if p is not None:
-                        write_slice_to_disk(p, ds)
-                        added += 1
-                        logger.debug(
-                            "Disk cache added",
-                            extra={"product_id": product.id, "date": date},
-                        )
-                except Exception:
-                    failed += 1
-                    logger.warning(
-                        "Disk cache add failed",
-                        extra={"product_id": product.id, "date": date},
-                        exc_info=True,
-                    )
+            jobs.extend((product, date, variables) for date in sorted(target_dates - cached_dates))
+
+        # Parallelise S3 fetches the same way prewarm does — a backfill of many missing
+        # dates would otherwise pay one round trip per date serially.
+        max_workers = int(os.environ.get("PREWARM_WORKERS", 8))
+        added = 0
+        failed = 0
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=max_workers, thread_name_prefix="refresh"
+        ) as pool:
+            futs = [pool.submit(_prewarm_one, p, d, v) for p, d, v in jobs]
+        for f in futs:
+            result = f.result()
+            if result == "written":
+                added += 1
+            elif result == "failed":
+                failed += 1
 
         _evict_if_over_threshold()
         logger.info(

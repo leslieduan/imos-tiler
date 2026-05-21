@@ -63,14 +63,6 @@ async def _cache_refresh_loop(interval: int) -> None:
 
 # Lifespan manages server startup and shutdown. Everything before yield runs on startup,
 # everything after yield runs on shutdown. The server handles requests while paused at yield.
-#
-# prewarm_task and refresh_task are async tasks scheduled on the event loop via create_task.
-# They run concurrently with incoming requests — pausing at await points so the event loop
-# stays free to handle requests. They are NOT blocked by each other or by request handling.
-#
-# The only blocking risk is CPU/IO-heavy work inside these tasks. That's why prewarm_disk_slices
-# and refresh_disk_cache are wrapped in asyncio.to_thread — offloading them to a thread pool
-# so the event loop is never frozen.
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     limiter = anyio.to_thread.current_default_thread_limiter()
