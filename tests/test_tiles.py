@@ -136,42 +136,6 @@ def test_point_ok():
     assert "GSLA" in body["variables"]
 
 
-# --- /{product}/point (time series) ---
-
-
-def test_point_series_unknown_product():
-    response = client.get("/data_tiles/nonexistent/point?lat=-35&lon=145&from=2024-01-01")
-    assert response.status_code == 404
-
-
-def test_point_series_ok():
-    all_dates = ["2023-12-01", "2024-01-01", "2024-01-15", "2024-02-01"]
-    with (
-        patch("app.routers.products.get_available_dates", return_value=all_dates),
-        patch("app.routers.products.load_slice", return_value=_make_ds()),
-    ):
-        response = client.get(
-            "/data_tiles/sea_level_anomaly/point?lat=-35&lon=145&from=2024-01-01&to=2024-01-31"
-        )
-    assert response.status_code == 200
-    body = response.json()
-    assert body["lat"] is not None and body["lon"] is not None
-    assert [entry["date"] for entry in body["series"]] == ["2024-01-01", "2024-01-15"]
-    assert "GSLA" in body["series"][0]["variables"]
-
-
-def test_point_series_empty_range():
-    with (
-        patch("app.routers.products.get_available_dates", return_value=["2020-01-01"]),
-        patch("app.routers.products.three_months_ago", return_value="2024-01-01"),
-    ):
-        response = client.get("/data_tiles/sea_level_anomaly/point?lat=-35&lon=145")
-    assert response.status_code == 200
-    body = response.json()
-    assert body["series"] == []
-    assert body["lat"] is None and body["lon"] is None
-
-
 # --- /manifest (products availability) ---
 
 

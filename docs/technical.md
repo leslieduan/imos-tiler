@@ -164,7 +164,7 @@ imos-tiler/
     routers/
       data_tiles.py              ← /data_tiles — raw value-encoded RGBA tiles for WebGL
       visual_tiles.py            ← /visual_tiles — colourised Web Mercator XYZ tiles + bbox + colormap listing/legend
-      products.py                ← shared: /products, /manifest, /{id}/{date}/point, /{id}/point (time series) — included by both tile routers
+      products.py                ← shared: /products, /manifest, /{id}/{date}/point — included by both tile routers
       shared.py                  ← shared router helpers (PRODUCT_EX/DATE_EX examples, get_product_or_404, load_slice_or_404)
       admin/                     ← /admin — product, colormap, and cache-state endpoints (key-protected, package)
         __init__.py              ← assembles admin_router and applies require_admin_key
@@ -321,7 +321,6 @@ The manifest (data-tile pipeline only) is the interface between the server's coo
 GET /{prefix}/products                                          → list all registered products
 GET /{prefix}/manifest?from=YYYY-MM-DD&to=YYYY-MM-DD             → available dates for all products
 GET /{prefix}/{product_id}/{date}/point?lat=&lon=                → variable value at one date
-GET /{prefix}/{product_id}/point?lat=&lon=&from=&to=             → variable values at a point across a date range (time series)
 ```
 
 `/manifest` parameters:
@@ -342,26 +341,7 @@ GET /{prefix}/{product_id}/point?lat=&lon=&from=&to=             → variable va
 
 **Performance**: dates are read from the `time` coordinate of each Zarr store — a 1-D array held in the store singleton. No spatial data chunks are touched. Filtering is an in-memory string comparison. Responses are sub-millisecond once the store is warm.
 
-**`/point` time-series variant** — the dateless form (`/{prefix}/{product_id}/point?lat=&lon=&from=&to=`) returns one entry per available date in `[from, to]`:
-
-```json
-{
-  "lat": -33.8, "lon": 151.2,
-  "series": [
-    { "date": "2024-01-01", "variables": { "GSLA": { "value": 0.12, "units": "m" } } },
-    { "date": "2024-01-02", "variables": { "GSLA": { "value": 0.14, "units": "m" } } }
-  ]
-}
-```
-
-`from`/`to` follow the same defaults as `/manifest` (3 months before today / unbounded). The handler is `async def` and fans the per-date `load_slice` calls out via `asyncio.gather(asyncio.to_thread(...))` so total latency is ~max(per-date) instead of the serial sum; concurrent identical requests still share one compute through the L2 slice memoizer. Empty range → `200` with `series: []` (not `404`).
-
-**Cache headers — revalidate, not immutable.** This endpoint emits `Cache-Control: public, max-age=300, must-revalidate` (the same `_REVALIDATE_HEADERS` used by `/manifest`), whereas the single-date `/{product_id}/{date}/point` form uses `IMMUTABLE_CACHE_HEADERS` (`max-age=31536000, immutable`). The reason is that the time-series response is **not truly content-addressed by its URL**:
-
-- `to` is optional. When the client omits `to` (or sets it past the latest available date), the response includes "every available date from `from` onwards". New dates landing on the Zarr store after the response is cached would silently change what the URL *should* return — pinning a year-long immutable copy in browser/CDN caches would serve stale results.
-- `/manifest` has the same shape and uses the same headers — both endpoints answer "what is available right now in this date range" and need a revalidation window to pick up newly-arrived dates. The 5-minute `must-revalidate` window is the same trade-off: a series update can be invisible for up to 5 minutes, acceptable because date arrivals are not real-time-critical.
-
-The single-date variant can use immutable headers because the date is in the **path**, so once that date's data exists the URL → bytes mapping is pinned forever. A conditional optimisation is possible — emit immutable headers when `to_date` is explicitly provided and is older than "today" in the local TZ, since no new dates can land inside a closed past window — but it is not implemented: the savings are limited (clients rarely pre-commit to a closed `to` until they have finished an interaction) and conditional cache headers are a sharp edge that interacts with the TZ/date-rollover rules in [§9](#9-date-timezone-and-coordinate-normalisation).
+**`/point` cache headers — immutable.** The single-date `/{product_id}/{date}/point` form uses `IMMUTABLE_CACHE_HEADERS` (`max-age=31536000, immutable`) because the date is in the **path** — once that date's data exists, the URL → bytes mapping is pinned forever.
 
 ### 6.2 Data tiles (`/data_tiles`)
 
@@ -762,30 +742,6 @@ Size is controlled by `SLICE_CACHE_SIZE` (default `10`). Entry size varies signi
 
 Primary consumers are **visual_tiles** (no L1 above it — every tile request calls `load_slice`) and **data_tiles manifest/point** (always need `ds` directly). For data_tiles tile requests, the slice is only loaded on an L1 miss; once the processed grid is warm, L2 is bypassed entirely.
 
-#### 10.3.1 Oscillating latency on time-series requests that straddle the L3 window
-
-The `/point` time-series endpoint loads one slice per available date in `[from, to]`. When the requested range is **larger than `SLICE_CACHE_SIZE`** *and* **extends past the `CACHE_DAYS` prewarm boundary**, the same request alternates between fast (~tens of ms) and slow (~seconds) on every other hit — even though no other traffic is touching the server. This is a structural property of the L2/L3 interaction, not a bug.
-
-**Concrete scenario.** `SLICE_CACHE_SIZE = 10`, `CACHE_DAYS = 30`, today is 2026-05-18. A client requests `/{product_id}/point?from=2026-04-15&to=2026-05-15` (31 dates). L3 prewarm covers the most recent 30 dates (~2026-04-18 → 2026-05-17), so **3 dates** at the start of the range (2026-04-15, 16, 17) are **outside L3** — call them the *orphan* dates. They live only on S3.
-
-Two design facts make these orphans persistently expensive:
-
-1. **`load_slice` reads from L3 but never writes to it.** A `factory()` miss falls through to `store[...].sel(time=t).compute()`, returns the slice, and lets L2 cache it — but the on-disk pickle is never created. Only `prewarm_disk_slices` and `refresh_disk_cache` (in `services/disk_cache.py`) write to L3, and they only touch dates within the `[-_CACHE_DAYS:]` window.
-2. **Zarr's atomic read unit is the chunk, not the timestep.** For products chunked `(time=5, lat=full, lon=full)`, an S3 read for one orphan date downloads ~5 timesteps' worth of compressed bytes; xarray decodes the chunk and discards 4/5 of it. fsspec's chunk cache may absorb the cost across `.compute()` calls *inside* one Python process if they happen close together, but it is not a reliable cross-request cache. In practice the three contiguous orphans typically share one chunk, so the S3 cost per cold request is roughly **one chunk download** — but it's still ~1–2 s wall-clock, dominating the response.
-
-**Why the latency oscillates.** With 31 dates fanning out through `asyncio.gather(asyncio.to_thread(load_slice, ...))`, each per-date result is inserted into the size-10 L2 LRU as it completes. The 3 orphans finish slowest (S3 vs disk), so they are the **last** entries inserted and survive in L2.
-
-| Hit | L2 state at start                    | What happens                                                                                                                      | Wall time |
-| --- | ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------- | --------- |
-| 1   | empty                                | 28 L3-disk reads + 1 S3 chunk download (covers all 3 orphans). Last 10 inserts survive in L2 → **all 3 orphans + 7 disk dates**.   | ~2.6 s    |
-| 2   | 3 orphans + 7 disk dates             | 10 L2 hits (incl. all 3 orphans) → no S3. 21 misses → L3-disk reads, all fast. **The 21 inserts evict every orphan from L2.**      | ~19 ms    |
-| 3   | 10 disk-backed dates, no orphans     | 10 L2 hits + 18 L3 reads + 3 S3 fetches for the orphan chunk. Same as hit 1, with 7 fewer L2 misses. After: orphans back in L2.    | ~2.7 s    |
-| 4   | same as hit 2                        | same as hit 2                                                                                                                     | ~19 ms    |
-
-The pattern repeats indefinitely. The asymmetry is that **the orphans are L2 *hits* in hit 2 but fresh *inserts* in hit 3** — and the 21 inserts done during hit 2 (for the disk-backed misses) flush the orphans out of L2 entirely, because hit count doesn't protect against eviction once 21 fresh inserts have rotated through a size-10 cache.
-
-**General shape of the trap.** Any request that needs **K distinct slices** where `K > SLICE_CACHE_SIZE` *and* some subset `O ⊂ K` is outside the L3 prewarm window will exhibit this oscillation. Each repeat hit alternates between "orphans still in L2 from the previous fetch" (fast) and "orphans got evicted by the disk-backed inserts" (slow → re-fetch from S3 → orphans land back in L2 → next hit is fast again). The thrash is invisible to `/admin/cache` because L2's stats only report size and inflight counts, not key-level churn.
-
 ### 10.4 L3 — Slice cache, disk (`DISK_CACHE_PATH` directory)
 
 Persists fully-computed slices as lz4-compressed pickles to survive server restarts. On an L2 miss, `load_slice` checks disk before going to S3. A disk hit (~30 ms read + decompress) is ~60× faster than a cold S3 fetch.
@@ -1014,7 +970,7 @@ This is why a 60-second prewarm at startup does not delay the first request by 6
 | --------------------------------- | ----------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
 | HTTP accept / parse / route       | Event loop                                                                    | Pure async I/O; never blocks                                               |
 | Tile/manifest/point handlers      | Anyio pool, default limiter (`THREAD_POOL_SIZE`)                              | Sync `def` so blocking xarray/rio-tiler/PIL calls don't freeze the loop    |
-| `/point` time-series, `/animation` | Event-loop coroutine → `asyncio.to_thread` per date (asyncio default executor) | `async def` so per-date `load_slice` calls fan out via `asyncio.gather`; latency drops to ~max(per-date) instead of the serial sum. These two are the only callers that still route to the asyncio default executor — see [§12.6](#126-one-pool-two-capacity-budgets) |
+| `/animation` | Event-loop coroutine → `anyio.to_thread.run_sync` per frame, gated by `_ANIMATION_LIMITER` (`ANIMATION_WORKERS`, default 16) | `async def` so per-frame `load_slice_uncached` calls fan out via `asyncio.gather`; latency drops to ~max(per-frame) instead of the serial sum. Limiter keeps a many-frame request from monopolising the tile-handler budget — see [§12.6](#126-one-pool-two-capacity-budgets) |
 | `/admin/products` POST            | Event loop (`async def`) → spawns `prewarm_disk_slices` as a background task  | Admin prewarm is itself `async def`; fire-and-forget via `asyncio.create_task` |
 | `/admin/products` DELETE          | Event loop (sync `def`)                                                       | In-memory removal + sync cache eviction                                    |
 | `GET /admin/cache`                | Event-loop coroutine → `anyio.to_thread.run_sync`                             | Filesystem walk offloaded to anyio pool, default limiter                   |
@@ -1048,20 +1004,22 @@ Earlier versions of this server used three thread pools:
 
 The three-pool layout bought isolation but at the cost of conceptual overhead — three different APIs (`anyio.to_thread.run_sync`, `asyncio.to_thread`, manual `ThreadPoolExecutor`), three different sizing knobs, and the subtle pitfall that `asyncio.to_thread` and `anyio.to_thread.run_sync` look interchangeable but route to **different pools**. Reviewers had to keep that distinction in mind on every async-related change.
 
-The current design collapses this to one pool with two limiters:
+The current design collapses this to one pool with three limiters:
 
 - **Default limiter** (size `THREAD_POOL_SIZE`, default 100) — the limiter `anyio.to_thread.current_default_thread_limiter()` returns. Used by every sync `def` tile handler (dispatched automatically by FastAPI) and by every `anyio.to_thread.run_sync(...)` call that doesn't pass an explicit limiter.
-- **`_PREWARM_LIMITER`** (size `PREWARM_WORKERS`, default 8) — a module-level `anyio.CapacityLimiter` in `services/disk_cache.py`. Used only by `_prewarm_one` fan-out calls inside `prewarm_disk_slices` and `refresh_disk_cache`, via the explicit `limiter=_PREWARM_LIMITER` argument.
+- **`_PREWARM_LIMITER`** (size `PREWARM_WORKERS`, default 8) — a module-level `anyio.CapacityLimiter` in `services/disk_cache.py`. Used only by `_prewarm_one` fan-out calls inside `prewarm_disk_slices` and `refresh_disk_cache`, via the explicit `limiter=_PREWARM_LIMITER` argument. Sized to the S3 connection-pool ceiling.
+- **`_ANIMATION_LIMITER`** (size `ANIMATION_WORKERS`, default 16) — a module-level `anyio.CapacityLimiter` in `routers/visual_tiles.py`. Used by the per-frame `load_slice_uncached` fan-out inside `/animation`, via the explicit `limiter=_ANIMATION_LIMITER` argument. Sized higher than prewarm because the user is waiting for the response — latency matters — while still bounded so a many-frame request cannot monopolise the tile-handler budget.
 
-Both limiters live over the **same** anyio worker pool. Anyio creates worker threads on demand and they're shared across limiters — but each call only acquires the limiter it was passed, so the two budgets are independent. A prewarm burst saturating its 8-slot budget does not reduce the tile-handler budget of 100.
+All three limiters live over the **same** anyio worker pool. Anyio creates worker threads on demand and they're shared across limiters — but each call only acquires the limiter it was passed, so the budgets are independent. A prewarm burst saturating its 8-slot budget does not reduce the tile-handler budget of 100, and a 60-frame animation does not steal from prewarm either.
 
-#### Why two budgets, not one
+#### Why three budgets, not one
 
 | Concern | What the layout buys |
 | --- | --- |
 | **Tile traffic isolated from background work** | A 150-slice prewarm doesn't consume tile-handler capacity. Without `_PREWARM_LIMITER`, the same fan-out would either flood the default 100-slot limiter (starving requests) or need a `Semaphore` rebuilt by hand inside the prewarm coroutine. |
-| **S3 connection-pool sizing decoupled from request capacity** | `PREWARM_WORKERS=8` is matched to the S3 client connection pool and the bandwidth you want to spend on warmup — independent of how many tile requests can run concurrently. |
-| **Admin endpoints answer under tile-pool pressure** | `/admin/cache` GET and `DELETE /admin/cache/disk` use `anyio.to_thread.run_sync` with the default limiter. They share the 100-slot budget with tile handlers — but admin endpoints are one-shot filesystem walks; the practical chance of contention is negligible, and the simplicity is worth more than a third dedicated limiter. |
+| **Tile traffic isolated from animation requests** | A 60-frame `/animation` request consumes at most 16 anyio slots, not all 100. Without `_ANIMATION_LIMITER`, a couple of concurrent animation requests could saturate the tile budget. |
+| **Resource ceilings decoupled from request capacity** | `PREWARM_WORKERS=8` matches the S3 connection pool and the bandwidth you want to spend on background warmup. `ANIMATION_WORKERS=16` is sized for foreground latency (waiting user). Both are independent of how many tile requests can run concurrently. |
+| **Admin endpoints answer under tile-pool pressure** | `/admin/cache` GET and `DELETE /admin/cache/disk` use `anyio.to_thread.run_sync` with the default limiter. They share the 100-slot budget with tile handlers — but admin endpoints are one-shot filesystem walks; the practical chance of contention is negligible, and the simplicity is worth more than a fourth dedicated limiter. |
 
 #### Non-pool worker threads (unchanged)
 
@@ -1071,14 +1029,10 @@ Both limiters live over the **same** anyio worker pool. Anyio creates worker thr
 #### Convention: which to use where
 
 - **Inside a `def` handler** — already on the anyio pool under the default limiter. Don't offload further unless the work is unusually heavy and would block other tile requests.
-- **Inside an `async def` function** — wrap any blocking call in `anyio.to_thread.run_sync(...)`. By default this runs under the default limiter (shared with tile handlers, which is fine for one-shot ops). For batch fan-out, pass `limiter=_PREWARM_LIMITER` (or define a new limiter sized to *that* workload's bottleneck — don't reuse the prewarm one for unrelated work; see §12.5).
+- **Inside an `async def` function** — wrap any blocking call in `anyio.to_thread.run_sync(...)`. By default this runs under the default limiter (shared with tile handlers, which is fine for one-shot ops). For batch fan-out, pass an appropriate `limiter=` (or define a new module-level `CapacityLimiter` sized to *that* workload's bottleneck — don't reuse `_PREWARM_LIMITER` or `_ANIMATION_LIMITER` for unrelated work; see §12.5).
 - **For background coroutines** (prewarm, refresh) — call them with plain `await`. They're `async def` and handle their own offload via `anyio.to_thread.run_sync` internally.
 
-The trade-off compared to the old three-pool design: admin endpoints and the refresh loop no longer have a dedicated executor isolated from tiles. In exchange, the mental model is much simpler — one pool, named limiters where isolation matters. Tile-vs-prewarm isolation, the property that actually mattered for capacity planning, is preserved by `_PREWARM_LIMITER`.
-
-#### One carve-out: `/point` and `/animation`
-
-The `/point` time-series and `/animation` endpoints in `routers/products.py` and `routers/visual_tiles.py` still use `asyncio.gather(*(asyncio.to_thread(load_slice, ...) for ...))`. That `asyncio.to_thread` call routes to the **asyncio default executor** (~32 slots), not the anyio pool. So strictly speaking the app uses two pools today, not one. These two endpoints are slated for removal/replacement; once they're gone, the asyncio default executor is no longer touched by application code, and the "one pool, two limiters" framing is exact.
+The trade-off compared to the old three-pool design: admin endpoints and the refresh loop no longer have a dedicated executor isolated from tiles. In exchange, the mental model is much simpler — one pool, named limiters where isolation matters. Tile-vs-prewarm and tile-vs-animation isolation, the properties that actually matter for capacity planning, are preserved by their dedicated limiters.
 
 ### 12.7 Per-request paths
 

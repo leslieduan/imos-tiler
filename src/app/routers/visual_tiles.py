@@ -1,5 +1,7 @@
 import asyncio
+import os
 
+import anyio
 from fastapi import APIRouter, HTTPException, Path, Query
 from fastapi.openapi.models import Example
 from fastapi.responses import Response
@@ -30,6 +32,13 @@ from .shared import (
 )
 
 _MAX_ANIMATION_FRAMES = 60
+
+# Capacity gate for /animation per-frame S3 fan-out. Sits on the shared anyio
+# pool as a *separate* concurrency budget from tile handlers — a 60-frame
+# request cannot starve tile-handler slots. Sized higher than _PREWARM_LIMITER
+# because animation is user-facing (latency matters) but still capped so one
+# request does not monopolise the pool.
+_ANIMATION_LIMITER = anyio.CapacityLimiter(int(os.environ.get("ANIMATION_WORKERS", 16)))
 
 router = APIRouter()
 router.include_router(products_router)
@@ -488,12 +497,20 @@ async def get_animation(
         product.source_path, bbox_tuple, crs, width, height
     )
 
-    # Fan out the per-frame S3 reads in parallel: each load_slice_uncached call blocks
-    # on Zarr/S3, so asyncio.to_thread frees the event loop and asyncio.gather drops
-    # total latency to ~max(per-frame) instead of the serial sum. Frames stay in the
-    # original date order because gather preserves the input order.
+    # Fan out the per-frame S3 reads in parallel on the anyio pool, gated by
+    # _ANIMATION_LIMITER so a many-frame request does not consume tile-handler
+    # slots. asyncio.gather preserves input order so frames stay in date order.
     datasets = await asyncio.gather(
-        *(asyncio.to_thread(load_slice_uncached, product.source_path, d, [variable]) for d in dates)
+        *(
+            anyio.to_thread.run_sync(
+                load_slice_uncached,
+                product.source_path,
+                d,
+                [variable],
+                limiter=_ANIMATION_LIMITER,
+            )
+            for d in dates
+        )
     )
 
     try:
