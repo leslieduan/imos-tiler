@@ -469,7 +469,7 @@ The three LOD knobs are bundled into a single frozen-dataclass instance, `LOD = 
 
 - `LOD.max_lods = 4` — cap on LOD levels per product. The frontend packs all LODs into a single WebGL texture atlas hard-capped at 4096×4096 px (≈64 MB VRAM per atlas) regardless of `gl.MAX_TEXTURE_SIZE`. Going above 4 doesn't break rendering — the atlas falls back to LRU eviction — but causes visible tile re-upload churn as the user pans or zooms. `4` is tuned to fit comfortably under the cap for current product sizes.
 - `LOD.min_coarsest = (2, 2)` — minimum (cols, rows) for the coarsest LOD level; levels below this are dropped. If all levels are filtered out (data smaller than one chunk), falls back to the native finest grid so there is always at least one LOD.
-- `LOD.zoom_thresholds: dict[int, int]` — universal map-zoom thresholds applied to all products (e.g. `{2: 4, 3: 5, 4: 6}`).
+- `LOD.zoom_thresholds: dict[LODIndex, ZoomLevel]` — maps each LOD index to the minimum map-zoom level at which the shader activates it (e.g. `{2: 4, 3: 5, 4: 6}` means LOD 2 is used at map-zoom ≥ 4, LOD 3 at ≥ 5, etc.). The shader reads these values from the manifest to decide which LOD to request at each map-zoom. If the server and frontend disagree on these thresholds, the shader requests nonexistent LOD levels or fetches the wrong resolution — the atlas mapping breaks silently and data tiles are useless regardless of whether they are individually served correctly. Treat any change to `zoom_thresholds` with the same caution as `max_lods` and `min_coarsest`: it requires a coordinated frontend redeploy.
 
 ### 7.2 LOD algorithm (`Product._compute_lod_grids` in `constants.py`)
 

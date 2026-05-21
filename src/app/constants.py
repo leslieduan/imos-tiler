@@ -1,6 +1,9 @@
 import math
 from dataclasses import dataclass, field
 
+LODIndex = int
+ZoomLevel = int
+
 # Applied in loaders to normalise coordinate names across all products.
 COORD_NAMES = {"TIME": "time", "LATITUDE": "lat", "LONGITUDE": "lon"}
 
@@ -23,7 +26,9 @@ class LODConfig:
     # Minimum (cols, rows) for the coarsest level; levels below this are dropped.
     min_coarsest: tuple[int, int] = (2, 2)
     # LOD level → minimum map zoom to show that level. Applied universally to all products.
-    zoom_thresholds: dict[int, int] = field(default_factory=lambda: {2: 4, 3: 5, 4: 6})
+    # LOD1 is the coarsest level, so under zoom level 4 only LOD1 tiles are shown; at zoom 4 LOD2
+    # tiles are shown, etc.
+    zoom_thresholds: dict[LODIndex, ZoomLevel] = field(default_factory=lambda: {2: 4, 3: 5, 4: 6})
 
 
 LOD = LODConfig()
