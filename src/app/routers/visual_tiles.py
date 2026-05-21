@@ -478,6 +478,20 @@ async def get_animation(
         )
 
     available = get_available_dates(product.source_path)
+    if not available:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No data available for product {product_id!r}.",
+        )
+    earliest, latest = available[0], available[-1]
+    if from_date < earliest or to_date > latest:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"Requested range [{from_date}, {to_date}] is outside the available dates "
+                f"for product {product_id!r} ([{earliest}, {latest}])."
+            ),
+        )
     dates = [d for d in available if from_date <= d <= to_date]
     if not dates:
         raise HTTPException(
