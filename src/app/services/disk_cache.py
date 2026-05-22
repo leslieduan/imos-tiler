@@ -113,23 +113,22 @@ def _evict_if_over_threshold() -> None:
     threshold = int(limit_bytes * float(os.environ.get("DISK_EVICTION_THRESHOLD", 0.85)))
 
     with _evict_lock:
-        all_files = list(Path(base).rglob("*.pkl.lz4"))
-        if not all_files:
+        entries = [(f, f.stat().st_size) for f in Path(base).rglob("*.pkl.lz4")]
+        if not entries:
             return
-        total = sum(f.stat().st_size for f in all_files)
+        total = sum(size for _, size in entries)
         if total <= threshold:
             return
 
         # Sort: smallest file first, oldest date first within same size.
         # Small-grid products are cheap to re-fetch from S3; evict them before large ones.
-        entries = sorted(all_files, key=lambda f: (f.stat().st_size, f.name.split(".")[0]))
+        entries.sort(key=lambda e: (e[1], e[0].name.split(".")[0]))
 
         evicted_count = 0
         evicted_bytes = 0
-        for f in entries:
+        for f, size in entries:
             if total <= threshold:
                 break
-            size = f.stat().st_size
             f.unlink(missing_ok=True)
             total -= size
             evicted_count += 1
