@@ -8,6 +8,9 @@ each fits inside rio_tiler's strict ±180 bound; the parts are composited as
 numpy arrays before the single image encode.
 """
 
+import logging
+import time
+
 import numpy as np
 import xarray as xr
 from pyproj import Transformer
@@ -26,7 +29,34 @@ from app.utils.image import (
     encode_rgba_animation,
 )
 
+logger = logging.getLogger(__name__)
+
 _mercator_to_wgs84 = Transformer.from_crs("EPSG:3857", "EPSG:4326", always_xy=True)
+
+
+def warmup_visual() -> None:
+    """Prime rio_tiler + GDAL warp so the first visual tile request doesn't pay
+    one-time init overhead (warp kernel, projection database, rio_tiler internals).
+    Synchronous; intended to be called once during startup.
+    """
+    t0 = time.monotonic()
+    da = xr.DataArray(
+        np.zeros((16, 16), dtype=np.float32),
+        dims=("lat", "lon"),
+        coords={"lat": np.linspace(1.0, 0.0, 16), "lon": np.linspace(0.0, 1.0, 16)},
+    )
+    da = _apply_crs(da)
+    # Synthetic grayscale LUT — avoids depending on the colormap registry being loaded.
+    cm = {i: (i, i, i, 255) for i in range(256)}
+    try:
+        with XarrayReader(da) as reader:
+            img = reader.tile(0, 0, 0, reproject_method="bilinear")
+        img.rescale(in_range=[(0.0, 1.0)])
+        _img_to_rgba(img, cm)
+    except Exception:
+        logger.warning("Visual warmup failed", exc_info=True)
+        return
+    logger.info("[timing] visual warmup", extra={"ms": round((time.monotonic() - t0) * 1000, 1)})
 
 
 def _img_to_rgba(img: ImageData, cm: dict[int, tuple[int, int, int, int]]) -> np.ndarray:

@@ -15,6 +15,7 @@ from app.routers.admin import admin_router
 from app.routers.data_tiles import router as data_tiles_router
 from app.routers.visual_tiles import router as visual_tiles_router
 from app.services.colormap_config import load_colormaps
+from app.services.data_renderer import warmup_resample
 from app.services.disk_cache import (
     evict_stale_and_orphans,
     prewarm_disk_slices,
@@ -22,6 +23,7 @@ from app.services.disk_cache import (
 )
 from app.services.product_config import load_products
 from app.services.store_registry import prewarm_stores
+from app.services.visual_renderer import warmup_visual
 
 load_dotenv()
 configure_logging()
@@ -88,6 +90,9 @@ async def lifespan(app: FastAPI):
             "store_ttl_seconds": int(os.environ.get("STORE_TTL_SECONDS", 600)),
         },
     )
+
+    await anyio.to_thread.run_sync(warmup_resample)
+    await anyio.to_thread.run_sync(warmup_visual)
     store_urls = list({p.source_path for p in PRODUCTS.values()})
     store_prewarm_task = asyncio.create_task(prewarm_stores(store_urls))
     prewarm_task = asyncio.create_task(_startup_cache_sync(list(PRODUCTS.values())))
