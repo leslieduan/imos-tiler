@@ -21,22 +21,14 @@ class MemoryCacheSizeStats(BaseModel):
     max: int
 
 
-class ProductInFlight(BaseModel):
-    slice: int
-    processed: int
-
-
-class ProductDiskStats(BaseModel):
+class ProductCacheStats(BaseModel):
     file_count: int
     total_bytes: int
     oldest_date: str | None
     newest_date: str | None
     last_write_at: str | None
-
-
-class ProductCacheStats(BaseModel):
-    disk: ProductDiskStats
-    in_flight: ProductInFlight
+    slice_in_flight: int
+    processed_in_flight: int
 
 
 class InFlightStats(BaseModel):

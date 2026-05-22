@@ -60,11 +60,9 @@ def _build_response() -> dict:
     disk_stats = collect_disk_stats(list(PRODUCTS.values()))
     products = {
         pid: {
-            "disk": disk_stats["per_product"][pid],
-            "in_flight": {
-                "slice": slice_inflight_by_pid.get(pid, 0),
-                "processed": processed_inflight_by_pid.get(pid, 0),
-            },
+            **disk_stats["per_product"][pid],
+            "slice_in_flight": slice_inflight_by_pid.get(pid, 0),
+            "processed_in_flight": processed_inflight_by_pid.get(pid, 0),
         }
         for pid in PRODUCTS
     }
