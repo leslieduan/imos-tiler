@@ -26,6 +26,20 @@ _processed_cache: TTLCache = TTLCache(maxsize=_PROCESSED_CACHE_SIZE, ttl=_PROCES
 _processed_memo: Memoizer = Memoizer(_processed_cache)
 
 
+def warmup_resample() -> None:
+    """Prime scipy.interpolate + BLAS so the first real tile request doesn't pay
+    ~1.5s of one-time overhead (lazy imports, thread pool init, allocator warmup).
+    Synchronous; intended to be called once during startup.
+    """
+    t0 = time.monotonic()
+    ds = xr.Dataset(
+        {"v": (("lat", "lon"), np.zeros((16, 16), dtype=np.float32))},
+        coords={"lat": np.linspace(1.0, 0.0, 16), "lon": np.linspace(0.0, 1.0, 16)},
+    )
+    _resample_to_grid(ds, 32, 32)
+    logger.info("[timing] resample warmup", extra={"ms": round((time.monotonic() - t0) * 1000, 1)})
+
+
 def _resample_to_grid(ds: xr.Dataset, total_w: int, total_h: int) -> xr.Dataset:
     # The source Zarr grid points don't align with the target pixel positions,
     # so we interpolate: for each of the total_w×total_h output pixels, xarray finds
