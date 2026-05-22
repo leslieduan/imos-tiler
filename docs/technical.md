@@ -1266,7 +1266,8 @@ curl -X DELETE http://localhost:8000/admin/products/my_product \
 
 On registration:
 
-- `products.json` is written and `PRODUCTS` is reloaded.
+- The store is opened and the declared `variable`(s) are checked against `store.data_vars`. A failure (unreachable bucket, malformed URL, missing variable) returns **400** and nothing is persisted. Without this guard, a typo'd URL would stay registered and the failure would only surface later in the background prewarm log. The validation runs synchronously via `anyio.to_thread.run_sync` because `xr.open_zarr` is blocking; on success, `get_store` caches the open dataset in the store singleton so the subsequent prewarm reuses it.
+- `products.json` is written atomically (tempfile + `os.replace`) under a process-wide `threading.Lock`, so concurrent admin writes can't interleave and a crash mid-write can't leave a truncated file. `PRODUCTS` is then reloaded from the file.
 - `evict_product_cache` is **not** called for new products (nothing to evict).
 - A disk-cache prewarm for the new product is fired with `asyncio.create_task(prewarm_disk_slices([product]))` — `prewarm_disk_slices` is `async def` and offloads its sync work internally.
 
@@ -1524,7 +1525,18 @@ A wrong-layer choice has real costs: making `max_lods` an env var would let an o
 | `TILE_TIMEZONE`         | `Australia/Sydney` | IANA timezone for date conversion. See [§9](#9-date-timezone-and-coordinate-normalisation). |
 | `ADMIN_API_KEY`         | _(required)_       | Secret value compared against the `X-Admin-Key` header on every `/admin` request.          |
 
-### 15.3 Threading and cache sizing
+### 15.3 S3 client
+
+Tuning knobs for the botocore client used by `fsspec`/`s3fs` underneath every Zarr read. The defaults match `docker-compose.yml`; assembled into a single `botocore.Config` at module import in `services/store_registry.py` and passed through `client_kwargs` to `fsspec` for every `s3://` URL.
+
+| Variable             | Default | Description                                                                                                                                                                                                                                                                       |
+| -------------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `S3_ANON`            | `true`  | When `true` (or any non-`false`/`0`/`no` value), uses anonymous access — correct for the public AODN buckets. Set to `false` to let `fsspec` discover AWS credentials via env vars, `~/.aws/credentials`, or the EC2 instance role.                                              |
+| `S3_CONNECT_TIMEOUT` | `5`     | Seconds for DNS + TCP/TLS handshake. Bounds how long a stuck network state can pin a worker thread before failing — Python threads can't be cancelled, so without this an unreachable endpoint would hold the thread until the kernel eventually timed out (minutes).            |
+| `S3_READ_TIMEOUT`    | `30`    | Seconds of socket inactivity before a read fails. **Per-read**, not per-request — multi-MB Zarr chunks are fine within 30s of continuous progress; the timeout only fires when the connection genuinely stalls. Pairs with `S3_MAX_ATTEMPTS` to retry transient blips.            |
+| `S3_MAX_ATTEMPTS`    | `2`     | Maximum total attempts (initial + retries) per S3 operation, using botocore's `standard` retry mode (exponential backoff on retryable errors). Keep low so a slow request fails fast instead of compounding cold-S3 latency across retries.                                       |
+
+### 15.4 Threading and cache sizing
 
 | Variable               | Default | Description                                                                                                             |
 | ---------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------- |
@@ -1537,7 +1549,7 @@ A wrong-layer choice has real costs: making `max_lods` an env var would let an o
 | `PROCESSED_CACHE_TTL_SECONDS` | `600` | Per-entry TTL for the L1 processed-grid cache (`cachetools.TTLCache`). Same idle-RAM rationale as `SLICE_CACHE_TTL_SECONDS`. |
 | `STORE_TTL_SECONDS`    | `600`   | Stale-while-revalidate window for the Zarr store singleton.                                                             |
 
-### 15.4 Disk cache (L3)
+### 15.5 Disk cache (L3)
 
 | Variable                         | Default   | Description                                                                               |
 | -------------------------------- | --------- | ----------------------------------------------------------------------------------------- |
@@ -1547,7 +1559,7 @@ A wrong-layer choice has real costs: making `max_lods` an env var would let an o
 | `PREWARM_WORKERS`                | `8`       | Spawn-gate (`_PREWARM_SEM`) cap used during the startup disk prewarm and per-product prewarm fired by `POST /admin/products`. Bounds concurrent S3 fetches *and* the pending-coroutine count when product × date is large. |
 | `CACHE_REFRESH_INTERVAL_SECONDS` | `14400`   | Period (seconds) between background refresh cycles. Default 4 hours.                      |
 
-### 15.5 Logging
+### 15.6 Logging
 
 | Variable                        | Default    | Description                                                                                                                                                            |
 | ------------------------------- | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
