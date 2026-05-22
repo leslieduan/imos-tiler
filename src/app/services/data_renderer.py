@@ -9,11 +9,61 @@ import xarray as xr
 from cachetools import TTLCache
 
 from app.constants import LOD, Product
-from app.utils.geo import dataset_bounds, json_safe_float
+from app.utils.geo import json_safe_float
 from app.utils.image import encode_rgba
 from app.utils.memoizer import Memoizer
 
 logger = logging.getLogger(__name__)
+
+
+try:
+    from numba import njit, prange
+
+    _HAS_NUMBA = True
+
+    @njit(parallel=True, cache=True, fastmath=True)
+    def _numba_bilinear(src: np.ndarray, total_h: int, total_w: int) -> np.ndarray:
+        """JIT-compiled bilinear with NaN propagation. Output positions match
+        np.linspace(0, src-1, total) on both axes — the same mapping xr.interp
+        produces, and the same mapping the WebGL shader assumes (see docs/technical.md §5.6).
+
+        Inputs:
+          src: float32, shape (src_h, src_w), oriented north→south.
+          total_h, total_w: target dims.
+
+        Output: float32 (total_h, total_w). NaN where any of the 4 source neighbours is NaN.
+        """
+        src_h, src_w = src.shape
+        out = np.empty((total_h, total_w), dtype=np.float32)
+        sy_scale = (src_h - 1.0) / (total_h - 1.0) if total_h > 1 else 0.0
+        sx_scale = (src_w - 1.0) / (total_w - 1.0) if total_w > 1 else 0.0
+        for i in prange(total_h):
+            sy = i * sy_scale
+            y0 = int(sy)
+            y1 = y0 + 1 if y0 + 1 < src_h else src_h - 1
+            dy = sy - y0
+            for j in range(total_w):
+                sx = j * sx_scale
+                x0 = int(sx)
+                x1 = x0 + 1 if x0 + 1 < src_w else src_w - 1
+                dx = sx - x0
+                a = src[y0, x0]
+                b = src[y0, x1]
+                c = src[y1, x0]
+                d = src[y1, x1]
+                if np.isnan(a) or np.isnan(b) or np.isnan(c) or np.isnan(d):
+                    out[i, j] = np.nan
+                else:
+                    top = a * (1.0 - dx) + b * dx
+                    bot = c * (1.0 - dx) + d * dx
+                    out[i, j] = top * (1.0 - dy) + bot * dy
+        return out
+
+except (
+    ImportError
+):  # pragma: no cover — numba is a hard dep; this guards against broken install only
+    _HAS_NUMBA = False
+    logger.warning("numba unavailable; falling back to xr.interp (~5× slower on Intel)")
 
 
 _PROCESSED_CACHE_SIZE = int(os.environ.get("PROCESSED_CACHE_SIZE", 50))
@@ -27,30 +77,58 @@ _processed_memo: Memoizer = Memoizer(_processed_cache)
 
 
 def warmup_resample() -> None:
-    """Prime scipy.interpolate + BLAS so the first real tile request doesn't pay
-    ~1.5s of one-time overhead (lazy imports, thread pool init, allocator warmup).
-    Synchronous; intended to be called once during startup.
+    """Prime the numba JIT (and scipy/BLAS in the fallback path) so the first real
+    tile request doesn't pay one-time init overhead. Synchronous; intended to be
+    called once during startup.
     """
     t0 = time.monotonic()
     ds = xr.Dataset(
         {"v": (("lat", "lon"), np.zeros((16, 16), dtype=np.float32))},
         coords={"lat": np.linspace(1.0, 0.0, 16), "lon": np.linspace(0.0, 1.0, 16)},
     )
-    _resample_to_grid(ds, 32, 32)
-    logger.info("[timing] resample warmup", extra={"ms": round((time.monotonic() - t0) * 1000, 1)})
+    _resample_variables_to_grid(ds, ["v"], 32, 32)
+    logger.info(
+        "[timing] resample warmup",
+        extra={
+            "ms": round((time.monotonic() - t0) * 1000, 1),
+            "backend": "numba" if _HAS_NUMBA else "xr.interp",
+        },
+    )
 
 
-def _resample_to_grid(ds: xr.Dataset, total_w: int, total_h: int) -> xr.Dataset:
-    # The source Zarr grid points don't align with the target pixel positions,
-    # so we interpolate: for each of the total_w×total_h output pixels, xarray finds
-    # the surrounding source points and computes a weighted average (bilinear).
-    # This covers the full LOD grid (all chunks combined), not a single tile —
-    # _extract_chunk then slices the relevant chunk out of the result.
-    lon_min, lon_max, lat_min, lat_max = dataset_bounds(ds)
+def _resample_variables_to_grid(
+    ds: xr.Dataset, variables: list[str], total_w: int, total_h: int
+) -> list[np.ndarray]:
+    """Bilinear-resample each named variable to a (total_h, total_w) grid.
+
+    Output pixel positions follow np.linspace(0, src-1, total) on both axes — the
+    same mapping the WebGL shader assumes (see docs/technical.md §5.6). NaN propagates
+    where any of the 4 source neighbours is NaN, matching xr.interp(method='linear').
+
+    Returns a list of float32 ndarrays in the same order as ``variables``, each
+    oriented north→south.
+    """
+    # Orient source north→south so index-based bilinear matches the shader's lat mapping.
+    flip = float(ds.lat[0]) < float(ds.lat[-1])
+
+    if _HAS_NUMBA:
+        out: list[np.ndarray] = []
+        for v in variables:
+            arr = ds[v].values.astype(np.float32, copy=False).squeeze()
+            if flip:
+                arr = np.ascontiguousarray(arr[::-1, :])
+            out.append(_numba_bilinear(arr, total_h, total_w))
+        return out
+
+    # Fallback: xarray's bilinear interp on the same linspace mapping.
+    lon_min = float(ds.lon.min())
+    lon_max = float(ds.lon.max())
+    lat_min = float(ds.lat.min())
+    lat_max = float(ds.lat.max())
     target_lons = np.linspace(lon_min, lon_max, total_w)
     target_lats = np.linspace(lat_max, lat_min, total_h)  # north → south
-    result = ds.interp(lon=target_lons, lat=target_lats, method="linear")
-    return result
+    ds_r = ds[variables].interp(lon=target_lons, lat=target_lats, method="linear")
+    return [ds_r[v].values.squeeze().astype(np.float32, copy=False) for v in variables]
 
 
 def _normalize(arr: np.ndarray, lo: float, hi: float, out_max: int) -> np.ndarray:
@@ -91,8 +169,7 @@ def _compute_processed(
     variables = product.variables
 
     t0 = time.monotonic()
-    ds_r = _resample_to_grid(ds[variables], total_w, total_h)
-    raw = [ds_r[v].values.squeeze() for v in variables]
+    raw = _resample_variables_to_grid(ds, variables, total_w, total_h)
     resample_ms = (time.monotonic() - t0) * 1000
 
     t0 = time.monotonic()
