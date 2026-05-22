@@ -18,6 +18,12 @@ services:
       # public AODN buckets. Set false to let fsspec discover AWS credentials for private
       # buckets via env vars, ~/.aws/credentials, or IAM role.
       - S3_ANON=${S3_ANON:-true}
+      # Per-socket S3 timeouts (botocore). connect_timeout bounds DNS + TCP/TLS
+      # handshake; read_timeout is per-read inactivity, not total request
+      # duration — zarr chunks are MB-sized so 30s has lots of headroom.
+      - S3_CONNECT_TIMEOUT=${S3_CONNECT_TIMEOUT:-5}
+      - S3_READ_TIMEOUT=${S3_READ_TIMEOUT:-30}
+      - S3_MAX_ATTEMPTS=${S3_MAX_ATTEMPTS:-2}
       - THREAD_POOL_SIZE=${THREAD_POOL_SIZE:-100}
       - SLICE_CACHE_SIZE=${SLICE_CACHE_SIZE:-10}
       - SLICE_CACHE_TTL_SECONDS=${SLICE_CACHE_TTL_SECONDS:-600}

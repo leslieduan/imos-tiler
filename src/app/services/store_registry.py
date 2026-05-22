@@ -19,6 +19,7 @@ import time
 
 import anyio
 import xarray as xr
+from botocore.config import Config
 
 from app.constants import COORD_NAMES
 from app.utils.dates import ts_to_local_date
@@ -33,6 +34,19 @@ _STORE_TTL = float(os.environ.get("STORE_TTL_SECONDS", 600))
 # so a many-product startup can't transiently consume tile-handler slots.
 _STORE_PREWARM_LIMITER = anyio.CapacityLimiter(int(os.environ.get("STORE_PREWARM_WORKERS", 8)))
 
+# Per-syscall timeouts on every S3 connection. Without these, a stuck socket can
+# pin a worker thread indefinitely (Python threads can't be cancelled, so a
+# request-level wait would free the request but leave the thread held until the
+# kernel eventually times out — minutes under bad network conditions).
+# Reuse the same Config instance so s3fs's S3FileSystem singleton dedup works.
+_S3_CLIENT_KWARGS = {
+    "config": Config(
+        connect_timeout=int(os.environ.get("S3_CONNECT_TIMEOUT", 5)),
+        read_timeout=int(os.environ.get("S3_READ_TIMEOUT", 30)),
+        retries={"max_attempts": int(os.environ.get("S3_MAX_ATTEMPTS", 2)), "mode": "standard"},
+    )
+}
+
 
 def _storage_options(store_url: str) -> dict:
     """Storage-backend options for fsspec/zarr, derived from the URL scheme.
@@ -46,7 +60,7 @@ def _storage_options(store_url: str) -> dict:
     """
     if store_url.startswith("s3://"):
         anon = os.environ.get("S3_ANON", "true").lower() not in ("false", "0", "no")
-        return {"anon": anon}
+        return {"anon": anon, "client_kwargs": _S3_CLIENT_KWARGS}
     return {}
 
 
