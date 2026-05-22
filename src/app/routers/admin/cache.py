@@ -6,11 +6,10 @@ processed grid). Per-product in-flight breakdown is computed by mapping each
 in-flight key's store_url back to its product id — useful for spotting one
 product saturating S3 fetches.
 
-Heavy work (filesystem walks) runs via ``anyio.to_thread.run_sync`` so the event
+Filesystem walks run in the FastAPI thread pool (sync handler) so the event
 loop stays free; the response itself is small.
 """
 
-import anyio
 from fastapi import APIRouter, HTTPException
 
 from app.constants import PRODUCTS
@@ -112,9 +111,8 @@ def _build_response() -> dict:
     response_model=CacheStateResponse,
     response_model_exclude_unset=True,
 )
-async def get_cache_state():
-    result = await anyio.to_thread.run_sync(_build_response)
-    return CacheStateResponse.model_validate(result)
+def get_cache_state():
+    return CacheStateResponse.model_validate(_build_response())
 
 
 @router.delete(
@@ -141,7 +139,7 @@ async def clear_memory_cache():
     ),
     response_model=DiskClearedResponse,
 )
-async def clear_disk_cache_endpoint():
+def clear_disk_cache_endpoint():
     if is_prewarm_running():
         raise HTTPException(
             status_code=409,
@@ -152,5 +150,4 @@ async def clear_disk_cache_endpoint():
             status_code=409,
             detail="Disk cache refresh is running — please try again once it completes.",
         )
-    cleared = await anyio.to_thread.run_sync(clear_disk_cache)
-    return DiskClearedResponse(**cleared)
+    return DiskClearedResponse(**clear_disk_cache())

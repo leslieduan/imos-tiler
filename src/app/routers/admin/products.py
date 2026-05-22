@@ -82,7 +82,7 @@ class ProductPayload(BaseModel):
     ),
     response_model=ProductCreatedResponse,
 )
-async def add_product(payload: ProductPayload):
+def add_product(payload: ProductPayload):
     try:
         product = register_product(payload.model_dump())
     except ValueError as e:
