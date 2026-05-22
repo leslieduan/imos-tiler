@@ -12,7 +12,7 @@ import pytest
 import xarray as xr
 
 import app.services.disk_cache as disk_cache
-from app.constants import Product
+from app.constants import PRODUCTS, Product
 
 
 @pytest.fixture
@@ -37,14 +37,8 @@ def _product(pid="p1", source="s3://bucket/x.zarr", variable="v"):
 # ---------------------------------------------------------------------------
 
 
-def test_disk_cache_path_returns_none_when_disabled(monkeypatch):
-    monkeypatch.setattr(disk_cache, "DISK_CACHE_PATH", None)
-    assert disk_cache.disk_cache_path("s3://x/y.zarr", "2024-01-01", ["v"]) is None
-
-
 def test_disk_cache_path_encodes_url_into_dirname(cache_root):
     p = disk_cache.disk_cache_path("s3://bucket/x.zarr", "2024-01-01", ["v"])
-    assert p is not None
     # `/` becomes `%` so URLs from different buckets don't collide.
     assert "%" in p.parent.name
     assert "bucket" in p.parent.name
@@ -134,25 +128,14 @@ def test_evict_pressure_removes_smallest_first(cache_root, monkeypatch):
     assert not (big.exists() and small.exists()), "no eviction occurred under pressure"
 
 
-def test_evict_pressure_disabled_when_env_unset(monkeypatch):
-    monkeypatch.setattr(disk_cache, "DISK_CACHE_PATH", None)
-    disk_cache._evict_if_over_threshold()
-
-
 # ---------------------------------------------------------------------------
 # prewarm_disk_slices
 # ---------------------------------------------------------------------------
 
 
-def test_prewarm_disabled_when_env_unset(monkeypatch):
-    monkeypatch.setattr(disk_cache, "DISK_CACHE_PATH", None)
-    with patch("app.services.loader.get_available_dates") as get_dates:
-        anyio.run(disk_cache.prewarm_disk_slices, [_product()])
-    get_dates.assert_not_called()
-
-
-def test_prewarm_writes_files_for_each_date(cache_root):
+def test_prewarm_writes_files_for_each_date(cache_root, monkeypatch):
     p = _product("p1", source="s3://b/x.zarr", variable="v")
+    monkeypatch.setitem(PRODUCTS, p.id, p)  # race-guard in _prewarm_one consults this
     ds = _make_slice()
 
     with (
@@ -184,10 +167,12 @@ def test_prewarm_skips_existing_files(cache_root):
     assert float(out["v"].values[0, 0]) == 5.0
 
 
-def test_prewarm_swallows_per_product_date_errors(cache_root):
+def test_prewarm_swallows_per_product_date_errors(cache_root, monkeypatch):
     """One product failing to list dates must NOT block others."""
     good = _product("good", source="s3://b/good.zarr", variable="v")
     bad = _product("bad", source="s3://b/bad.zarr", variable="v")
+    monkeypatch.setitem(PRODUCTS, good.id, good)
+    monkeypatch.setitem(PRODUCTS, bad.id, bad)
 
     def dates_for(url):
         if "bad" in url:
@@ -204,9 +189,10 @@ def test_prewarm_swallows_per_product_date_errors(cache_root):
     assert any(good_dir.glob("*.pkl.lz4")), "good product should still be cached"
 
 
-def test_prewarm_swallows_filenotfound_for_individual_slice(cache_root):
+def test_prewarm_swallows_filenotfound_for_individual_slice(cache_root, monkeypatch):
     """load_slice raising FileNotFoundError on one date must not abort the prewarm."""
     p = _product()
+    monkeypatch.setitem(PRODUCTS, p.id, p)
     seen: list[str] = []
 
     def load_one(url, date, vars_):
@@ -267,20 +253,14 @@ def test_evict_orphans_drops_unknown_product_dirs(cache_root):
     assert not orphan_dir.exists()
 
 
-def test_evict_stale_disabled_when_env_unset(monkeypatch):
-    monkeypatch.setattr(disk_cache, "DISK_CACHE_PATH", None)
-    with patch("app.services.loader.get_available_dates") as gad:
-        disk_cache.evict_stale_and_orphans([_product()])
-    gad.assert_not_called()
-
-
 # ---------------------------------------------------------------------------
 # refresh_disk_cache
 # ---------------------------------------------------------------------------
 
 
-def test_refresh_adds_new_dates(cache_root):
+def test_refresh_adds_new_dates(cache_root, monkeypatch):
     p = _product()
+    monkeypatch.setitem(PRODUCTS, p.id, p)
     cache_dir = disk_cache.disk_cache_path(p.source_path, "x", ["v"]).parent
     cache_dir.mkdir(parents=True)
     (cache_dir / "2024-01-01.pkl.lz4").write_bytes(b"placeholder")
@@ -296,13 +276,6 @@ def test_refresh_adds_new_dates(cache_root):
 
     cached = sorted(f.name for f in cache_dir.glob("*.pkl.lz4"))
     assert "2024-01-02.pkl.lz4" in cached
-
-
-def test_refresh_disabled_when_env_unset(monkeypatch):
-    monkeypatch.setattr(disk_cache, "DISK_CACHE_PATH", None)
-    with patch("app.services.loader.get_available_dates") as gad:
-        anyio.run(disk_cache.refresh_disk_cache, [_product()])
-    gad.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -321,11 +294,6 @@ def test_evict_product_dir_removes_whole_dir(cache_root):
     assert not d.exists()
 
 
-def test_evict_product_dir_when_disabled_is_noop(monkeypatch):
-    monkeypatch.setattr(disk_cache, "DISK_CACHE_PATH", None)
-    disk_cache.evict_product_dir(_product())
-
-
 def test_evict_product_dir_when_missing_is_noop(cache_root):
     # Nothing on disk yet — must not crash.
     disk_cache.evict_product_dir(_product("never-cached"))
@@ -334,11 +302,6 @@ def test_evict_product_dir_when_missing_is_noop(cache_root):
 # ---------------------------------------------------------------------------
 # clear_disk_cache
 # ---------------------------------------------------------------------------
-
-
-def test_clear_disk_cache_disabled_returns_zeros(monkeypatch):
-    monkeypatch.setattr(disk_cache, "DISK_CACHE_PATH", None)
-    assert disk_cache.clear_disk_cache() == {"files": 0, "directories": 0}
 
 
 def test_clear_disk_cache_empty_cache_returns_zeros(cache_root):

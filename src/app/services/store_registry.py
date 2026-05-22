@@ -10,12 +10,14 @@ so ``load_slice`` / ``get_available_dates`` can resolve a local date in O(1)
 instead of converting every timestamp on the hot path.
 """
 
+import asyncio
 import concurrent.futures
 import logging
 import os
 import threading
 import time
 
+import anyio
 import xarray as xr
 
 from app.constants import COORD_NAMES
@@ -24,6 +26,25 @@ from app.utils.dates import ts_to_local_date
 logger = logging.getLogger(__name__)
 
 _STORE_TTL = float(os.environ.get("STORE_TTL_SECONDS", 600))
+
+# Capacity gate for concurrent store opens during prewarm. Bounded to the S3
+# connection ceiling, not CPU — same rationale as _PREWARM_LIMITER in
+# services/disk_cache.py. Runs on the shared anyio pool but a separate budget
+# so a many-product startup can't transiently consume tile-handler slots.
+_STORE_PREWARM_LIMITER = anyio.CapacityLimiter(int(os.environ.get("STORE_PREWARM_WORKERS", 8)))
+
+# Per-syscall timeouts on every S3 connection. Without these, a stuck socket can
+# pin a worker thread indefinitely (Python threads can't be cancelled, so a
+# request-level wait would free the request but leave the thread held until the
+# kernel eventually times out — minutes under bad network conditions).
+# Passed via `config_kwargs` (not `client_kwargs`): s3fs builds its own Config
+# and passes it as `config=` to create_client, so a `config` key in client_kwargs
+# collides with that positional and raises TypeError.
+_S3_CONFIG_KWARGS = {
+    "connect_timeout": int(os.environ.get("S3_CONNECT_TIMEOUT", 5)),
+    "read_timeout": int(os.environ.get("S3_READ_TIMEOUT", 30)),
+    "retries": {"max_attempts": int(os.environ.get("S3_MAX_ATTEMPTS", 2)), "mode": "standard"},
+}
 
 
 def _storage_options(store_url: str) -> dict:
@@ -38,7 +59,7 @@ def _storage_options(store_url: str) -> dict:
     """
     if store_url.startswith("s3://"):
         anon = os.environ.get("S3_ANON", "true").lower() not in ("false", "0", "no")
-        return {"anon": anon}
+        return {"anon": anon, "config_kwargs": _S3_CONFIG_KWARGS}
     return {}
 
 
@@ -145,14 +166,22 @@ class StoreRegistry:
         with self._lock:
             return self._date_index.get(store_url, {})
 
-    def prewarm(self, store_urls: list[str]) -> None:
-        """Start an open per URL in a daemon thread.
+    async def prewarm(self, store_urls: list[str]) -> None:
+        """Open every URL in parallel via the anyio thread pool.
 
         Moves the one-time S3 metadata cost from the first user request to server
         startup, and lets get_products_availability respond fast on first call.
+        Per-URL failures are logged and swallowed so a single bad URL doesn't
+        block the others.
         """
-        for url in store_urls:
-            threading.Thread(target=self.get, args=(url,), daemon=True).start()
+
+        async def _one(url: str) -> None:
+            try:
+                await anyio.to_thread.run_sync(self.get, url, limiter=_STORE_PREWARM_LIMITER)
+            except Exception:
+                logger.exception("Store prewarm failed", extra={"store_url": url})
+
+        await asyncio.gather(*(_one(url) for url in store_urls))
 
     def clear(self) -> None:
         """Drop all cached state. Intended for tests."""
@@ -190,5 +219,5 @@ def get_store(store_url: str) -> xr.Dataset:
     return store_registry.get(store_url)
 
 
-def prewarm_stores(store_urls: list[str]) -> None:
-    store_registry.prewarm(store_urls)
+async def prewarm_stores(store_urls: list[str]) -> None:
+    await store_registry.prewarm(store_urls)

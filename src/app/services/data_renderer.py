@@ -5,7 +5,7 @@ from collections.abc import Callable
 
 import numpy as np
 import xarray as xr
-from cachetools import LRUCache
+from cachetools import TTLCache
 
 from app.constants import LOD, Product
 from app.utils.geo import dataset_bounds, json_safe_float
@@ -16,7 +16,12 @@ logger = logging.getLogger(__name__)
 
 
 _PROCESSED_CACHE_SIZE = int(os.environ.get("PROCESSED_CACHE_SIZE", 50))
-_processed_cache: LRUCache = LRUCache(maxsize=_PROCESSED_CACHE_SIZE)
+# L1 entries serve the tile-burst for one (product, date, LOD); same idle-RAM
+# argument as L2 (see services/loader.py). TTL is insertion-based, so a
+# stationary session >TTL incurs one re-resample on the next request — ~10-50 ms,
+# negligible vs the steady-RAM savings during idle periods.
+_PROCESSED_CACHE_TTL = int(os.environ.get("PROCESSED_CACHE_TTL_SECONDS", 600))
+_processed_cache: TTLCache = TTLCache(maxsize=_PROCESSED_CACHE_SIZE, ttl=_PROCESSED_CACHE_TTL)
 _processed_memo: Memoizer = Memoizer(_processed_cache)
 
 

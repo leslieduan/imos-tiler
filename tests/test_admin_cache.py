@@ -91,12 +91,6 @@ def test_get_cache_returns_top_level_keys(monkeypatch):
     assert set(body.keys()) == {"disk", "disk_writes", "in_flight", "memory_cache", "products"}
 
 
-def test_disk_disabled_when_env_unset(monkeypatch):
-    monkeypatch.setattr(disk_cache, "DISK_CACHE_PATH", None)
-    body = client.get("/admin/cache", headers=_HEADERS).json()
-    assert body["disk"] == {"enabled": False}
-
-
 def test_disk_writes_shape():
     body = client.get("/admin/cache", headers=_HEADERS).json()
     dw = body["disk_writes"]
@@ -142,8 +136,15 @@ def test_products_in_response_match_registered_products():
     # The conftest seeds these two products.
     assert set(body["products"].keys()) == {"sea_level_anomaly", "ocean_current"}
     for entry in body["products"].values():
-        assert set(entry.keys()) == {"disk", "in_flight"}
-        assert set(entry["in_flight"].keys()) == {"slice", "processed"}
+        assert set(entry.keys()) == {
+            "file_count",
+            "total_bytes",
+            "oldest_date",
+            "newest_date",
+            "last_write_at",
+            "slice_in_flight",
+            "processed_in_flight",
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -160,25 +161,23 @@ def test_per_product_disk_stats_reflect_files_on_disk(cache_root):
     (cache_dir / "2024-06-15.pkl.lz4").write_bytes(b"x" * 250)
 
     body = client.get("/admin/cache", headers=_HEADERS).json()
-    sla_disk = body["products"]["sea_level_anomaly"]["disk"]
+    sla = body["products"]["sea_level_anomaly"]
 
-    assert sla_disk["file_count"] == 2
-    assert sla_disk["total_bytes"] == 350
-    assert sla_disk["oldest_date"] == "2024-01-01"
-    assert sla_disk["newest_date"] == "2024-06-15"
-    assert sla_disk["last_write_at"] is not None  # ISO UTC timestamp
+    assert sla["file_count"] == 2
+    assert sla["total_bytes"] == 350
+    assert sla["oldest_date"] == "2024-01-01"
+    assert sla["newest_date"] == "2024-06-15"
+    assert sla["last_write_at"] is not None  # ISO UTC timestamp
 
 
 def test_per_product_disk_stats_empty_when_no_files(cache_root):
     body = client.get("/admin/cache", headers=_HEADERS).json()
-    sla_disk = body["products"]["sea_level_anomaly"]["disk"]
-    assert sla_disk == {
-        "file_count": 0,
-        "total_bytes": 0,
-        "oldest_date": None,
-        "newest_date": None,
-        "last_write_at": None,
-    }
+    sla = body["products"]["sea_level_anomaly"]
+    assert sla["file_count"] == 0
+    assert sla["total_bytes"] == 0
+    assert sla["oldest_date"] is None
+    assert sla["newest_date"] is None
+    assert sla["last_write_at"] is None
 
 
 def test_global_disk_stats_aggregate_across_products(cache_root, monkeypatch):
@@ -191,7 +190,6 @@ def test_global_disk_stats_aggregate_across_products(cache_root, monkeypatch):
     (cache_dir / "2024-01-01.pkl.lz4").write_bytes(b"x" * 1000)
 
     body = client.get("/admin/cache", headers=_HEADERS).json()
-    assert body["disk"]["enabled"] is True
     assert body["disk"]["total_bytes"] == 1000
     assert body["disk"]["limit_bytes"] == 1024**3
     assert body["disk"]["over_eviction_threshold"] is False
@@ -252,8 +250,8 @@ def test_inflight_breakdown_distinguishes_products_sharing_a_store():
 
     try:
         body = client.get("/admin/cache", headers=_HEADERS).json()
-        assert body["products"]["sea_level_anomaly"]["in_flight"]["slice"] == 1
-        assert body["products"]["ocean_current"]["in_flight"]["slice"] == 1
+        assert body["products"]["sea_level_anomaly"]["slice_in_flight"] == 1
+        assert body["products"]["ocean_current"]["slice_in_flight"] == 1
         assert body["in_flight"]["slice"]["current"] == 2
     finally:
         with loader._slice_memo._lock:
@@ -270,7 +268,7 @@ def test_inflight_unknown_store_not_attributed_to_any_product():
     try:
         body = client.get("/admin/cache", headers=_HEADERS).json()
         assert body["in_flight"]["slice"]["current"] == 1
-        assert all(entry["in_flight"]["slice"] == 0 for entry in body["products"].values())
+        assert all(entry["slice_in_flight"] == 0 for entry in body["products"].values())
     finally:
         with loader._slice_memo._lock:
             loader._slice_memo._inflight.pop(ghost_key, None)
@@ -346,13 +344,6 @@ def test_delete_disk_cache_removes_files_and_dirs(cache_root):
     assert body == {"files": 2, "directories": 1}
     assert not d.exists()
     assert cache_root.exists()  # base dir preserved
-
-
-def test_delete_disk_cache_disabled_returns_zeros(monkeypatch):
-    monkeypatch.setattr(disk_cache, "DISK_CACHE_PATH", None)
-    r = client.delete("/admin/cache/disk", headers=_HEADERS)
-    assert r.status_code == 200
-    assert r.json() == {"files": 0, "directories": 0}
 
 
 def test_delete_disk_cache_empty_cache_returns_zeros(cache_root):

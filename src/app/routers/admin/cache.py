@@ -6,11 +6,10 @@ processed grid). Per-product in-flight breakdown is computed by mapping each
 in-flight key's store_url back to its product id — useful for spotting one
 product saturating S3 fetches.
 
-Heavy work (filesystem walks) runs via ``anyio.to_thread.run_sync`` so the event
+Filesystem walks run in the FastAPI thread pool (sync handler) so the event
 loop stays free; the response itself is small.
 """
 
-import anyio
 from fastapi import APIRouter, HTTPException
 
 from app.constants import PRODUCTS
@@ -50,8 +49,10 @@ def _build_response() -> dict:
     slice_stats = slice_memo_stats()
     processed_stats = processed_memo_stats()
 
+    # Snapshot under list(...) so a concurrent load_products() reload can't
+    # raise "dictionary changed size during iteration" mid-comprehension.
     product_index = {
-        (p.source_path, tuple(sorted(p.variables))): pid for pid, p in PRODUCTS.items()
+        (p.source_path, tuple(sorted(p.variables))): pid for pid, p in list(PRODUCTS.items())
     }
     slice_inflight_by_pid = _inflight_by_product(slice_stats["inflight_keys"], product_index)
     processed_inflight_by_pid = _inflight_by_product(
@@ -61,11 +62,9 @@ def _build_response() -> dict:
     disk_stats = collect_disk_stats(list(PRODUCTS.values()))
     products = {
         pid: {
-            "disk": disk_stats["per_product"][pid],
-            "in_flight": {
-                "slice": slice_inflight_by_pid.get(pid, 0),
-                "processed": processed_inflight_by_pid.get(pid, 0),
-            },
+            **disk_stats["per_product"][pid],
+            "slice_in_flight": slice_inflight_by_pid.get(pid, 0),
+            "processed_in_flight": processed_inflight_by_pid.get(pid, 0),
         }
         for pid in PRODUCTS
     }
@@ -112,9 +111,8 @@ def _build_response() -> dict:
     response_model=CacheStateResponse,
     response_model_exclude_unset=True,
 )
-async def get_cache_state():
-    result = await anyio.to_thread.run_sync(_build_response)
-    return CacheStateResponse.model_validate(result)
+def get_cache_state():
+    return CacheStateResponse.model_validate(_build_response())
 
 
 @router.delete(
@@ -127,7 +125,10 @@ async def get_cache_state():
     ),
     response_model=MemoryClearedResponse,
 )
-async def clear_memory_cache():
+def clear_memory_cache():
+    # Sync def: the eviction work is dict pops under a threading.Lock (microseconds for
+    # cache sizes ≤50). FastAPI dispatches sync handlers to the thread pool, so the loop
+    # stays free without us having to wrap in to_thread.run_sync.
     return MemoryClearedResponse(slice=clear_slice_cache(), processed=clear_processed_cache())
 
 
@@ -141,7 +142,7 @@ async def clear_memory_cache():
     ),
     response_model=DiskClearedResponse,
 )
-async def clear_disk_cache_endpoint():
+def clear_disk_cache_endpoint():
     if is_prewarm_running():
         raise HTTPException(
             status_code=409,
@@ -152,5 +153,4 @@ async def clear_disk_cache_endpoint():
             status_code=409,
             detail="Disk cache refresh is running — please try again once it completes.",
         )
-    cleared = await anyio.to_thread.run_sync(clear_disk_cache)
-    return DiskClearedResponse(**cleared)
+    return DiskClearedResponse(**clear_disk_cache())

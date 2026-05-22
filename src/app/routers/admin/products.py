@@ -3,6 +3,7 @@
 import asyncio
 import logging
 
+import anyio
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
@@ -11,6 +12,7 @@ from app.schemas.admin import ProductCreatedResponse
 from app.services.disk_cache import prewarm_disk_slices
 from app.services.loader import evict_product_cache
 from app.services.product_config import register_product, remove_product
+from app.services.store_registry import get_store
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +74,30 @@ class ProductPayload(BaseModel):
         return v
 
 
+def _validate_store(payload: ProductPayload) -> None:
+    """Open the store and verify declared variables exist. Raises HTTPException on failure.
+
+    Catches all open failures (network, missing dims, bad scheme, …) and surfaces
+    them as 400. Without this, a typo'd URL stays registered and the failure only
+    appears in the background prewarm log — confusing for the operator.
+    """
+    try:
+        store = get_store(payload.source_path)
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot open store {payload.source_path!r}: {type(e).__name__}: {e}",
+        ) from e
+    declared = payload.variable if isinstance(payload.variable, list) else [payload.variable]
+    missing = [v for v in declared if v not in store.data_vars]
+    if missing:
+        available = sorted(str(v) for v in store.data_vars)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Variables {missing} not present in store. Available: {available}",
+        )
+
+
 @router.post(
     "/products",
     status_code=201,
@@ -83,8 +109,14 @@ class ProductPayload(BaseModel):
     response_model=ProductCreatedResponse,
 )
 async def add_product(payload: ProductPayload):
+    # Test-open the store before persisting so a bad URL or missing variable
+    # surfaces here as 400, not as a silent failure in the background prewarm.
+    await anyio.to_thread.run_sync(_validate_store, payload)
+    # Offload the sync read+write+reload of products.json so the event loop
+    # stays free; the handler itself must remain async because _spawn_prewarm
+    # calls asyncio.create_task, which requires a running loop in this thread.
     try:
-        product = register_product(payload.model_dump())
+        product = await anyio.to_thread.run_sync(register_product, payload.model_dump())
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
     except Exception as e:

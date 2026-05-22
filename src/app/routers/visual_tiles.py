@@ -8,8 +8,7 @@ from fastapi.openapi.models import Example
 from fastapi.responses import Response
 
 from app.schemas.visual_tiles import ColormapListResponse
-from app.services.colormap_config import is_categorical, list_colormaps
-from app.services.colormap_lookup import resolve_colormap
+from app.services.colormap_config import list_colormaps
 from app.services.legend_renderer import render_legend
 from app.services.loader import get_available_dates, load_slice_uncached
 from app.services.store_registry import get_store
@@ -29,17 +28,21 @@ from .shared import (
     PRODUCT_EX,
     get_product_or_404,
     load_slice_or_404,
+    parse_rescale,
+    reject_webp_for_categorical,
+    require_rescale_if_categorical,
+    resolve_colormap_or_error,
+    single_variable_or_400,
     validate_date,
 )
 
-_MAX_ANIMATION_FRAMES = 60
+_MAX_ANIMATION_FRAMES = 30
 
 # Capacity gate for /animation per-frame S3 fan-out. Sits on the shared anyio
-# pool as a *separate* concurrency budget from tile handlers — a 60-frame
-# request cannot starve tile-handler slots. Sized higher than _PREWARM_LIMITER
-# because animation is user-facing (latency matters) but still capped so one
-# request does not monopolise the pool.
-_ANIMATION_LIMITER = anyio.CapacityLimiter(int(os.environ.get("ANIMATION_WORKERS", 16)))
+# pool as a *separate* concurrency budget from tile handlers — a 30-frame
+# request cannot starve tile-handler slots. Sized to the aiobotocore S3
+# connection-pool ceiling (~10/host) — going higher just queues on the pool.
+_ANIMATION_LIMITER = anyio.CapacityLimiter(int(os.environ.get("ANIMATION_WORKERS", 10)))
 
 router = APIRouter()
 router.include_router(products_router)
@@ -52,42 +55,6 @@ router.include_router(products_router)
 # browser/CDN absorb cross-request repeats.
 _tile_memo: Memoizer = Memoizer()
 _bbox_memo: Memoizer = Memoizer()
-
-
-def _parse_rescale(rescale: str | None) -> tuple[float, float] | None:
-    if not rescale:
-        return None
-    try:
-        lo, hi = rescale.split(",")
-        return (float(lo), float(hi))
-    except ValueError as e:
-        raise HTTPException(
-            status_code=400, detail="rescale must be 'min,max', e.g. '-0.5,0.5'"
-        ) from e
-
-
-def _require_rescale_if_categorical(
-    colormap_name: str, rescale_range: tuple[float, float] | None
-) -> None:
-    if is_categorical(colormap_name) and rescale_range is None:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Colormap '{colormap_name}' is categorical — rescale=min,max is required.",
-        )
-
-
-def _reject_webp_for_categorical(colormap_name: str, fmt: ImageFormat) -> None:
-    # Lossy WebP introduces ringing/blocking around the hard colour boundaries
-    # of a categorical colormap. PNG (or a lossless WebP, not currently exposed)
-    # is the only safe choice — fail loud rather than serve a corrupted legend.
-    if fmt == "webp" and is_categorical(colormap_name):
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Colormap '{colormap_name}' is categorical and cannot be encoded as WebP "
-                "(lossy compression corrupts the discrete colour boundaries). Use .png."
-            ),
-        )
 
 
 @router.get("/colormaps", summary="List available colormaps", response_model=ColormapListResponse)
@@ -120,12 +87,8 @@ def get_legend(
         pattern="^(horizontal|vertical)$",
     ),
 ):
-    try:
-        resolve_colormap(name)
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
-
-    rescale_range = _parse_rescale(rescale)
+    resolve_colormap_or_error(name, status_code=404)
+    rescale_range = parse_rescale(rescale)
     png = render_legend(name, rescale_range, width, height, orientation)
     return Response(content=png, media_type="image/png", headers=IMMUTABLE_CACHE_HEADERS)
 
@@ -160,19 +123,10 @@ def get_tile(
         description="Value range as 'min,max'. Defaults to the global data range for the date.",
     ),
 ):
-    try:
-        resolve_colormap(colormap_name)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-
+    resolve_colormap_or_error(colormap_name)
     product = get_product_or_404(product_id)
     validate_date(date)
-    if isinstance(product.variable, list):
-        raise HTTPException(
-            status_code=400,
-            detail=f"Product '{product_id}' has multiple variables; visual tiles support single-variable products only.",
-        )
-    variable: str = product.variable  # narrowed by the isinstance check above
+    variable = single_variable_or_400(product, context="visual tiles")
 
     max_index = (1 << z) - 1
     if not (0 <= x <= max_index and 0 <= y <= max_index):
@@ -181,9 +135,9 @@ def get_tile(
             detail=f"Tile ({x},{y}) out of range for z={z}; valid range is 0–{max_index}.",
         )
 
-    rescale_range = _parse_rescale(rescale)
-    _require_rescale_if_categorical(colormap_name, rescale_range)
-    _reject_webp_for_categorical(colormap_name, ext)
+    rescale_range = parse_rescale(rescale)
+    require_rescale_if_categorical(colormap_name, rescale_range)
+    reject_webp_for_categorical(colormap_name, ext)
 
     key = (product.source_path, date, variable, z, x, y, colormap_name, rescale_range, ext)
 
@@ -328,25 +282,16 @@ def get_bbox(
         description="Coordinate reference system of the bbox. 'EPSG:4326' (default) for geographic degrees; 'EPSG:3857' for Web Mercator meters (Mapbox {bbox-epsg-3857}).",
     ),
 ):
-    try:
-        resolve_colormap(colormap_name)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-
+    resolve_colormap_or_error(colormap_name)
     product = get_product_or_404(product_id)
     validate_date(date)
-    if isinstance(product.variable, list):
-        raise HTTPException(
-            status_code=400,
-            detail=f"Product '{product_id}' has multiple variables; visual tiles support single-variable products only.",
-        )
-    variable: str = product.variable  # narrowed by the isinstance check above
+    variable = single_variable_or_400(product, context="visual tiles")
 
     bbox_tuple, crs = _parse_bbox_and_crs(bbox, crs, product.source_path)
 
-    rescale_range = _parse_rescale(rescale)
-    _require_rescale_if_categorical(colormap_name, rescale_range)
-    _reject_webp_for_categorical(colormap_name, ext)
+    rescale_range = parse_rescale(rescale)
+    require_rescale_if_categorical(colormap_name, rescale_range)
+    reject_webp_for_categorical(colormap_name, ext)
 
     key = (
         product.source_path,
@@ -451,33 +396,21 @@ async def get_animation(
             status_code=400, detail=f"from_date {from_date!r} is after to_date {to_date!r}."
         )
 
-    try:
-        resolve_colormap(colormap_name)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-
+    resolve_colormap_or_error(colormap_name)
     product = get_product_or_404(product_id)
-    if isinstance(product.variable, list):
-        raise HTTPException(
-            status_code=400,
-            detail=f"Product '{product_id}' has multiple variables; animation supports single-variable products only.",
-        )
-    variable: str = product.variable
+    variable = single_variable_or_400(product, context="animation")
 
-    bbox_tuple, crs = _parse_bbox_and_crs(bbox, crs, product.source_path)
+    # Offloaded: each may call get_store, which can block on xr.open_zarr on
+    # cold path or while a TTL refresh is racing the cached entry.
+    bbox_tuple, crs = await anyio.to_thread.run_sync(
+        _parse_bbox_and_crs, bbox, crs, product.source_path
+    )
 
-    rescale_range = _parse_rescale(rescale)
-    _require_rescale_if_categorical(colormap_name, rescale_range)
-    if ext == "webp" and is_categorical(colormap_name):
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Colormap '{colormap_name}' is categorical and cannot be encoded as animated WebP "
-                "(lossy compression corrupts the discrete colour boundaries). Use .apng or .gif."
-            ),
-        )
+    rescale_range = parse_rescale(rescale)
+    require_rescale_if_categorical(colormap_name, rescale_range)
+    reject_webp_for_categorical(colormap_name, ext, animated=True)
 
-    available = get_available_dates(product.source_path)
+    available = await anyio.to_thread.run_sync(get_available_dates, product.source_path)
     if not available:
         raise HTTPException(
             status_code=404,
@@ -510,8 +443,8 @@ async def get_animation(
             ),
         )
 
-    resolved_w, resolved_h = _resolve_resolution(
-        product.source_path, bbox_tuple, crs, width, height
+    resolved_w, resolved_h = await anyio.to_thread.run_sync(
+        _resolve_resolution, product.source_path, bbox_tuple, crs, width, height
     )
 
     # Fan out the per-frame S3 reads in parallel on the anyio pool, gated by

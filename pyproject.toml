@@ -63,6 +63,7 @@ testpaths = ["tests"]
 pythonpath = ["src"]
 markers = [
     "real_prewarm: opt out of the default prewarm patch so the real _spawn_prewarm runs",
+    "real_validate: opt out of the default _validate_store stub so the real one runs",
 ]
 
 [tool.coverage.run]

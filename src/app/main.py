@@ -89,14 +89,14 @@ async def lifespan(app: FastAPI):
         },
     )
     store_urls = list({p.source_path for p in PRODUCTS.values()})
-    prewarm_stores(store_urls)
+    store_prewarm_task = asyncio.create_task(prewarm_stores(store_urls))
     prewarm_task = asyncio.create_task(_startup_cache_sync(list(PRODUCTS.values())))
     interval = int(os.environ.get("CACHE_REFRESH_INTERVAL_SECONDS", 14400))
     logger.info("Cache refresh interval set", extra={"interval_seconds": interval})
     refresh_task = asyncio.create_task(_cache_refresh_loop(interval))
     yield
     logger.info("Shutting down")
-    for task in (prewarm_task, refresh_task):
+    for task in (store_prewarm_task, prewarm_task, refresh_task):
         task.cancel()
         try:
             await task

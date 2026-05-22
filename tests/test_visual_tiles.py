@@ -191,13 +191,9 @@ def test_animation_no_data_in_range_returns_404():
 
 
 def test_animation_frame_cap_rejected():
-    # 61 dates → one past the 60-frame cap. 2024 is a leap year (Feb has 29 days).
-    too_many = (
-        [f"2024-01-{d:02d}" for d in range(1, 32)]
-        + [f"2024-02-{d:02d}" for d in range(1, 30)]
-        + ["2024-03-01"]
-    )
-    assert len(too_many) == 61
+    # 31 dates → one past the 30-frame cap.
+    too_many = [f"2024-01-{d:02d}" for d in range(1, 32)]
+    assert len(too_many) == 31
     with (
         patch("app.routers.visual_tiles.get_available_dates", return_value=too_many),
         patch(
@@ -205,9 +201,9 @@ def test_animation_frame_cap_rejected():
             return_value=(140.0, -40.0, 150.0, -30.0),
         ),
     ):
-        response = client.get("/visual_tiles/sea_level_anomaly/2024-01-01/2024-03-01/animation.gif")
+        response = client.get("/visual_tiles/sea_level_anomaly/2024-01-01/2024-01-31/animation.gif")
     assert response.status_code == 400
-    assert "max is 60" in response.json()["detail"]
+    assert "max is 30" in response.json()["detail"]
 
 
 def test_animation_multi_variable_product_rejected():

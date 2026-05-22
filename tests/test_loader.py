@@ -73,12 +73,16 @@ def test_get_lod_grids_fast_path_skips_store(monkeypatch):
 
 def test_storage_options_s3_defaults_anon(monkeypatch):
     monkeypatch.delenv("S3_ANON", raising=False)
-    assert _storage_options("s3://bucket/path.zarr") == {"anon": True}
+    opts = _storage_options("s3://bucket/path.zarr")
+    assert opts["anon"] is True
+    assert "connect_timeout" in opts["config_kwargs"]
 
 
 def test_storage_options_s3_anon_disabled_via_env(monkeypatch):
     monkeypatch.setenv("S3_ANON", "false")
-    assert _storage_options("s3://bucket/path.zarr") == {"anon": False}
+    opts = _storage_options("s3://bucket/path.zarr")
+    assert opts["anon"] is False
+    assert "connect_timeout" in opts["config_kwargs"]
 
 
 def test_storage_options_non_s3_returns_empty():

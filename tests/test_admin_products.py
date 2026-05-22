@@ -39,6 +39,15 @@ def _default_quiet(request, monkeypatch):
     monkeypatch.setattr(admin_products, "_spawn_prewarm", lambda _product: None)
 
 
+@pytest.fixture(autouse=True)
+def _stub_validate_store(request, monkeypatch):
+    """No-op the store test-open by default; tests that exercise validation opt
+    out by marking with @pytest.mark.real_validate."""
+    if "real_validate" in request.keywords:
+        return
+    monkeypatch.setattr(admin_products, "_validate_store", lambda _payload: None)
+
+
 # ---------------------------------------------------------------------------
 # POST /admin/products — success
 # ---------------------------------------------------------------------------
@@ -123,6 +132,60 @@ def test_add_product_bad_chunk_px_rejected(chunk_px):
     }
     r = client.post("/admin/products", json=payload, headers=_HEADERS)
     assert r.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# POST /admin/products — store validation (test-open before persist)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.real_validate
+def test_add_product_bad_url_returns_400():
+    payload = {"id": "bogus", "source_path": "s3://no/such.zarr", "variable": "V"}
+    with (
+        patch(
+            "app.routers.admin.products.get_store",
+            side_effect=FileNotFoundError("no such bucket/key"),
+        ),
+        patch("app.routers.admin.products.register_product") as reg,
+    ):
+        r = client.post("/admin/products", json=payload, headers=_HEADERS)
+    assert r.status_code == 400
+    assert "Cannot open store" in r.json()["detail"]
+    reg.assert_not_called()  # bad URL must not get persisted
+
+
+@pytest.mark.real_validate
+def test_add_product_missing_variable_returns_400():
+    """Store opens, but declared variable isn't in data_vars → 400, no persistence."""
+    import xarray as xr
+
+    fake_store = xr.Dataset({"OTHER": ("x", [1.0])})
+    payload = {"id": "p", "source_path": "s3://b/x.zarr", "variable": "MISSING"}
+    with (
+        patch("app.routers.admin.products.get_store", return_value=fake_store),
+        patch("app.routers.admin.products.register_product") as reg,
+    ):
+        r = client.post("/admin/products", json=payload, headers=_HEADERS)
+    assert r.status_code == 400
+    assert "MISSING" in r.json()["detail"]
+    reg.assert_not_called()
+
+
+@pytest.mark.real_validate
+def test_add_product_multi_variable_partial_missing_returns_400():
+    import xarray as xr
+
+    fake_store = xr.Dataset({"U": ("x", [1.0])})
+    payload = {"id": "p", "source_path": "s3://b/x.zarr", "variable": ["U", "V"]}
+    with (
+        patch("app.routers.admin.products.get_store", return_value=fake_store),
+        patch("app.routers.admin.products.register_product") as reg,
+    ):
+        r = client.post("/admin/products", json=payload, headers=_HEADERS)
+    assert r.status_code == 400
+    assert "V" in r.json()["detail"]
+    reg.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
