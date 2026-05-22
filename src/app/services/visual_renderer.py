@@ -56,7 +56,7 @@ def warmup_visual() -> None:
     except Exception:
         logger.warning("Visual warmup failed", exc_info=True)
         return
-    logger.info("[timing] visual warmup", extra={"ms": round((time.monotonic() - t0) * 1000, 1)})
+    logger.debug("[timing] visual warmup", extra={"ms": round((time.monotonic() - t0) * 1000, 1)})
 
 
 def _img_to_rgba(img: ImageData, cm: dict[int, tuple[int, int, int, int]]) -> np.ndarray:

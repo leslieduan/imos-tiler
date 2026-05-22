@@ -166,7 +166,7 @@ def warmup_resample() -> None:
         sample = np.zeros((32, 32), dtype=np.float32)
         _numba_normalize_uint32(sample, 0.0, 1.0, 16777215)
         _numba_normalize_uint8(sample, 0.0, 1.0, 255)
-    logger.info(
+    logger.debug(
         "[timing] resample warmup",
         extra={
             "ms": round((time.monotonic() - t0) * 1000, 1),
@@ -280,7 +280,7 @@ def _compute_processed(
             ocean &= vm
     normalize_ms = (time.monotonic() - t0) * 1000
 
-    logger.info(
+    logger.debug(
         "[timing] processed grid built",
         extra={
             "product_id": product.id,
@@ -415,7 +415,7 @@ def render_tile(
     png = encode_rgba(img)
     encode_ms = (time.monotonic() - t0) * 1000
 
-    logger.info(
+    logger.debug(
         "[timing] tile rendered",
         extra={
             "product_id": product.id,

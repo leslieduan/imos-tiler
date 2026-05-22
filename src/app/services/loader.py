@@ -88,7 +88,7 @@ def _compute_slice_from_store(store_url: str, date: str, variables: list[str]) -
         cached = read_slice_from_disk(cache_path)
         disk_ms = (time.monotonic() - t0) * 1000
         if cached is not None:
-            logger.info(
+            logger.debug(
                 "[timing] slice loaded from disk",
                 extra={"date": date, "disk_read_ms": round(disk_ms, 1)},
             )
@@ -105,7 +105,7 @@ def _compute_slice_from_store(store_url: str, date: str, variables: list[str]) -
         t0 = time.monotonic()
         result = store[variables].sel(time=pd.Timestamp(matching[0])).compute()
         elapsed = time.monotonic() - t0
-        logger.info(
+        logger.debug(
             "[timing] slice loaded from S3",
             extra={"date": date, "s3_fetch_ms": round(elapsed * 1000, 1)},
         )
