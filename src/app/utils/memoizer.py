@@ -39,7 +39,14 @@ class Memoizer:
         self._total_computes = 0
 
     def get_or_compute(self, key: Hashable, factory: Callable[[], T]) -> T:
-        """Return cached value, wait on an in-flight compute, or run ``factory()`` once."""
+        """Return cached value, wait on an in-flight compute, or run ``factory()`` once.
+
+        Must be called from a worker thread (sync ``def`` handler or
+        ``anyio.to_thread.run_sync``), never directly from an ``async def``
+        coroutine on the event loop. Waiters block on ``future.result()``,
+        which is a blocking syscall — invoking this from the loop would
+        freeze every other request behind a single in-flight compute.
+        """
         should_compute = False
         with self._lock:
             if self.cache is not None and key in self.cache:

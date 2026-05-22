@@ -125,7 +125,10 @@ def get_cache_state():
     ),
     response_model=MemoryClearedResponse,
 )
-async def clear_memory_cache():
+def clear_memory_cache():
+    # Sync def: the eviction work is dict pops under a threading.Lock (microseconds for
+    # cache sizes ≤50). FastAPI dispatches sync handlers to the thread pool, so the loop
+    # stays free without us having to wrap in to_thread.run_sync.
     return MemoryClearedResponse(slice=clear_slice_cache(), processed=clear_processed_cache())
 
 

@@ -12,7 +12,7 @@ import pytest
 import xarray as xr
 
 import app.services.disk_cache as disk_cache
-from app.constants import Product
+from app.constants import PRODUCTS, Product
 
 
 @pytest.fixture
@@ -151,8 +151,9 @@ def test_prewarm_disabled_when_env_unset(monkeypatch):
     get_dates.assert_not_called()
 
 
-def test_prewarm_writes_files_for_each_date(cache_root):
+def test_prewarm_writes_files_for_each_date(cache_root, monkeypatch):
     p = _product("p1", source="s3://b/x.zarr", variable="v")
+    monkeypatch.setitem(PRODUCTS, p.id, p)  # race-guard in _prewarm_one consults this
     ds = _make_slice()
 
     with (
@@ -184,10 +185,12 @@ def test_prewarm_skips_existing_files(cache_root):
     assert float(out["v"].values[0, 0]) == 5.0
 
 
-def test_prewarm_swallows_per_product_date_errors(cache_root):
+def test_prewarm_swallows_per_product_date_errors(cache_root, monkeypatch):
     """One product failing to list dates must NOT block others."""
     good = _product("good", source="s3://b/good.zarr", variable="v")
     bad = _product("bad", source="s3://b/bad.zarr", variable="v")
+    monkeypatch.setitem(PRODUCTS, good.id, good)
+    monkeypatch.setitem(PRODUCTS, bad.id, bad)
 
     def dates_for(url):
         if "bad" in url:
@@ -204,9 +207,10 @@ def test_prewarm_swallows_per_product_date_errors(cache_root):
     assert any(good_dir.glob("*.pkl.lz4")), "good product should still be cached"
 
 
-def test_prewarm_swallows_filenotfound_for_individual_slice(cache_root):
+def test_prewarm_swallows_filenotfound_for_individual_slice(cache_root, monkeypatch):
     """load_slice raising FileNotFoundError on one date must not abort the prewarm."""
     p = _product()
+    monkeypatch.setitem(PRODUCTS, p.id, p)
     seen: list[str] = []
 
     def load_one(url, date, vars_):
@@ -279,8 +283,9 @@ def test_evict_stale_disabled_when_env_unset(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_refresh_adds_new_dates(cache_root):
+def test_refresh_adds_new_dates(cache_root, monkeypatch):
     p = _product()
+    monkeypatch.setitem(PRODUCTS, p.id, p)
     cache_dir = disk_cache.disk_cache_path(p.source_path, "x", ["v"]).parent
     cache_dir.mkdir(parents=True)
     (cache_dir / "2024-01-01.pkl.lz4").write_bytes(b"placeholder")

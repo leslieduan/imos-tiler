@@ -31,7 +31,7 @@ import anyio
 import lz4.frame
 import xarray as xr
 
-from app.constants import DISK_CACHE_PATH, Product
+from app.constants import DISK_CACHE_PATH, PRODUCTS, Product
 
 logger = logging.getLogger(__name__)
 
@@ -163,6 +163,16 @@ def _prewarm_one(product: Product, date: str, variables: list[str]) -> str:
         # entries from the 10-slot L2 LRU.
         ds = load_slice_uncached(product.source_path, date, variables)
         if cache_path is not None:
+            # Guard against the admin add → delete race: if the product was deregistered
+            # (or replaced with a different object under the same id) while we were
+            # fetching from S3, don't recreate its cache dir — write_slice_to_disk would
+            # silently undo the deletion and leak orphan files until the next eviction.
+            if PRODUCTS.get(product.id) is not product:
+                logger.debug(
+                    "Prewarm write skipped — product no longer registered",
+                    extra={"product_id": product.id, "date": date},
+                )
+                return "skipped"
             write_slice_to_disk(cache_path, ds)
             logger.debug("Disk prewarm written", extra={"product_id": product.id, "date": date})
             return "written"
@@ -219,14 +229,22 @@ async def prewarm_disk_slices(products: list[Product]) -> None:
         async def _run_one(p: Product, d: str, v: list[str]) -> None:
             try:
                 r = await anyio.to_thread.run_sync(_prewarm_one, p, d, v)
-                counts[r] += 1
+                # .get() defensively: a future _prewarm_one return value not seeded
+                # in counts would otherwise raise KeyError and abort the task group.
+                counts[r] = counts.get(r, 0) + 1
             finally:
                 _PREWARM_SEM.release()
 
         async with anyio.create_task_group() as tg:
             for p, d, v in jobs:
                 await _PREWARM_SEM.acquire()
-                tg.start_soon(_run_one, p, d, v)
+                # If start_soon raises (task group cancellation), release the token we
+                # just acquired — otherwise the semaphore leaks for the process lifetime.
+                try:
+                    tg.start_soon(_run_one, p, d, v)
+                except BaseException:
+                    _PREWARM_SEM.release()
+                    raise
 
         logger.info(
             "Prewarm complete",
@@ -377,7 +395,13 @@ async def refresh_disk_cache(products: list[Product]) -> None:
         async with anyio.create_task_group() as tg:
             for p, d, v in jobs:
                 await _PREWARM_SEM.acquire()
-                tg.start_soon(_run_one, p, d, v)
+                # If start_soon raises (task group cancellation), release the token we
+                # just acquired — otherwise the semaphore leaks for the process lifetime.
+                try:
+                    tg.start_soon(_run_one, p, d, v)
+                except BaseException:
+                    _PREWARM_SEM.release()
+                    raise
 
         await anyio.to_thread.run_sync(_evict_if_over_threshold)
         logger.info(
