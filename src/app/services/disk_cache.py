@@ -18,7 +18,6 @@ subset (e.g. a single product from an admin POST) would wipe every other
 product's cache. Callers must respect this.
 """
 
-import asyncio
 import logging
 import os
 import pickle
@@ -38,11 +37,12 @@ logger = logging.getLogger(__name__)
 
 _CACHE_DAYS = int(os.environ.get("CACHE_DAYS", 30))
 
-# Capacity gate for prewarm/refresh S3 fan-out. Sits on the same anyio thread
-# pool that serves tile requests; the limiter is a *separate* concurrency budget
-# from the default one (so prewarm jobs do not consume tile-handler slots).
+# Concurrency gate for prewarm/refresh S3 fan-out. Acquired *before* spawning
+# each task in the task group so at most N coroutines exist at a time — bounds
+# both the active S3 connections and the pending-coroutine count (gather'd over
+# product × date this can be thousands of jobs).
 # Bound to the S3 connection ceiling, not CPU.
-_PREWARM_LIMITER = anyio.CapacityLimiter(int(os.environ.get("PREWARM_WORKERS", 8)))
+_PREWARM_SEM = anyio.Semaphore(int(os.environ.get("PREWARM_WORKERS", 8)))
 
 # Status of the most recent refresh_disk_cache run, surfaced via /admin/cache.
 # "never_run" until the first cycle starts; flips to "running" while in progress,
@@ -181,10 +181,10 @@ def _prewarm_one(product: Product, date: str, variables: list[str]) -> str:
 async def prewarm_disk_slices(products: list[Product]) -> None:
     """Populate L2 from disk on startup; write to disk for any dates not yet cached.
 
-    Parallelises across (product, date) pairs via the anyio thread pool, gated by
-    ``_PREWARM_LIMITER`` (PREWARM_WORKERS, default 8) so at most N S3 fetches run
-    concurrently. The limiter is a separate budget from the default tile-handler
-    limiter, so prewarm does not steal tile-serving slots.
+    Parallelises across (product, date) pairs via the anyio thread pool. The
+    spawn loop acquires ``_PREWARM_SEM`` *before* ``tg.start_soon``, so at most
+    PREWARM_WORKERS (default 8) tasks exist at once — bounds both S3 fan-out and
+    the pending-coroutine count when product × date is large.
     """
     if not DISK_CACHE_PATH:
         return
@@ -212,16 +212,22 @@ async def prewarm_disk_slices(products: list[Product]) -> None:
                 continue
             jobs.extend((product, date, variables) for date in dates)
 
-        results = await asyncio.gather(
-            *(
-                anyio.to_thread.run_sync(_prewarm_one, p, d, v, limiter=_PREWARM_LIMITER)
-                for p, d, v in jobs
-            )
-        )
-
         counts: dict[str, int] = {"written": 0, "skipped": 0, "failed": 0}
-        for r in results:
-            counts[r] += 1
+
+        # Tasks all run on the loop's thread; counts[r] += 1 has no await
+        # between read and write, so no lock is needed.
+        async def _run_one(p: Product, d: str, v: list[str]) -> None:
+            try:
+                r = await anyio.to_thread.run_sync(_prewarm_one, p, d, v)
+                counts[r] += 1
+            finally:
+                _PREWARM_SEM.release()
+
+        async with anyio.create_task_group() as tg:
+            for p, d, v in jobs:
+                await _PREWARM_SEM.acquire()
+                tg.start_soon(_run_one, p, d, v)
+
         logger.info(
             "Prewarm complete",
             extra={
@@ -354,14 +360,24 @@ async def refresh_disk_cache(products: list[Product]) -> None:
 
             jobs.extend((product, date, variables) for date in sorted(target_dates - cached_dates))
 
-        results = await asyncio.gather(
-            *(
-                anyio.to_thread.run_sync(_prewarm_one, p, d, v, limiter=_PREWARM_LIMITER)
-                for p, d, v in jobs
-            )
-        )
-        added = sum(1 for r in results if r == "written")
-        failed = sum(1 for r in results if r == "failed")
+        added = 0
+        failed = 0
+
+        async def _run_one(p: Product, d: str, v: list[str]) -> None:
+            nonlocal added, failed
+            try:
+                r = await anyio.to_thread.run_sync(_prewarm_one, p, d, v)
+                if r == "written":
+                    added += 1
+                elif r == "failed":
+                    failed += 1
+            finally:
+                _PREWARM_SEM.release()
+
+        async with anyio.create_task_group() as tg:
+            for p, d, v in jobs:
+                await _PREWARM_SEM.acquire()
+                tg.start_soon(_run_one, p, d, v)
 
         await anyio.to_thread.run_sync(_evict_if_over_threshold)
         logger.info(

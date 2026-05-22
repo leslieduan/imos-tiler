@@ -433,7 +433,9 @@ GET /visual_tiles/{product_id}/{from_date}/{to_date}/animation.{ext}
 | Disk cache (L3)            | **Read-through.** If the prewarmed disk slice exists it is reused; otherwise the slice is fetched directly from the Zarr store. Animations never **write** to L3 — they may request dates outside the prewarmed window and we don't want to pollute L3 or trigger an eviction cycle. |
 | HTTP cache headers         | **None.** No `Cache-Control` set. CloudFront/CDN configurations should treat this path as no-cache; otherwise rare requests would still incur full origin cost while occupying CDN storage. |
 
-**Frame loading** — the handler is `async def`. Per-frame `load_slice_uncached` calls are dispatched in parallel via `asyncio.gather(asyncio.to_thread(...))`, so a cold N-frame request blocks on roughly the slowest single-frame S3 read rather than the serial sum. Frame order is preserved because `gather` returns results in input order. The thread pool is the asyncio default executor (see [§12.6](#126-one-pool-two-capacity-budgets)), not the anyio handler pool — a 30-frame fan-out can't starve tile-handler slots.
+**Frame loading** — the handler is `async def`. Per-frame `load_slice_uncached` calls are dispatched in parallel via `asyncio.gather(*(anyio.to_thread.run_sync(..., limiter=_ANIMATION_LIMITER) for ...))`, so a cold N-frame request blocks on roughly the slowest single-frame S3 read rather than the serial sum. Frame order is preserved because `gather` returns results in input order. The work runs on the shared anyio pool but under `_ANIMATION_LIMITER` (`ANIMATION_WORKERS`, default 10), a budget independent of the default tile-handler budget — a 30-frame fan-out can't starve tile-handler slots. See [§12.6](#126-one-pool-three-named-budgets).
+
+The store-touching prelude (`get_available_dates`, `_default_bbox_from_store`, native-resolution lookup) is also offloaded via `anyio.to_thread.run_sync` so the event loop never blocks on `get_store` if a cold open or TTL-driven re-open is in progress.
 
 The end-user experience: cold requests are still slow (every missing date is an S3 round-trip), repeat requests don't get faster, but no other endpoint is affected.
 
@@ -709,7 +711,7 @@ Caches the open Zarr store handle (lazy, metadata only). Shared across all produ
 
 Uses a **stale-while-revalidate** strategy to pick up newly appended time steps without ever blocking a request:
 
-- **Startup** — `prewarm_stores` opens every registered store in background daemon threads so the cache is warm before the first request arrives.
+- **Startup** — `prewarm_stores` opens every registered store concurrently on the shared anyio pool, gated by `_STORE_PREWARM_LIMITER` (`STORE_PREWARM_WORKERS`, default 8), so the cache is warm before the first request arrives. Tracked as an `asyncio.Task` in the lifespan and cancelled cleanly on shutdown.
 - **Within TTL** — the cached store is returned immediately (sub-millisecond).
 - **After TTL** (`STORE_TTL_SECONDS`, default `600`) — the stale store is returned immediately for the current request, and a single background daemon thread calls `StoreRegistry._refresh_background` to re-open it. The `StoreRegistry._refreshing` set prevents duplicate refresh threads for the same URL.
 - **First-ever open** — the request blocks until `xr.open_zarr` completes; concurrent requests for the same URL wait on the same `concurrent.futures.Future` rather than each opening independently. The Future is keyed per-URL in `StoreRegistry._in_flight`, so opens of _different_ URLs proceed in parallel.
@@ -807,7 +809,7 @@ A single read-only admin endpoint surfaces everything a production debugger usua
 - **`memory_cache`** — current size and max for the slice and processed-grid LRUs.
 - **`products`** — per-product breakdown: disk file count, total bytes, oldest/newest cached date, most recent write mtime, and in-flight counts attributed by `(source_path, sorted_variables)` so two products sharing a Zarr don't collide.
 
-The handler runs the filesystem walk via `anyio.to_thread.run_sync` (single-pass — every cache file is stat'd once, then attributed to a product via parent-dir-name lookup in `services/disk_cache.collect_disk_stats`), so a thousand-file cache costs at most a few milliseconds of thread-pool time and never blocks tile requests. Peak/total counters are bumped under the Memoizer's existing lock; ambient cost on the tile-serving path is two integer ops per cache miss.
+The handler is a sync `def` (FastAPI dispatches it to the anyio pool automatically) and the filesystem walk is single-pass — every cache file is stat'd once, then attributed to a product via parent-dir-name lookup in `services/disk_cache.collect_disk_stats` — so a thousand-file cache costs at most a few milliseconds of thread-pool time and never blocks tile requests. Peak/total counters are bumped under the Memoizer's existing lock; ambient cost on the tile-serving path is two integer ops per cache miss.
 
 ### 10.7 In-memory cache flush (`DELETE /admin/cache/memory`)
 
@@ -823,7 +825,7 @@ Deletes every `.pkl.lz4` slice file from the L3 disk cache directory and returns
 
 If `prewarm_disk_slices` or `refresh_disk_cache` is currently running the endpoint returns **409 Conflict** immediately without touching the disk — both operations write slice files, so clearing during either is pointless. Wait for the operation to complete before retrying.
 
-Implemented in `services/disk_cache.clear_disk_cache` — iterates the per-product subdirectories under `DISK_CACHE_PATH` and removes each with `shutil.rmtree`, leaving the base directory itself intact. The filesystem walk runs in a thread via `anyio.to_thread.run_sync` so the event loop stays free. In-flight computes are not cancelled — they may re-populate the disk cache on completion.
+Implemented in `services/disk_cache.clear_disk_cache` — iterates the per-product subdirectories under `DISK_CACHE_PATH` and removes each with `shutil.rmtree`, leaving the base directory itself intact. The handler is a sync `def`, so FastAPI dispatches it to the anyio pool automatically and the event loop stays free. In-flight computes are not cancelled — they may re-populate the disk cache on completion.
 
 Use cases: forcing a full cold repopulation from S3 (e.g. after the underlying Zarr data has been rewritten), recovering disk space during debugging, or resetting a corrupted cache state without restarting the server. After a flush, the next request for any date will fall through to S3 (~2 s) and the disk cache will be repopulated gradually — or trigger `prewarm_disk_slices` via a server restart to repopulate in bulk.
 
@@ -845,7 +847,7 @@ async def lifespan(app: FastAPI):
     load_colormaps()                     # sync: read colormaps.json into the colormap registry
 
     store_urls = list({p.source_path for p in PRODUCTS.values()})
-    prewarm_stores(store_urls)           # spawns one daemon thread per unique store URL
+    store_prewarm_task = asyncio.create_task(prewarm_stores(store_urls))   # anyio pool, gated by _STORE_PREWARM_LIMITER
 
     prewarm_task = asyncio.create_task(_startup_cache_sync(list(PRODUCTS.values())))
     interval = int(os.environ.get("CACHE_REFRESH_INTERVAL_SECONDS", 14400))
@@ -853,7 +855,7 @@ async def lifespan(app: FastAPI):
 
     yield  # ← server handles requests here
 
-    for task in (prewarm_task, refresh_task):
+    for task in (store_prewarm_task, prewarm_task, refresh_task):
         task.cancel()
         try: await task
         except asyncio.CancelledError: pass
@@ -871,7 +873,7 @@ Wraps `_startup_cache_sync(products)`, which does two sequential phases:
 
    This ensures the disk cache reflects the current product/date state from the moment the server starts serving, not just after the first refresh cycle.
 
-2. **`prewarm_disk_slices(products)`** — itself `async def`; awaited directly, it manages its own offload. For each `(product, date)` pair in the last `CACHE_DAYS` dates, calls `_prewarm_one` (sync). Pairs are fanned out via `asyncio.gather(*(anyio.to_thread.run_sync(_prewarm_one, p, d, v, limiter=_PREWARM_LIMITER) for ...))`, with `_PREWARM_LIMITER = anyio.CapacityLimiter(PREWARM_WORKERS)` capping concurrent S3 fetches at 8 by default. Disk-cached pairs return instantly; missing ones are fetched from S3 and written to disk. `gather` returns only once every job has finished.
+2. **`prewarm_disk_slices(products)`** — itself `async def`; awaited directly, it manages its own offload. For each `(product, date)` pair in the last `CACHE_DAYS` dates, calls `_prewarm_one` (sync). Pairs are fanned out via `anyio.create_task_group` where the spawn loop acquires `_PREWARM_SEM` (`anyio.Semaphore(PREWARM_WORKERS)`, default 8) *before* `tg.start_soon`, so at most N tasks exist at once — bounding both S3 fan-out and the pending-coroutine count when product × date is large. Disk-cached pairs return instantly; missing ones are fetched from S3 and written to disk. The task group exits only once every job has finished. The trailing `_evict_if_over_threshold` runs inside the same `try` so `is_prewarm_running()` stays `True` through the unlink pass and `DELETE /admin/cache/disk` cannot race it.
 
 If eviction fails for any reason it is logged and prewarm proceeds anyway — partial cache is better than no cache.
 
@@ -909,7 +911,7 @@ Default interval is `CACHE_REFRESH_INTERVAL_SECONDS = 14400` (4 hours). In stead
 
 | Trigger                     | Action                                                                                       | Mechanism                                                                |
 | --------------------------- | -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
-| `prewarm_stores` at startup | Open each unique Zarr store URL (metadata only) so first requests don't pay the cost         | One `threading.Thread(daemon=True)` per URL                              |
+| `prewarm_stores` at startup | Open each unique Zarr store URL (metadata only) so first requests don't pay the cost         | `asyncio.Task` fanning out on the anyio pool, gated by `_STORE_PREWARM_LIMITER` (`STORE_PREWARM_WORKERS`, default 8); tracked + cancelled at shutdown |
 | Store TTL expiry            | Re-open Zarr store in the background to pick up new timestamps; stale store served meanwhile | `StoreRegistry._refresh_background` via `threading.Thread`               |
 | `POST /admin/products`      | Prewarm the disk cache for the newly registered product                                      | `asyncio.create_task(prewarm_disk_slices([product]))` — `prewarm_disk_slices` is `async def` and offloads internally |
 | `DELETE /admin/products`    | Evict the product's in-memory L1/L2 entries and remove its disk directory                    | Synchronous on the request thread (fast — file delete + dict pop)        |
@@ -918,17 +920,17 @@ Default interval is `CACHE_REFRESH_INTERVAL_SECONDS = 14400` (4 hours). In stead
 
 On shutdown (Uvicorn signal handler), the lifespan `finally` block:
 
-- `cancel()`s both `prewarm_task` and `refresh_task`.
+- `cancel()`s `store_prewarm_task`, `prewarm_task`, and `refresh_task`.
 - `await`s each one to handle `asyncio.CancelledError` cleanly.
 - Logs any other exception that escaped.
 
-Daemon threads (store prewarm, store TTL refresh) do not need explicit cleanup — they exit with the process. Anyio worker threads used by the prewarm fan-out are released back to the shared pool when their job returns; there is no separate pool to drain.
+`task.cancel()` aborts the *await* — any `xr.open_zarr` or `_prewarm_one` already running in an anyio worker thread runs to completion (CPython threads are uncancellable). Anyio worker threads themselves are released back to the shared pool when their job returns; there is no separate pool to drain. Daemon threads used by store TTL refresh (`StoreRegistry._refresh_background`) do not need explicit cleanup — they exit with the process.
 
 ---
 
 ## 12. Concurrency: event loop and threading
 
-The server combines an **asyncio event loop** (for FastAPI/Uvicorn request multiplexing and the two long-lived background tasks) with a **single bounded thread pool** (anyio's, for all CPU- and I/O-heavy work). Two `CapacityLimiter` gates split that one pool into independent concurrency budgets — one for tile-handler traffic, one for the prewarm/refresh S3 fan-out — so background work cannot starve request serving. Understanding which work runs where is essential when reasoning about latency, throughput, and capacity.
+The server combines an **asyncio event loop** (for FastAPI/Uvicorn request multiplexing and the lifespan's background tasks) with a **single bounded thread pool** (anyio's, for all CPU- and I/O-heavy work). Three named budgets carve that one pool into independent slices — one for each background fan-out (`_PREWARM_SEM`, `_ANIMATION_LIMITER`, `_STORE_PREWARM_LIMITER`) — so background work cannot starve request serving. Understanding which work runs where is essential when reasoning about latency, throughput, and capacity.
 
 ### 12.1 Why most endpoints are `def`, not `async def`
 
@@ -974,7 +976,7 @@ Each `await` is a yield point: the event loop is free to dispatch other tasks (i
 
 This is why a 60-second prewarm at startup does not delay the first request by 60 seconds. The event loop yields at each `await anyio.to_thread.run_sync(...)` boundary, the prewarm work runs in the background, and the event loop continues to handle requests on other threads.
 
-`prewarm_disk_slices` and `refresh_disk_cache` further parallelise across `(product, date)` pairs using `asyncio.gather(*(anyio.to_thread.run_sync(_prewarm_one, p, d, v, limiter=_PREWARM_LIMITER) for ...))`. The `_PREWARM_LIMITER` is a module-level `anyio.CapacityLimiter(PREWARM_WORKERS)` (default 8) that caps how many S3 fetches run concurrently. Crucially, it is a **separate concurrency budget** from the default tile-handler limiter — prewarm jobs do not consume slots that tile handlers would otherwise use. See [§12.6](#126-one-pool-two-capacity-budgets) for why.
+`prewarm_disk_slices` and `refresh_disk_cache` further parallelise across `(product, date)` pairs using `anyio.create_task_group` with `_PREWARM_SEM` (`anyio.Semaphore(PREWARM_WORKERS)`, default 8) acquired *before* each `tg.start_soon`. The semaphore-gated spawn pattern caps both the number of concurrent S3 fetches **and** the number of pending coroutines — for a thousand-job prewarm we never hold more than ~8 coroutines alive. Crucially, this is a **separate concurrency budget** from the default tile-handler limiter — prewarm jobs do not consume slots that tile handlers would otherwise use. See [§12.6](#126-one-pool-three-named-budgets) for why.
 
 ### 12.4 Quick reference
 
@@ -982,17 +984,17 @@ This is why a 60-second prewarm at startup does not delay the first request by 6
 | --------------------------------- | ----------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
 | HTTP accept / parse / route       | Event loop                                                                    | Pure async I/O; never blocks                                               |
 | Tile/manifest/point handlers      | Anyio pool, default limiter (`THREAD_POOL_SIZE`)                              | Sync `def` so blocking xarray/rio-tiler/PIL calls don't freeze the loop    |
-| `/animation` | Event-loop coroutine → `anyio.to_thread.run_sync` per frame, gated by `_ANIMATION_LIMITER` (`ANIMATION_WORKERS`, default 10) | `async def` so per-frame `load_slice_uncached` calls fan out via `asyncio.gather`; latency drops to ~max(per-frame) instead of the serial sum. Limiter keeps a many-frame request from monopolising the tile-handler budget — see [§12.6](#126-one-pool-two-capacity-budgets) |
-| `/admin/products` POST            | Event loop (`async def`) → spawns `prewarm_disk_slices` as a background task  | Admin prewarm is itself `async def`; fire-and-forget via `asyncio.create_task` |
+| `/animation` | Event-loop coroutine → `anyio.to_thread.run_sync` per frame, gated by `_ANIMATION_LIMITER` (`ANIMATION_WORKERS`, default 10) | `async def` so per-frame `load_slice_uncached` calls fan out via `asyncio.gather`; latency drops to ~max(per-frame) instead of the serial sum. Limiter keeps a many-frame request from monopolising the tile-handler budget — see [§12.6](#126-one-pool-three-named-budgets) |
+| `/admin/products` POST            | Event loop (`async def`); `register_product` JSON write offloaded via `anyio.to_thread.run_sync`; spawns `prewarm_disk_slices` as a background task | Stays `async def` because `_spawn_prewarm` calls `asyncio.create_task` and that needs a running loop in this thread |
 | `/admin/products` DELETE          | Event loop (sync `def`)                                                       | In-memory removal + sync cache eviction                                    |
-| `GET /admin/cache`                | Event-loop coroutine → `anyio.to_thread.run_sync`                             | Filesystem walk offloaded to anyio pool, default limiter                   |
-| `DELETE /admin/cache/disk`        | Event-loop coroutine → `anyio.to_thread.run_sync`                             | Filesystem walk offloaded to anyio pool, default limiter                   |
+| `GET /admin/cache`                | Anyio pool, default limiter (sync `def`)                                      | Filesystem walk dispatched automatically by FastAPI                        |
+| `DELETE /admin/cache/disk`        | Anyio pool, default limiter (sync `def`)                                      | Filesystem walk dispatched automatically by FastAPI                        |
 | `/products`, `/colormaps` listing | Event loop (`async def`)                                                      | In-memory dict reads only                                                  |
-| Store prewarm at startup          | One daemon thread per URL                                                     | Fire-and-forget metadata fetch                                             |
+| Store prewarm at startup          | Anyio pool, gated by `_STORE_PREWARM_LIMITER` (`STORE_PREWARM_WORKERS`)       | Concurrent metadata fetches, tracked as `asyncio.Task`                     |
 | Store TTL refresh                 | One daemon thread per URL on TTL expiry                                       | Stale store returned immediately; fresh open happens in the background     |
 | `_startup_cache_sync`             | Event-loop task; `evict` via `anyio.to_thread.run_sync`; `prewarm` is `async def` awaited directly | Coroutine yields while the actual eviction + prewarm work runs on threads |
 | `_cache_refresh_loop`             | Event-loop task; `refresh_disk_cache` is `async def` awaited directly         | Coroutine yields during sleep + refresh; never blocks the loop             |
-| `prewarm_disk_slices` fan-out     | Anyio pool, gated by `_PREWARM_LIMITER` (`PREWARM_WORKERS`)                   | Parallel S3 fetches on a separate concurrency budget from tile handlers    |
+| `prewarm_disk_slices` fan-out     | Anyio pool, spawn-gated by `_PREWARM_SEM` (`PREWARM_WORKERS`)                 | At most N tasks alive at a time — bounds S3 fan-out and pending coroutines |
 | In-flight stampede dedup          | Anyio pool (callers block on `Future`)                                        | Holds a slot but does no work — see §12.2                                  |
 
 ### 12.5 Failure modes to watch
@@ -1000,11 +1002,11 @@ This is why a 60-second prewarm at startup does not delay the first request by 6
 - **`async def` an endpoint by accident.** If a future contributor turns a `def` handler into `async def`, blocking calls inside it (any `xarray`/`rio-tiler` call) will freeze the event loop and serialise every request behind the slowest one. There is no static check for this — review carefully.
 - **Forget `anyio.to_thread.run_sync` inside an `async def` function.** `prewarm_disk_slices`, `refresh_disk_cache`, and the admin coroutines all run on the event loop. Any blocking call inside their body — `get_available_dates`, `evict_stale_and_orphans`, `_evict_if_over_threshold`, filesystem walks — must be wrapped in `anyio.to_thread.run_sync(...)` or it freezes the loop. The `async def` shape converts a one-time offload (at the call site of a sync function) into a per-call discipline (every blocking line inside the body); review additions to these functions carefully.
 - **Unbounded background tasks.** Both lifespan tasks have a top-level `try/except`. New background tasks must do the same — an unhandled exception in an `asyncio.Task` is silent until the task is awaited.
-- **Saturate `_PREWARM_LIMITER` with the wrong workload.** The limiter is sized to the S3 connection ceiling for slice fetches (`PREWARM_WORKERS=8`). Don't pass it to filesystem ops, metadata reads, or anything else not bound by that resource — semantically wrong and accidentally serialises unrelated work.
+- **Saturate `_PREWARM_SEM` with the wrong workload.** The semaphore is sized to the S3 connection ceiling for slice fetches (`PREWARM_WORKERS=8`). Don't acquire it around filesystem ops, metadata reads, or anything else not bound by that resource — semantically wrong and accidentally serialises unrelated work.
 
-### 12.6 One pool, two capacity budgets
+### 12.6 One pool, three named budgets
 
-§12.2 talks about "the thread pool" singular. With one carve-out (see end of section), that framing is now accurate at the OS level: nearly every offload in this app lands in **one** anyio worker pool. What's split into two is the **concurrency budget** on that pool — two `anyio.CapacityLimiter` instances acting as independent gates.
+§12.2 talks about "the thread pool" singular. That framing is accurate at the OS level: nearly every offload in this app lands in **one** anyio worker pool. What's split into independent slices is the **concurrency budget** on that pool — three named gates, each sized to its own bottleneck. Two are `anyio.CapacityLimiter` (acquired inside `to_thread.run_sync`); one is `anyio.Semaphore` (acquired *before* `tg.start_soon` to also bound the pending-coroutine count).
 
 #### Why a single pool, not three
 
@@ -1016,35 +1018,46 @@ Earlier versions of this server used three thread pools:
 
 The three-pool layout bought isolation but at the cost of conceptual overhead — three different APIs (`anyio.to_thread.run_sync`, `asyncio.to_thread`, manual `ThreadPoolExecutor`), three different sizing knobs, and the subtle pitfall that `asyncio.to_thread` and `anyio.to_thread.run_sync` look interchangeable but route to **different pools**. Reviewers had to keep that distinction in mind on every async-related change.
 
-The current design collapses this to one pool with three limiters:
+The current design collapses this to one pool with one default limiter and three named feature budgets:
 
-- **Default limiter** (size `THREAD_POOL_SIZE`, default 100) — the limiter `anyio.to_thread.current_default_thread_limiter()` returns. Used by every sync `def` tile handler (dispatched automatically by FastAPI) and by every `anyio.to_thread.run_sync(...)` call that doesn't pass an explicit limiter.
-- **`_PREWARM_LIMITER`** (size `PREWARM_WORKERS`, default 8) — a module-level `anyio.CapacityLimiter` in `services/disk_cache.py`. Used only by `_prewarm_one` fan-out calls inside `prewarm_disk_slices` and `refresh_disk_cache`, via the explicit `limiter=_PREWARM_LIMITER` argument. Sized to the S3 connection-pool ceiling.
+- **Default limiter** (size `THREAD_POOL_SIZE`, default 100) — the limiter `anyio.to_thread.current_default_thread_limiter()` returns. Used by every sync `def` tile handler (dispatched automatically by FastAPI) and by every `anyio.to_thread.run_sync(...)` call that doesn't pass an explicit limiter. Admin GET/DELETE endpoints also fall under this budget.
+- **`_PREWARM_SEM`** (size `PREWARM_WORKERS`, default 8) — a module-level `anyio.Semaphore` in `services/disk_cache.py`. Acquired *before* `tg.start_soon` in `prewarm_disk_slices` / `refresh_disk_cache` so at most N tasks (and thus N pending coroutines) exist at a time. Sized to the S3 connection-pool ceiling.
 - **`_ANIMATION_LIMITER`** (size `ANIMATION_WORKERS`, default 10) — a module-level `anyio.CapacityLimiter` in `routers/visual_tiles.py`. Used by the per-frame `load_slice_uncached` fan-out inside `/animation`, via the explicit `limiter=_ANIMATION_LIMITER` argument. Sized to the aiobotocore S3 connection-pool ceiling (~10/host); going higher just queues on the connection pool without reducing latency, and the bound keeps a many-frame request from monopolising the tile-handler budget.
+- **`_STORE_PREWARM_LIMITER`** (size `STORE_PREWARM_WORKERS`, default 8) — a module-level `anyio.CapacityLimiter` in `services/store_registry.py`. Used by `StoreRegistry.prewarm` to gate concurrent `xr.open_zarr` opens at startup. Same S3 connection-pool rationale as `_PREWARM_SEM`.
 
-All three limiters live over the **same** anyio worker pool. Anyio creates worker threads on demand and they're shared across limiters — but each call only acquires the limiter it was passed, so the budgets are independent. A prewarm burst saturating its 8-slot budget does not reduce the tile-handler budget of 100, and a 30-frame animation does not steal from prewarm either.
+All four budgets live over the **same** anyio worker pool. Anyio creates worker threads on demand and they're shared across budgets — but each call only acquires (or pre-acquires) the budget it was given, so the slices are independent. A prewarm burst saturating its 8-slot budget does not reduce the tile-handler budget of 100, and a 30-frame animation does not steal from prewarm either.
 
-#### Why three budgets, not one
+#### Semaphore vs CapacityLimiter — when to use which
+
+Both bound concurrent work, but they live at different points in the spawn lifecycle:
+
+- **CapacityLimiter passed to `to_thread.run_sync(..., limiter=...)`** — the coroutine is *already created* when the limiter is acquired. For fan-outs built via `asyncio.gather(*(to_thread.run_sync(...) for ...))`, all N coroutines exist simultaneously, each parked on the limiter. Fine when N is small and bounded (≤30 frames for animation, ≤handful of stores for prewarm).
+- **Semaphore acquired before `tg.start_soon`** — the spawn loop pauses on `sem.acquire()` when N workers are running, so at most N coroutines exist *at all*. Necessary when N could be large (`prewarm_disk_slices` over `products × CACHE_DAYS` is thousands).
+
+`_PREWARM_SEM` is a Semaphore because product × date jobs can grow into the thousands. `_ANIMATION_LIMITER` and `_STORE_PREWARM_LIMITER` are CapacityLimiters because their N is bounded (30 frames; one open per unique store URL).
+
+#### Why three named budgets, not one
 
 | Concern | What the layout buys |
 | --- | --- |
-| **Tile traffic isolated from background work** | A 150-slice prewarm doesn't consume tile-handler capacity. Without `_PREWARM_LIMITER`, the same fan-out would either flood the default 100-slot limiter (starving requests) or need a `Semaphore` rebuilt by hand inside the prewarm coroutine. |
+| **Tile traffic isolated from background work** | A 1000-slice prewarm doesn't consume tile-handler capacity. Without `_PREWARM_SEM`, the same fan-out would either flood the default 100-slot limiter (starving requests) or keep thousands of coroutines alive parked on a limiter. |
 | **Tile traffic isolated from animation requests** | A 30-frame `/animation` request consumes at most 10 anyio slots, not all 100. Without `_ANIMATION_LIMITER`, a couple of concurrent animation requests could saturate the tile budget. |
-| **Resource ceilings decoupled from request capacity** | Both `PREWARM_WORKERS=8` and `ANIMATION_WORKERS=10` match the aiobotocore S3 connection-pool ceiling (~10/host) — the real bottleneck for slice fetches. Both are independent of how many tile requests can run concurrently. |
-| **Admin endpoints answer under tile-pool pressure** | `/admin/cache` GET and `DELETE /admin/cache/disk` use `anyio.to_thread.run_sync` with the default limiter. They share the 100-slot budget with tile handlers — but admin endpoints are one-shot filesystem walks; the practical chance of contention is negligible, and the simplicity is worth more than a fourth dedicated limiter. |
+| **Tile traffic isolated from store-prewarm bursts** | An admin registering 50 distinct sources won't briefly consume 50 pool threads on startup — `_STORE_PREWARM_LIMITER` caps it at 8. |
+| **Resource ceilings decoupled from request capacity** | `PREWARM_WORKERS=8`, `ANIMATION_WORKERS=10`, `STORE_PREWARM_WORKERS=8` all match the aiobotocore S3 connection-pool ceiling (~10/host) — the real bottleneck for S3 work. All are independent of how many tile requests can run concurrently. |
+| **Admin endpoints answer under tile-pool pressure** | `/admin/cache` GET and `DELETE /admin/cache/disk` are sync `def` and run under the default limiter — they share the 100-slot budget with tile handlers, but admin endpoints are one-shot filesystem walks; the practical chance of contention is negligible, and the simplicity is worth more than a fourth dedicated budget. |
 
 #### Non-pool worker threads (unchanged)
 
-- **Store-prewarm daemon threads** — `prewarm_stores` spawns one bare `threading.Thread` per unique Zarr store URL at startup. They exit when each store is open. Not a reusable pool.
+- **Store TTL refresh daemon threads** — `StoreRegistry._refresh_background` spawns a bare `threading.Thread` per stale-store re-open. Lives outside the anyio pool because it's triggered from inside `get()`, which may itself be running in a worker thread without an event loop reference. Threads exit when each open completes. Not a reusable pool.
 - **C-extension threads** — Zarr decompression, NumPy via BLAS, and PIL/libpng all release the GIL and may use their own internal threads. Total OS thread count is always higher than the sum of the Python-managed threads above.
 
 #### Convention: which to use where
 
 - **Inside a `def` handler** — already on the anyio pool under the default limiter. Don't offload further unless the work is unusually heavy and would block other tile requests.
-- **Inside an `async def` function** — wrap any blocking call in `anyio.to_thread.run_sync(...)`. By default this runs under the default limiter (shared with tile handlers, which is fine for one-shot ops). For batch fan-out, pass an appropriate `limiter=` (or define a new module-level `CapacityLimiter` sized to *that* workload's bottleneck — don't reuse `_PREWARM_LIMITER` or `_ANIMATION_LIMITER` for unrelated work; see §12.5).
-- **For background coroutines** (prewarm, refresh) — call them with plain `await`. They're `async def` and handle their own offload via `anyio.to_thread.run_sync` internally.
+- **Inside an `async def` function** — wrap any blocking call in `anyio.to_thread.run_sync(...)`. By default this runs under the default limiter (shared with tile handlers, which is fine for one-shot ops). For bounded-N batch fan-out, pass an appropriate `limiter=` (or define a new module-level `CapacityLimiter` sized to *that* workload's bottleneck). For unbounded-N fan-out, use `anyio.create_task_group` + `anyio.Semaphore` with `await sem.acquire()` *before* `tg.start_soon` to bound coroutine memory too. Don't reuse `_PREWARM_SEM` / `_ANIMATION_LIMITER` / `_STORE_PREWARM_LIMITER` for unrelated work — see §12.5.
+- **For background coroutines** (prewarm, refresh, store prewarm) — call them with plain `await`. They're `async def` and handle their own offload via `anyio.to_thread.run_sync` / task-group fan-out internally.
 
-The trade-off compared to the old three-pool design: admin endpoints and the refresh loop no longer have a dedicated executor isolated from tiles. In exchange, the mental model is much simpler — one pool, named limiters where isolation matters. Tile-vs-prewarm and tile-vs-animation isolation, the properties that actually matter for capacity planning, are preserved by their dedicated limiters.
+The trade-off compared to the old three-pool design: admin endpoints and the refresh loop no longer have a dedicated executor isolated from tiles. In exchange, the mental model is much simpler — one pool, named budgets where isolation matters. Tile-vs-prewarm, tile-vs-animation, and tile-vs-store-prewarm isolation, the properties that actually matter for capacity planning, are preserved by their dedicated budgets.
 
 ### 12.7 Per-request paths
 
@@ -1471,7 +1484,8 @@ A wrong-layer choice has real costs: making `max_lods` an env var would let an o
 | Variable               | Default | Description                                                                                                             |
 | ---------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------- |
 | `THREAD_POOL_SIZE`     | `100`   | Anyio thread-pool size. Each in-flight sync request uses one slot. See [§12](#12-concurrency-event-loop-and-threading). |
-| `ANIMATION_WORKERS`    | `10`    | Capacity-limiter cap for `/animation` per-frame S3 fan-out. Sized to the aiobotocore S3 connection pool. See [§12.6](#126-one-pool-two-capacity-budgets). |
+| `ANIMATION_WORKERS`    | `10`    | Capacity-limiter cap for `/animation` per-frame S3 fan-out. Sized to the aiobotocore S3 connection pool. See [§12.6](#126-one-pool-three-named-budgets). |
+| `STORE_PREWARM_WORKERS` | `8`    | Capacity-limiter cap for concurrent `xr.open_zarr` opens during startup store prewarm. Sized to the S3 connection pool. See [§12.6](#126-one-pool-three-named-budgets). |
 | `SLICE_CACHE_SIZE`     | `10`    | Max entries in the L2 in-memory slice cache. RAM bound: `SLICE_CACHE_SIZE × max_slice_size`.                            |
 | `SLICE_CACHE_TTL_SECONDS` | `600`  | Per-entry TTL for the L2 slice cache (`cachetools.TTLCache`). Entries expire this many seconds after insertion so idle RAM returns to baseline; `SLICE_CACHE_SIZE` still bounds capacity under burst pressure. |
 | `PROCESSED_CACHE_SIZE` | `50`    | Max entries in the L1 processed-grid cache. Sized as `SLICE_CACHE_SIZE × LOD.max_lods` with headroom.                   |
@@ -1485,7 +1499,7 @@ A wrong-layer choice has real costs: making `max_lods` an env var would let an o
 | `DISK_CACHE_LIMIT_GB`            | `20`      | Maximum total disk usage before pressure-based eviction runs.                             |
 | `DISK_EVICTION_THRESHOLD`        | `0.85`    | Fraction of limit at which pressure eviction triggers (0.0–1.0).                          |
 | `CACHE_DAYS`                     | `30`      | How many recent dates per product to keep on disk; dates outside this window are evicted. |
-| `PREWARM_WORKERS`                | `8`       | Thread-pool size used during the startup disk prewarm (and the per-product prewarm fired by `POST /admin/products`). |
+| `PREWARM_WORKERS`                | `8`       | Spawn-gate (`_PREWARM_SEM`) cap used during the startup disk prewarm and per-product prewarm fired by `POST /admin/products`. Bounds concurrent S3 fetches *and* the pending-coroutine count when product × date is large. |
 | `CACHE_REFRESH_INTERVAL_SECONDS` | `14400`   | Period (seconds) between background refresh cycles. Default 4 hours.                      |
 
 ### 15.5 Logging
