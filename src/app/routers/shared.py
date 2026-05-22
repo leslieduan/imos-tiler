@@ -6,6 +6,8 @@ from fastapi import HTTPException
 from fastapi.openapi.models import Example
 
 from app.constants import PRODUCTS, Product
+from app.services.colormap_config import is_categorical
+from app.services.colormap_lookup import resolve_colormap
 from app.services.loader import load_slice
 
 PRODUCT_EX: dict[str, Example] = {"default": Example(value="sea_level_anomaly")}
@@ -39,3 +41,68 @@ def load_slice_or_404(store_url: str, date: str, variables: list[str]):
         return load_slice(store_url, date, variables)
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
+
+
+def resolve_colormap_or_error(name: str, *, status_code: int = 400) -> None:
+    """Validate a colormap name, raising HTTPException on failure.
+
+    Defaults to 400 (colormap usually arrives as a query param, so an unknown
+    name is a malformed request). Callers exposing it as a path segment pass
+    status_code=404 — the URL points at a resource that does not exist.
+    """
+    try:
+        resolve_colormap(name)
+    except ValueError as e:
+        raise HTTPException(status_code=status_code, detail=str(e)) from e
+
+
+def single_variable_or_400(product: Product, *, context: str) -> str:
+    """Narrow product.variable to a single str, rejecting multi-variable products."""
+    if isinstance(product.variable, list):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Product '{product.id}' has multiple variables; "
+                f"{context} supports single-variable products only."
+            ),
+        )
+    return product.variable
+
+
+def parse_rescale(rescale: str | None) -> tuple[float, float] | None:
+    if not rescale:
+        return None
+    try:
+        lo, hi = rescale.split(",")
+        return (float(lo), float(hi))
+    except ValueError as e:
+        raise HTTPException(
+            status_code=400, detail="rescale must be 'min,max', e.g. '-0.5,0.5'"
+        ) from e
+
+
+def require_rescale_if_categorical(
+    colormap_name: str, rescale_range: tuple[float, float] | None
+) -> None:
+    if is_categorical(colormap_name) and rescale_range is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Colormap '{colormap_name}' is categorical — rescale=min,max is required.",
+        )
+
+
+def reject_webp_for_categorical(colormap_name: str, fmt: str, *, animated: bool = False) -> None:
+    # Lossy WebP introduces ringing/blocking around the hard colour boundaries
+    # of a categorical colormap. PNG (or APNG/GIF for animations) is the only
+    # safe choice — fail loud rather than serve a corrupted legend.
+    if fmt != "webp" or not is_categorical(colormap_name):
+        return
+    kind = "animated WebP" if animated else "WebP"
+    alternatives = "Use .apng or .gif." if animated else "Use .png."
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            f"Colormap '{colormap_name}' is categorical and cannot be encoded as {kind} "
+            f"(lossy compression corrupts the discrete colour boundaries). {alternatives}"
+        ),
+    )
