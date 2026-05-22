@@ -84,8 +84,14 @@ def _compute_slice_from_store(store_url: str, date: str, variables: list[str]) -
     """
     cache_path = disk_cache_path(store_url, date, list(variables))
     if cache_path.exists():
+        t0 = time.monotonic()
         cached = read_slice_from_disk(cache_path)
+        disk_ms = (time.monotonic() - t0) * 1000
         if cached is not None:
+            logger.info(
+                "[timing] slice loaded from disk",
+                extra={"date": date, "disk_read_ms": round(disk_ms, 1)},
+            )
             return cached
 
     store = get_store(store_url)
@@ -99,6 +105,10 @@ def _compute_slice_from_store(store_url: str, date: str, variables: list[str]) -
         t0 = time.monotonic()
         result = store[variables].sel(time=pd.Timestamp(matching[0])).compute()
         elapsed = time.monotonic() - t0
+        logger.info(
+            "[timing] slice loaded from S3",
+            extra={"date": date, "s3_fetch_ms": round(elapsed * 1000, 1)},
+        )
         if elapsed > _SLOW_FETCH_THRESHOLD:
             logger.warning(
                 "Slow S3 fetch",
