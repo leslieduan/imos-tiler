@@ -49,8 +49,10 @@ def _build_response() -> dict:
     slice_stats = slice_memo_stats()
     processed_stats = processed_memo_stats()
 
+    # Snapshot under list(...) so a concurrent load_products() reload can't
+    # raise "dictionary changed size during iteration" mid-comprehension.
     product_index = {
-        (p.source_path, tuple(sorted(p.variables))): pid for pid, p in PRODUCTS.items()
+        (p.source_path, tuple(sorted(p.variables))): pid for pid, p in list(PRODUCTS.items())
     }
     slice_inflight_by_pid = _inflight_by_product(slice_stats["inflight_keys"], product_index)
     processed_inflight_by_pid = _inflight_by_product(
