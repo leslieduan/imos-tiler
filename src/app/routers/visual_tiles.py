@@ -463,7 +463,11 @@ async def get_animation(
         )
     variable: str = product.variable
 
-    bbox_tuple, crs = _parse_bbox_and_crs(bbox, crs, product.source_path)
+    # Offloaded: each may call get_store, which can block on xr.open_zarr on
+    # cold path or while a TTL refresh is racing the cached entry.
+    bbox_tuple, crs = await anyio.to_thread.run_sync(
+        _parse_bbox_and_crs, bbox, crs, product.source_path
+    )
 
     rescale_range = _parse_rescale(rescale)
     _require_rescale_if_categorical(colormap_name, rescale_range)
@@ -476,7 +480,7 @@ async def get_animation(
             ),
         )
 
-    available = get_available_dates(product.source_path)
+    available = await anyio.to_thread.run_sync(get_available_dates, product.source_path)
     if not available:
         raise HTTPException(
             status_code=404,
@@ -509,8 +513,8 @@ async def get_animation(
             ),
         )
 
-    resolved_w, resolved_h = _resolve_resolution(
-        product.source_path, bbox_tuple, crs, width, height
+    resolved_w, resolved_h = await anyio.to_thread.run_sync(
+        _resolve_resolution, product.source_path, bbox_tuple, crs, width, height
     )
 
     # Fan out the per-frame S3 reads in parallel on the anyio pool, gated by
