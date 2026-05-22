@@ -14,6 +14,7 @@ RUN uv sync --frozen --no-dev --no-install-project
 
 # Copy application code
 COPY src/ src/
+COPY scripts/ scripts/
 COPY docker/docker-entrypoint.sh /docker-entrypoint.sh
 RUN chmod +x /docker-entrypoint.sh
 
