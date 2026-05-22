@@ -32,14 +32,13 @@ from .shared import (
     validate_date,
 )
 
-_MAX_ANIMATION_FRAMES = 60
+_MAX_ANIMATION_FRAMES = 30
 
 # Capacity gate for /animation per-frame S3 fan-out. Sits on the shared anyio
-# pool as a *separate* concurrency budget from tile handlers — a 60-frame
-# request cannot starve tile-handler slots. Sized higher than _PREWARM_LIMITER
-# because animation is user-facing (latency matters) but still capped so one
-# request does not monopolise the pool.
-_ANIMATION_LIMITER = anyio.CapacityLimiter(int(os.environ.get("ANIMATION_WORKERS", 16)))
+# pool as a *separate* concurrency budget from tile handlers — a 30-frame
+# request cannot starve tile-handler slots. Sized to the aiobotocore S3
+# connection-pool ceiling (~10/host) — going higher just queues on the pool.
+_ANIMATION_LIMITER = anyio.CapacityLimiter(int(os.environ.get("ANIMATION_WORKERS", 10)))
 
 router = APIRouter()
 router.include_router(products_router)

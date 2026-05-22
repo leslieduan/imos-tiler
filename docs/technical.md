@@ -423,17 +423,17 @@ GET /visual_tiles/{product_id}/{from_date}/{to_date}/animation.{ext}
 | Both omitted          | Frame size matches the dataset's native cell count inside the bbox, i.e. `ceil(bbox_span / native_spacing)` per axis, **clamped to 2048**. Native spacing is read from the first two lat/lon coordinates — all current products are on regular grids. |
 | Only one provided     | The other is derived from the bbox aspect ratio in the bbox's own CRS (`(maxx-minx)/(maxy-miny)`) so the output is not stretched relative to the requested view. Clamped to 1–2048. |
 
-**Frame cap** — 60 frames per request, hard-coded in `_MAX_ANIMATION_FRAMES`. Requests beyond that are rejected with 400 so a wide date range can't produce a multi-hundred-megabyte response.
+**Frame cap** — 30 frames per request, hard-coded in `_MAX_ANIMATION_FRAMES`. Requests beyond that are rejected with 400 so a wide date range can't produce a multi-hundred-megabyte response, and so worst-case transient RAM and cold-S3 latency for a single animation stay bounded.
 
 **Caching design** — this endpoint deliberately differs from the other tile endpoints:
 
 | Layer                    | Behaviour                                                                                                                                                                       |
 | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| In-memory slice cache (L2) | **Bypassed.** Animations call `load_slice_uncached` (`services/loader.py`) which never touches the LRU. A rare 60-frame request can therefore not evict hot slices serving the static `/visual_tiles` and `/data_tiles` endpoints. |
+| In-memory slice cache (L2) | **Bypassed.** Animations call `load_slice_uncached` (`services/loader.py`) which never touches the LRU. A rare 30-frame request can therefore not evict hot slices serving the static `/visual_tiles` and `/data_tiles` endpoints. |
 | Disk cache (L3)            | **Read-through.** If the prewarmed disk slice exists it is reused; otherwise the slice is fetched directly from the Zarr store. Animations never **write** to L3 — they may request dates outside the prewarmed window and we don't want to pollute L3 or trigger an eviction cycle. |
 | HTTP cache headers         | **None.** No `Cache-Control` set. CloudFront/CDN configurations should treat this path as no-cache; otherwise rare requests would still incur full origin cost while occupying CDN storage. |
 
-**Frame loading** — the handler is `async def`. Per-frame `load_slice_uncached` calls are dispatched in parallel via `asyncio.gather(asyncio.to_thread(...))`, so a cold N-frame request blocks on roughly the slowest single-frame S3 read rather than the serial sum. Frame order is preserved because `gather` returns results in input order. The thread pool is the asyncio default executor (see [§12.6](#126-one-pool-two-capacity-budgets)), not the anyio handler pool — a 60-frame fan-out can't starve tile-handler slots.
+**Frame loading** — the handler is `async def`. Per-frame `load_slice_uncached` calls are dispatched in parallel via `asyncio.gather(asyncio.to_thread(...))`, so a cold N-frame request blocks on roughly the slowest single-frame S3 read rather than the serial sum. Frame order is preserved because `gather` returns results in input order. The thread pool is the asyncio default executor (see [§12.6](#126-one-pool-two-capacity-budgets)), not the anyio handler pool — a 30-frame fan-out can't starve tile-handler slots.
 
 The end-user experience: cold requests are still slow (every missing date is an S3 round-trip), repeat requests don't get faster, but no other endpoint is affected.
 
@@ -724,7 +724,12 @@ Keyed `(source_path, date, str(variable), lod)`. Stores the resampled + normalis
 
 Entry sizes for the satellite heatwave product (2000×3900): LOD 1 ~1.4 MB, LOD 2 ~3.3 MB, LOD 3 ~12 MB, LOD 4 ~41 MB. GSLA-class products have only 1 LOD level at ~1.4 MB.
 
-**Eviction.** `_processed_cache = LRUCache(maxsize=PROCESSED_CACHE_SIZE)` — when the cache is full, the **least-recently-accessed** `(product, date, lod)` entry is evicted to make room for a new one. A re-requested entry is moved to the back of the eviction queue, so dates that users actively pan/zoom over stay warm; dates that haven't been touched recently get evicted first. After eviction, the next request for that key recomputes the processed grid from the L2 slice (~tens of ms) or from L2 → disk → S3 if L2 has also evicted it.
+**Eviction.** `_processed_cache = TTLCache(maxsize=PROCESSED_CACHE_SIZE, ttl=PROCESSED_CACHE_TTL_SECONDS)` — entries are dropped when either constraint fires:
+
+- **LRU at capacity.** When full, the least-recently-accessed `(product, date, lod)` entry is evicted. Active dates stay warm; cold ones get pushed out first.
+- **TTL after insertion.** Each entry expires `PROCESSED_CACHE_TTL_SECONDS` after insertion (default 600 s / 10 min). Idle RAM returns to baseline after the user moves on; an unusually long stationary session pays one re-resample (~10–50 ms) when the entry first expires.
+
+After eviction, the next request for that key recomputes the processed grid from the L2 slice (~tens of ms) or from L2 → disk → S3 if L2 has also evicted it.
 
 Size is controlled by `PROCESSED_CACHE_SIZE` (default `50`). Sized as `SLICE_CACHE_SIZE × LOD.max_lods` with headroom: `10 × 4 = 40`, rounded to 50. This keeps all LOD levels warm for every date in the L2 slice cache.
 
@@ -736,7 +741,14 @@ Visual tiles do not use L1 — `XarrayReader` handles its own rendering per requ
 
 Keyed `(store_url, date, variables_tuple)`. Stores a fully-computed (`.compute()`) 2-D lat×lon `xr.Dataset` slice. Sub-millisecond on hit. Keyed by `variables_tuple` so different products using the same store cache independently.
 
-**Eviction.** `_slice_cache = LRUCache(maxsize=SLICE_CACHE_SIZE)` — when full, the **least-recently-accessed** `(store_url, date, variables)` slice is evicted. Note that L2 eviction does not invalidate the on-disk L3 copy; a subsequent request reloads it from disk in ~30 ms via `pickle.loads(lz4.frame.decompress(...))`. The "thrash" cost of an undersized L2 is therefore a one-time ~30 ms disk-warm hit per re-request, not a full ~2 s cold S3 fetch — which is why [§14.3](#143-why-the-default-slice_cache_size10-is-too-small-for-production) frames the default `SLICE_CACHE_SIZE = 10` as a performance issue, not a correctness one.
+**Eviction.** `_slice_cache = TTLCache(maxsize=SLICE_CACHE_SIZE, ttl=SLICE_CACHE_TTL_SECONDS)` — entries are dropped when either constraint fires:
+
+- **LRU at capacity.** When the cache is full, the least-recently-accessed `(store_url, date, variables)` slice is evicted on the next insert. This is what bounds peak RAM under burst pressure (e.g. many concurrent map views on different `(product, date)` pairs).
+- **TTL after insertion.** Each entry expires `SLICE_CACHE_TTL_SECONDS` after insertion (default 600 s / 10 min). This is what bounds idle RAM: after a user moves on from a date, the slice expires automatically instead of squatting in the LRU until something newer pushes it out.
+
+Why this shape: L2's real job is to absorb the trailing tiles of a single map view. MapboxGL fires ~50–200 tile requests for the same `(product, date)` in a burst; in-flight dedup (`_slice_memo`) coalesces the simultaneous ones into a single L3 load, and L2 then serves the trailing arrivals over the next few seconds. After the user navigates away, the slice has no further reuse — TTL evicts it; LRU would keep it indefinitely.
+
+L2 eviction (either path) does not invalidate the on-disk L3 copy. A subsequent request reloads from disk in ~30 ms via `pickle.loads(lz4.frame.decompress(...))`. The "thrash" cost of an undersized L2 is therefore a one-time ~30 ms disk-warm hit per re-request, not a full ~2 s cold S3 fetch.
 
 Size is controlled by `SLICE_CACHE_SIZE` (default `10`). Entry size varies significantly by product: ~2 MB for a GSLA-class slice (351×641), ~61 MB for a satellite-class slice (2000×3900 float64).
 
@@ -970,7 +982,7 @@ This is why a 60-second prewarm at startup does not delay the first request by 6
 | --------------------------------- | ----------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
 | HTTP accept / parse / route       | Event loop                                                                    | Pure async I/O; never blocks                                               |
 | Tile/manifest/point handlers      | Anyio pool, default limiter (`THREAD_POOL_SIZE`)                              | Sync `def` so blocking xarray/rio-tiler/PIL calls don't freeze the loop    |
-| `/animation` | Event-loop coroutine → `anyio.to_thread.run_sync` per frame, gated by `_ANIMATION_LIMITER` (`ANIMATION_WORKERS`, default 16) | `async def` so per-frame `load_slice_uncached` calls fan out via `asyncio.gather`; latency drops to ~max(per-frame) instead of the serial sum. Limiter keeps a many-frame request from monopolising the tile-handler budget — see [§12.6](#126-one-pool-two-capacity-budgets) |
+| `/animation` | Event-loop coroutine → `anyio.to_thread.run_sync` per frame, gated by `_ANIMATION_LIMITER` (`ANIMATION_WORKERS`, default 10) | `async def` so per-frame `load_slice_uncached` calls fan out via `asyncio.gather`; latency drops to ~max(per-frame) instead of the serial sum. Limiter keeps a many-frame request from monopolising the tile-handler budget — see [§12.6](#126-one-pool-two-capacity-budgets) |
 | `/admin/products` POST            | Event loop (`async def`) → spawns `prewarm_disk_slices` as a background task  | Admin prewarm is itself `async def`; fire-and-forget via `asyncio.create_task` |
 | `/admin/products` DELETE          | Event loop (sync `def`)                                                       | In-memory removal + sync cache eviction                                    |
 | `GET /admin/cache`                | Event-loop coroutine → `anyio.to_thread.run_sync`                             | Filesystem walk offloaded to anyio pool, default limiter                   |
@@ -1008,17 +1020,17 @@ The current design collapses this to one pool with three limiters:
 
 - **Default limiter** (size `THREAD_POOL_SIZE`, default 100) — the limiter `anyio.to_thread.current_default_thread_limiter()` returns. Used by every sync `def` tile handler (dispatched automatically by FastAPI) and by every `anyio.to_thread.run_sync(...)` call that doesn't pass an explicit limiter.
 - **`_PREWARM_LIMITER`** (size `PREWARM_WORKERS`, default 8) — a module-level `anyio.CapacityLimiter` in `services/disk_cache.py`. Used only by `_prewarm_one` fan-out calls inside `prewarm_disk_slices` and `refresh_disk_cache`, via the explicit `limiter=_PREWARM_LIMITER` argument. Sized to the S3 connection-pool ceiling.
-- **`_ANIMATION_LIMITER`** (size `ANIMATION_WORKERS`, default 16) — a module-level `anyio.CapacityLimiter` in `routers/visual_tiles.py`. Used by the per-frame `load_slice_uncached` fan-out inside `/animation`, via the explicit `limiter=_ANIMATION_LIMITER` argument. Sized higher than prewarm because the user is waiting for the response — latency matters — while still bounded so a many-frame request cannot monopolise the tile-handler budget.
+- **`_ANIMATION_LIMITER`** (size `ANIMATION_WORKERS`, default 10) — a module-level `anyio.CapacityLimiter` in `routers/visual_tiles.py`. Used by the per-frame `load_slice_uncached` fan-out inside `/animation`, via the explicit `limiter=_ANIMATION_LIMITER` argument. Sized to the aiobotocore S3 connection-pool ceiling (~10/host); going higher just queues on the connection pool without reducing latency, and the bound keeps a many-frame request from monopolising the tile-handler budget.
 
-All three limiters live over the **same** anyio worker pool. Anyio creates worker threads on demand and they're shared across limiters — but each call only acquires the limiter it was passed, so the budgets are independent. A prewarm burst saturating its 8-slot budget does not reduce the tile-handler budget of 100, and a 60-frame animation does not steal from prewarm either.
+All three limiters live over the **same** anyio worker pool. Anyio creates worker threads on demand and they're shared across limiters — but each call only acquires the limiter it was passed, so the budgets are independent. A prewarm burst saturating its 8-slot budget does not reduce the tile-handler budget of 100, and a 30-frame animation does not steal from prewarm either.
 
 #### Why three budgets, not one
 
 | Concern | What the layout buys |
 | --- | --- |
 | **Tile traffic isolated from background work** | A 150-slice prewarm doesn't consume tile-handler capacity. Without `_PREWARM_LIMITER`, the same fan-out would either flood the default 100-slot limiter (starving requests) or need a `Semaphore` rebuilt by hand inside the prewarm coroutine. |
-| **Tile traffic isolated from animation requests** | A 60-frame `/animation` request consumes at most 16 anyio slots, not all 100. Without `_ANIMATION_LIMITER`, a couple of concurrent animation requests could saturate the tile budget. |
-| **Resource ceilings decoupled from request capacity** | `PREWARM_WORKERS=8` matches the S3 connection pool and the bandwidth you want to spend on background warmup. `ANIMATION_WORKERS=16` is sized for foreground latency (waiting user). Both are independent of how many tile requests can run concurrently. |
+| **Tile traffic isolated from animation requests** | A 30-frame `/animation` request consumes at most 10 anyio slots, not all 100. Without `_ANIMATION_LIMITER`, a couple of concurrent animation requests could saturate the tile budget. |
+| **Resource ceilings decoupled from request capacity** | Both `PREWARM_WORKERS=8` and `ANIMATION_WORKERS=10` match the aiobotocore S3 connection-pool ceiling (~10/host) — the real bottleneck for slice fetches. Both are independent of how many tile requests can run concurrently. |
 | **Admin endpoints answer under tile-pool pressure** | `/admin/cache` GET and `DELETE /admin/cache/disk` use `anyio.to_thread.run_sync` with the default limiter. They share the 100-slot budget with tile handlers — but admin endpoints are one-shot filesystem walks; the practical chance of contention is negligible, and the simplicity is worth more than a fourth dedicated limiter. |
 
 #### Non-pool worker threads (unchanged)
@@ -1459,8 +1471,11 @@ A wrong-layer choice has real costs: making `max_lods` an env var would let an o
 | Variable               | Default | Description                                                                                                             |
 | ---------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------- |
 | `THREAD_POOL_SIZE`     | `100`   | Anyio thread-pool size. Each in-flight sync request uses one slot. See [§12](#12-concurrency-event-loop-and-threading). |
-| `SLICE_CACHE_SIZE`     | `10`    | LRU size for the L2 in-memory slice cache. RAM bound: `SLICE_CACHE_SIZE × max_slice_size`.                              |
-| `PROCESSED_CACHE_SIZE` | `50`    | LRU size for the L1 processed-grid cache. Sized as `SLICE_CACHE_SIZE × LOD.max_lods` with headroom.                     |
+| `ANIMATION_WORKERS`    | `10`    | Capacity-limiter cap for `/animation` per-frame S3 fan-out. Sized to the aiobotocore S3 connection pool. See [§12.6](#126-one-pool-two-capacity-budgets). |
+| `SLICE_CACHE_SIZE`     | `10`    | Max entries in the L2 in-memory slice cache. RAM bound: `SLICE_CACHE_SIZE × max_slice_size`.                            |
+| `SLICE_CACHE_TTL_SECONDS` | `600`  | Per-entry TTL for the L2 slice cache (`cachetools.TTLCache`). Entries expire this many seconds after insertion so idle RAM returns to baseline; `SLICE_CACHE_SIZE` still bounds capacity under burst pressure. |
+| `PROCESSED_CACHE_SIZE` | `50`    | Max entries in the L1 processed-grid cache. Sized as `SLICE_CACHE_SIZE × LOD.max_lods` with headroom.                   |
+| `PROCESSED_CACHE_TTL_SECONDS` | `600` | Per-entry TTL for the L1 processed-grid cache (`cachetools.TTLCache`). Same idle-RAM rationale as `SLICE_CACHE_TTL_SECONDS`. |
 | `STORE_TTL_SECONDS`    | `600`   | Stale-while-revalidate window for the Zarr store singleton.                                                             |
 
 ### 15.4 Disk cache (L3)

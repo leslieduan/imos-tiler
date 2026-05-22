@@ -116,11 +116,19 @@ STORE_TTL_SECONDS=600
 # Thread pool: max concurrent sync route handlers.
 THREAD_POOL_SIZE=100
 
-# Slice cache: number of fully-computed (store, date) slices to hold in RAM.
+# Slice cache (L2): number of fully-computed (store, date) slices to hold in RAM.
 SLICE_CACHE_SIZE=10
 
-# Processed cache: number of resampled LOD grids to hold in RAM.
+# Slice cache (L2): per-entry TTL in seconds. Entries expire this long after
+# insertion so idle RAM returns to baseline.
+SLICE_CACHE_TTL_SECONDS=600
+
+# Processed cache (L1): number of resampled LOD grids to hold in RAM.
 PROCESSED_CACHE_SIZE=50
+
+# Processed cache (L1): per-entry TTL in seconds. Entries expire this long after
+# insertion so idle RAM returns to baseline.
+PROCESSED_CACHE_TTL_SECONDS=600
 
 # Disk cache: maximum total size before pressure eviction runs.
 DISK_CACHE_LIMIT_GB=20
@@ -132,7 +140,10 @@ DISK_EVICTION_THRESHOLD=0.85
 CACHE_DAYS=30
 
 # Disk cache: thread pool size for parallel prewarm at startup.
-PREWARM_WORKERS=4
+PREWARM_WORKERS=8
+
+# /animation: per-frame S3 fan-out concurrency cap.
+ANIMATION_WORKERS=10
 
 # Disk cache: seconds between background refresh cycles.
 CACHE_REFRESH_INTERVAL_SECONDS=14400
@@ -155,7 +166,7 @@ docker compose ps
 docker compose logs -f app
 ```
 
-On first start, the server prewarmed the disk cache in the background — logs will show lines like `Disk prewarm written (S3): sea_level_anomaly / 2024-01-15` as it fetches the latest 30 dates per product from S3. With 4 products and `PREWARM_WORKERS=4` this takes ~60s. Subsequent restarts load from disk in ~30s.
+On first start, the server prewarmed the disk cache in the background — logs will show lines like `Disk prewarm written (S3): sea_level_anomaly / 2024-01-15` as it fetches the latest 30 dates per product from S3. With 4 products and `PREWARM_WORKERS=8` this takes ~30s. Subsequent restarts load from disk in ~30s.
 
 ---
 

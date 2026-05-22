@@ -21,7 +21,7 @@ import time
 
 import pandas as pd
 import xarray as xr
-from cachetools import LRUCache
+from cachetools import TTLCache
 
 from app.constants import Product
 from app.services.disk_cache import (
@@ -35,8 +35,13 @@ from app.utils.memoizer import Memoizer
 logger = logging.getLogger(__name__)
 
 _SLICE_CACHE_SIZE = int(os.environ.get("SLICE_CACHE_SIZE", 10))
+# L2 entries are useful for the lifetime of one active map view: a burst of tile
+# requests for the same (product, date) lands within seconds, then the user moves
+# on. TTL evicts entries that haven't been refreshed since insertion so idle RAM
+# returns to baseline; maxsize still bounds peak capacity under burst pressure.
+_SLICE_CACHE_TTL = int(os.environ.get("SLICE_CACHE_TTL_SECONDS", 600))
 _SLOW_FETCH_THRESHOLD = float(os.environ.get("SLOW_FETCH_THRESHOLD_SECONDS", 5))
-_slice_cache: LRUCache = LRUCache(maxsize=_SLICE_CACHE_SIZE)
+_slice_cache: TTLCache = TTLCache(maxsize=_SLICE_CACHE_SIZE, ttl=_SLICE_CACHE_TTL)
 _slice_memo: Memoizer = Memoizer(_slice_cache)
 
 # Separate lock for product.lod_grids lazy initialization (unrelated to store state).
