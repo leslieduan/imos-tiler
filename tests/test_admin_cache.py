@@ -142,6 +142,8 @@ def test_products_in_response_match_registered_products():
             "oldest_date",
             "newest_date",
             "last_write_at",
+            "files",
+            "cache_dir",
             "slice_in_flight",
             "processed_in_flight",
         }

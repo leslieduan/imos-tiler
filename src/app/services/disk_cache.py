@@ -422,6 +422,7 @@ _EMPTY_PRODUCT_DISK_STATS: dict = {
     "oldest_date": None,
     "newest_date": None,
     "last_write_at": None,
+    "files": [],
 }
 
 
@@ -449,6 +450,7 @@ def collect_disk_stats(products: list[Product]) -> dict:
     per_pid_sizes: dict[str, list[int]] = {pid: [] for pid in dir_to_pid.values()}
     per_pid_mtimes: dict[str, list[float]] = {pid: [] for pid in dir_to_pid.values()}
     per_pid_dates: dict[str, list[str]] = {pid: [] for pid in dir_to_pid.values()}
+    per_pid_files: dict[str, list[str]] = {pid: [] for pid in dir_to_pid.values()}
     total_bytes = 0
 
     base_path = Path(DISK_CACHE_PATH)
@@ -462,12 +464,14 @@ def collect_disk_stats(products: list[Product]) -> dict:
             per_pid_sizes[pid].append(st.st_size)
             per_pid_mtimes[pid].append(st.st_mtime)
             per_pid_dates[pid].append(f.name.split(".")[0])
+            per_pid_files[pid].append(f.name)
 
     per_product: dict[str, dict] = {}
     for p in products:
+        cache_dir = disk_cache_path(p.source_path, "", p.variables).parent.name
         sizes = per_pid_sizes.get(p.id, [])
         if not sizes:
-            per_product[p.id] = dict(_EMPTY_PRODUCT_DISK_STATS)
+            per_product[p.id] = {**_EMPTY_PRODUCT_DISK_STATS, "cache_dir": cache_dir}
             continue
         dates = sorted(per_pid_dates[p.id])
         per_product[p.id] = {
@@ -476,6 +480,8 @@ def collect_disk_stats(products: list[Product]) -> dict:
             "oldest_date": dates[0],
             "newest_date": dates[-1],
             "last_write_at": datetime.fromtimestamp(max(per_pid_mtimes[p.id]), tz=UTC).isoformat(),
+            "files": sorted(per_pid_files[p.id]),
+            "cache_dir": cache_dir,
         }
 
     return {
