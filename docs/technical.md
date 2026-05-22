@@ -951,6 +951,51 @@ The reason is twofold:
 
 By defining handlers as plain `def`, each one runs on a worker thread from the anyio pool. The event loop stays responsive: it only does the work of accepting connections, parsing HTTP headers, dispatching to handlers, and serialising responses.
 
+#### When does `async def` actually help?
+
+A recurring confusion: "if I split a tile pipeline into `await load(); await process(); await encode()`, does it run faster?" The honest answer is **no for a single request**, and understanding why clarifies when `async def` is and isn't worth reaching for.
+
+There are two distinct kinds of "parallelism" that get conflated:
+
+| Kind | What it is | Who provides it |
+|---|---|---|
+| **Within-request parallelism** | One request's internal steps run concurrently | Only `async def` + `asyncio.gather` (or task-group `start_soon`) over **independent** steps. Useless for sequential/dependent steps. |
+| **Across-request concurrency** | The server handles many requests at once | Both `def` (via the anyio thread pool) and `async def` (via the loop + thread pool). Same outcome either way. |
+
+For a sequential blocking pipeline (`load → process → encode`, where each step needs the previous step's output), `await` enforces ordering — the next step starts when the previous one finishes, identical to plain function calls. Wrapping it as `async def` with multiple `to_thread.run_sync` hops adds extra thread-acquisition overhead with no wall-clock win. This is why tile handlers stay `def`.
+
+`async def` wins in three concrete cases:
+
+1. **Independent fan-out** — `/animation` reads N frames in parallel via `asyncio.gather`; total time drops from `N × per_frame` to `~max(per_frame)`. Needs `async def`.
+2. **Truly async I/O** (none used here today) — see below.
+3. **Selective offload boundaries** — keep cheap parsing/validation on the loop, offload only the heavy step. `get_animation`'s prelude is the example.
+
+#### What async I/O actually buys (if we ever introduce it)
+
+For sync I/O via `to_thread.run_sync`, a slow S3 read holds a **worker thread** for the entire wait, doing nothing but sleeping on a socket. With a truly-async client (`aiobotocore`, an async HTTP library, etc.), `await async_get(...)` releases the thread during the wait — the coroutine parks on the event loop, costing only a small Python object.
+
+```
+Sync-in-thread:   thread held for whole 2 s S3 wait    ████████████████████
+Async I/O:        thread held only during CPU work     ▏▏  (~0.1 s)
+```
+
+Within ONE request, wall-clock is the same — `await` still enforces ordering. The benefit shows up at the **system level**:
+
+- Pool size 10, S3 wait 2 s, processing 0.1 s.
+- **Sync model**: 10 concurrent requests fill all 10 threads, each idle on a socket. An 11th request queues for ~2.1 s. Throughput ≈ 5 req/s.
+- **Async S3 model**: 1000 concurrent requests can be parked on the loop waiting on S3; threads are only consumed during the 0.1 s processing phase. Throughput limited by processing, not by I/O wait. Throughput ≈ 100 req/s.
+
+The thread pool stops being the bottleneck during I/O wait.
+
+**Why we don't currently benefit from this.** `xarray.open_zarr` → `fsspec` → `urllib3`/`botocore` is sync end-to-end. There is no `await` to insert; the only option is `to_thread.run_sync(...)`, which holds a thread for the duration. To get the async-I/O win we would have to bypass xarray and implement chunk fetching against `aiobotocore` directly. Worth considering only if S3-wait-holding-threads becomes a measurable bottleneck — see [§12.9](#129-scaling-thread_pool_size).
+
+#### The rule of thumb for this codebase
+
+- Single sequential blocking pipeline → `def`. Simpler, one thread hop instead of three.
+- Independent work to fan out → `async def` + `asyncio.gather` / `create_task_group`.
+- Need a running event loop in the handler (e.g. to `asyncio.create_task` a background job, like `add_product`) → `async def`, with the blocking part offloaded via `to_thread.run_sync`.
+- Mixing async I/O with sync CPU work → `async def`, splitting at the async/sync boundary.
+
 ### 12.2 The thread pool
 
 ```python
