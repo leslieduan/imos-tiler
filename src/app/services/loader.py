@@ -83,7 +83,7 @@ def _compute_slice_from_store(store_url: str, date: str, variables: list[str]) -
     delegate here; they differ only in whether the result lands in L2.
     """
     cache_path = disk_cache_path(store_url, date, list(variables))
-    if cache_path is not None and cache_path.exists():
+    if cache_path.exists():
         cached = read_slice_from_disk(cache_path)
         if cached is not None:
             return cached

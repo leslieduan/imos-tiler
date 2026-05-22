@@ -2,8 +2,7 @@
 
 Slices that have been ``compute()``-d from Zarr are pickled + LZ4-compressed and
 written under ``DISK_CACHE_PATH``. Each (store, variable-set) gets its own
-directory; each date is a single file. Disabled entirely when the env var is
-unset.
+directory; each date is a single file.
 
 Three lifecycle entry points:
   * ``prewarm_disk_slices`` — populate from S3 on startup (parallel workers).
@@ -70,18 +69,15 @@ def is_refresh_running() -> bool:
         return _refresh_status["status"] == "running"
 
 
-def disk_cache_path(store_url: str, date: str, variables: list[str]) -> Path | None:
-    """Return the L3 cache path for a slice, or None if disk caching is disabled."""
-    base = DISK_CACHE_PATH
-    if not base:
-        return None
+def disk_cache_path(store_url: str, date: str, variables: list[str]) -> Path:
+    """Return the L3 cache path for a slice."""
     # Encode the full URL into a single directory name so two stores with the same
     # basename from different buckets (e.g. s3://a/sla.zarr and s3://b/sla.zarr) do
     # not collide. '%' is disallowed in S3 bucket names and effectively never used
     # in S3 object keys, so the substitution is bijective in practice.
     store_name = store_url.rstrip("/").replace("/", "%")
     var_str = ",".join(sorted(variables))
-    return Path(base) / f"{store_name}-{var_str}" / f"{date}.pkl.lz4"
+    return Path(DISK_CACHE_PATH) / f"{store_name}-{var_str}" / f"{date}.pkl.lz4"
 
 
 def read_slice_from_disk(cache_path: Path) -> xr.Dataset | None:
@@ -106,14 +102,11 @@ _evict_lock = threading.Lock()
 
 
 def _evict_if_over_threshold() -> None:
-    base = DISK_CACHE_PATH
-    if not base:
-        return
     limit_bytes = int(os.environ.get("DISK_CACHE_LIMIT_GB", 20)) * 1024**3
     threshold = int(limit_bytes * float(os.environ.get("DISK_EVICTION_THRESHOLD", 0.85)))
 
     with _evict_lock:
-        entries = [(f, f.stat().st_size) for f in Path(base).rglob("*.pkl.lz4")]
+        entries = [(f, f.stat().st_size) for f in Path(DISK_CACHE_PATH).rglob("*.pkl.lz4")]
         if not entries:
             return
         total = sum(size for _, size in entries)
@@ -156,26 +149,24 @@ def _prewarm_one(product: Product, date: str, variables: list[str]) -> str:
 
     try:
         cache_path = disk_cache_path(product.source_path, date, variables)
-        if cache_path is not None and cache_path.exists():
+        if cache_path.exists():
             return "skipped"
         # Uncached: prewarm processes many dates and would otherwise evict live-request
         # entries from the 10-slot L2 LRU.
         ds = load_slice_uncached(product.source_path, date, variables)
-        if cache_path is not None:
-            # Guard against the admin add → delete race: if the product was deregistered
-            # (or replaced with a different object under the same id) while we were
-            # fetching from S3, don't recreate its cache dir — write_slice_to_disk would
-            # silently undo the deletion and leak orphan files until the next eviction.
-            if PRODUCTS.get(product.id) is not product:
-                logger.debug(
-                    "Prewarm write skipped — product no longer registered",
-                    extra={"product_id": product.id, "date": date},
-                )
-                return "skipped"
-            write_slice_to_disk(cache_path, ds)
-            logger.debug("Disk prewarm written", extra={"product_id": product.id, "date": date})
-            return "written"
-        return "skipped"
+        # Guard against the admin add → delete race: if the product was deregistered
+        # (or replaced with a different object under the same id) while we were
+        # fetching from S3, don't recreate its cache dir — write_slice_to_disk would
+        # silently undo the deletion and leak orphan files until the next eviction.
+        if PRODUCTS.get(product.id) is not product:
+            logger.debug(
+                "Prewarm write skipped — product no longer registered",
+                extra={"product_id": product.id, "date": date},
+            )
+            return "skipped"
+        write_slice_to_disk(cache_path, ds)
+        logger.debug("Disk prewarm written", extra={"product_id": product.id, "date": date})
+        return "written"
     except FileNotFoundError:
         return "skipped"  # date in time index but nearest match is a different local day
     except Exception:
@@ -195,9 +186,6 @@ async def prewarm_disk_slices(products: list[Product]) -> None:
     PREWARM_WORKERS (default 8) tasks exist at once — bounds both S3 fan-out and
     the pending-coroutine count when product × date is large.
     """
-    if not DISK_CACHE_PATH:
-        return
-
     from app.services.loader import get_available_dates
 
     global _prewarm_running
@@ -270,8 +258,6 @@ def evict_stale_and_orphans(products: list[Product]) -> None:
     `products` is treated as orphaned and removed — passing a single-product list (as
     admin POST does) would wipe every other product's cache.
     """
-    if not DISK_CACHE_PATH:
-        return
     _evict_if_over_threshold()
 
     from app.services.loader import get_available_dates
@@ -290,17 +276,14 @@ def evict_stale_and_orphans(products: list[Product]) -> None:
             )
             continue
 
-        _p = disk_cache_path(product.source_path, "", variables)
-        if _p is None:
-            continue
-        cache_dir = _p.parent
+        cache_dir = disk_cache_path(product.source_path, "", variables).parent
         if not cache_dir.exists():
             continue
         cached_dates = {f.name.split(".")[0] for f in cache_dir.glob("*.pkl.lz4")}
 
         for date in sorted(cached_dates - target_dates):
             p = disk_cache_path(product.source_path, date, variables)
-            if p is not None and p.exists():
+            if p.exists():
                 p.unlink()
                 stale += 1
                 logger.debug(
@@ -309,14 +292,9 @@ def evict_stale_and_orphans(products: list[Product]) -> None:
                 )
 
     # Remove cache dirs for products no longer registered
-    base = DISK_CACHE_PATH
-    base_path = Path(base) if base else None
-    if base_path and base_path.exists():
-        known_dirs = set()
-        for product in products:
-            _p = disk_cache_path(product.source_path, "", product.variables)
-            if _p is not None:
-                known_dirs.add(_p.parent.name)
+    base_path = Path(DISK_CACHE_PATH)
+    if base_path.exists():
+        known_dirs = {disk_cache_path(p.source_path, "", p.variables).parent.name for p in products}
         for entry in base_path.iterdir():
             if entry.is_dir() and entry.name not in known_dirs:
                 shutil.rmtree(entry, ignore_errors=True)
@@ -339,9 +317,6 @@ async def refresh_disk_cache(products: list[Product]) -> None:
     Callers MUST pass the full set of currently registered products — see
     [[evict_stale_and_orphans]] for why.
     """
-    if not DISK_CACHE_PATH:
-        return
-
     with _refresh_status_lock:
         _refresh_status["last_started_at"] = datetime.now(UTC)
         _refresh_status["status"] = "running"
@@ -368,10 +343,7 @@ async def refresh_disk_cache(products: list[Product]) -> None:
                 )
                 continue
 
-            _p = disk_cache_path(product.source_path, "", variables)
-            if _p is None:
-                continue
-            cache_dir = _p.parent
+            cache_dir = disk_cache_path(product.source_path, "", variables).parent
             cache_dir.mkdir(parents=True, exist_ok=True)
             cached_dates = {f.name.split(".")[0] for f in cache_dir.glob("*.pkl.lz4")}
 
@@ -462,35 +434,24 @@ def collect_disk_stats(products: list[Product]) -> dict:
     implementation walked the base tree for the global total and then re-walked
     each product subdir, stat'ing every file twice.
 
-    Returns ``{"global": {...}, "per_product": {pid: {...}}}``. When disk
-    caching is disabled, ``global`` is ``{"enabled": False}`` and every product
-    gets the zero stats.
+    Returns ``{"global": {...}, "per_product": {pid: {...}}}``.
     """
-    base = DISK_CACHE_PATH
-    if not base:
-        return {
-            "global": {"enabled": False},
-            "per_product": {p.id: dict(_EMPTY_PRODUCT_DISK_STATS) for p in products},
-        }
-
     limit_bytes = int(os.environ.get("DISK_CACHE_LIMIT_GB", 20)) * 1024**3
     threshold_bytes = int(limit_bytes * float(os.environ.get("DISK_EVICTION_THRESHOLD", 0.85)))
 
     # Map "cache dir name" -> product id so we can attribute each file as we
     # encounter it. Dir name is derived the same way write paths are built, so
     # the match is exact.
-    dir_to_pid: dict[str, str] = {}
-    for p in products:
-        _path = disk_cache_path(p.source_path, "", p.variables)
-        if _path is not None:
-            dir_to_pid[_path.parent.name] = p.id
+    dir_to_pid: dict[str, str] = {
+        disk_cache_path(p.source_path, "", p.variables).parent.name: p.id for p in products
+    }
 
     per_pid_sizes: dict[str, list[int]] = {pid: [] for pid in dir_to_pid.values()}
     per_pid_mtimes: dict[str, list[float]] = {pid: [] for pid in dir_to_pid.values()}
     per_pid_dates: dict[str, list[str]] = {pid: [] for pid in dir_to_pid.values()}
     total_bytes = 0
 
-    base_path = Path(base)
+    base_path = Path(DISK_CACHE_PATH)
     if base_path.exists():
         for f in base_path.rglob("*.pkl.lz4"):
             st = f.stat()
@@ -519,8 +480,7 @@ def collect_disk_stats(products: list[Product]) -> dict:
 
     return {
         "global": {
-            "enabled": True,
-            "base_path": base,
+            "base_path": DISK_CACHE_PATH,
             "total_bytes": total_bytes,
             "limit_bytes": limit_bytes,
             "eviction_threshold_bytes": threshold_bytes,
@@ -535,21 +495,18 @@ def collect_disk_stats(products: list[Product]) -> dict:
 
 def evict_product_dir(product: Product) -> None:
     """Remove the on-disk cache directory for a deleted product."""
-    _p = disk_cache_path(product.source_path, "", product.variables)
-    if _p is not None and _p.parent.exists():
-        shutil.rmtree(_p.parent, ignore_errors=True)
+    cache_dir = disk_cache_path(product.source_path, "", product.variables).parent
+    if cache_dir.exists():
+        shutil.rmtree(cache_dir, ignore_errors=True)
         logger.info("Disk cache evicted (product removed)", extra={"product_id": product.id})
 
 
 def clear_disk_cache() -> dict:
     """Remove every per-product directory from the L3 disk cache.
 
-    Returns ``{"files": N, "directories": M}`` — or zeros when disk caching is disabled.
+    Returns ``{"files": N, "directories": M}``.
     """
-    base = DISK_CACHE_PATH
-    if not base:
-        return {"files": 0, "directories": 0}
-    base_path = Path(base)
+    base_path = Path(DISK_CACHE_PATH)
     if not base_path.exists():
         return {"files": 0, "directories": 0}
     files, dirs = 0, 0

@@ -91,12 +91,6 @@ def test_get_cache_returns_top_level_keys(monkeypatch):
     assert set(body.keys()) == {"disk", "disk_writes", "in_flight", "memory_cache", "products"}
 
 
-def test_disk_disabled_when_env_unset(monkeypatch):
-    monkeypatch.setattr(disk_cache, "DISK_CACHE_PATH", None)
-    body = client.get("/admin/cache", headers=_HEADERS).json()
-    assert body["disk"] == {"enabled": False}
-
-
 def test_disk_writes_shape():
     body = client.get("/admin/cache", headers=_HEADERS).json()
     dw = body["disk_writes"]
@@ -196,7 +190,6 @@ def test_global_disk_stats_aggregate_across_products(cache_root, monkeypatch):
     (cache_dir / "2024-01-01.pkl.lz4").write_bytes(b"x" * 1000)
 
     body = client.get("/admin/cache", headers=_HEADERS).json()
-    assert body["disk"]["enabled"] is True
     assert body["disk"]["total_bytes"] == 1000
     assert body["disk"]["limit_bytes"] == 1024**3
     assert body["disk"]["over_eviction_threshold"] is False
@@ -351,13 +344,6 @@ def test_delete_disk_cache_removes_files_and_dirs(cache_root):
     assert body == {"files": 2, "directories": 1}
     assert not d.exists()
     assert cache_root.exists()  # base dir preserved
-
-
-def test_delete_disk_cache_disabled_returns_zeros(monkeypatch):
-    monkeypatch.setattr(disk_cache, "DISK_CACHE_PATH", None)
-    r = client.delete("/admin/cache/disk", headers=_HEADERS)
-    assert r.status_code == 200
-    assert r.json() == {"files": 0, "directories": 0}
 
 
 def test_delete_disk_cache_empty_cache_returns_zeros(cache_root):
