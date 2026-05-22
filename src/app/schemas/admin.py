@@ -27,6 +27,8 @@ class ProductCacheStats(BaseModel):
     oldest_date: str | None
     newest_date: str | None
     last_write_at: str | None
+    files: list[str]
+    cache_dir: str
     slice_in_flight: int
     processed_in_flight: int
 

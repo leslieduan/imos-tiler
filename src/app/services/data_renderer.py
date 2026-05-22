@@ -1,6 +1,7 @@
 import logging
 import math
 import os
+import time
 from collections.abc import Callable
 
 import numpy as np
@@ -75,9 +76,12 @@ def _compute_processed(
     total_h = grid_rows * product.chunk_px[1]
     variables = product.variables
 
+    t0 = time.monotonic()
     ds_r = _resample_to_grid(ds[variables], total_w, total_h)
     raw = [ds_r[v].values.squeeze() for v in variables]
+    resample_ms = (time.monotonic() - t0) * 1000
 
+    t0 = time.monotonic()
     invalid = np.zeros(raw[0].shape, dtype=bool)
     for arr in raw:
         invalid |= np.isnan(arr)
@@ -90,6 +94,18 @@ def _compute_processed(
     normalised = [
         _normalize(r, *_var_range(ds, v), out_max) for r, v in zip(raw, variables, strict=True)
     ]
+    normalize_ms = (time.monotonic() - t0) * 1000
+
+    logger.info(
+        "[timing] processed grid built",
+        extra={
+            "product_id": product.id,
+            "lod": lod,
+            "grid_px": f"{total_w}x{total_h}",
+            "resample_ms": round(resample_ms, 1),
+            "normalize_ms": round(normalize_ms, 1),
+        },
+    )
     return normalised, ocean
 
 
@@ -169,10 +185,19 @@ def _extract_chunk(
 def render_tile(
     product: Product, load_ds: Callable[[], xr.Dataset], lod: int, cx: int, cy: int, date: str
 ) -> bytes:
+    t_total = time.monotonic()
+    key = (product.source_path, date, tuple(product.variables), lod)
+    l1_hit = key in _processed_cache
+
+    t0 = time.monotonic()
     normalised, ocean = _get_processed(product, load_ds, lod, date)
+    get_processed_ms = (time.monotonic() - t0) * 1000
+
     grid_cols, grid_rows = product.lod_grids[lod]
     total_w = grid_cols * product.chunk_px[0]
     total_h = grid_rows * product.chunk_px[1]
+
+    t0 = time.monotonic()
 
     def chunk_of(arr: np.ndarray) -> np.ndarray:
         return _extract_chunk(arr, cx, cy, total_w, total_h, product.chunk_px, product.padding)
@@ -200,7 +225,27 @@ def render_tile(
         img[:, :, 2] = chunk_m * 255
         img[:, :, 3] = 255
 
-    return encode_rgba(img)
+    pack_ms = (time.monotonic() - t0) * 1000
+
+    t0 = time.monotonic()
+    png = encode_rgba(img)
+    encode_ms = (time.monotonic() - t0) * 1000
+
+    logger.info(
+        "[timing] tile rendered",
+        extra={
+            "product_id": product.id,
+            "date": date,
+            "lod": lod,
+            "tile": f"{cx}/{cy}",
+            "l1_hit": l1_hit,
+            "get_processed_ms": round(get_processed_ms, 1),
+            "pack_ms": round(pack_ms, 1),
+            "encode_ms": round(encode_ms, 1),
+            "total_ms": round((time.monotonic() - t_total) * 1000, 1),
+        },
+    )
+    return png
 
 
 def render_manifest(product: Product, ds: xr.Dataset) -> dict:
