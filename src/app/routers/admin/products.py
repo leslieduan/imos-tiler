@@ -3,6 +3,7 @@
 import asyncio
 import logging
 
+import anyio
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
@@ -82,9 +83,12 @@ class ProductPayload(BaseModel):
     ),
     response_model=ProductCreatedResponse,
 )
-def add_product(payload: ProductPayload):
+async def add_product(payload: ProductPayload):
+    # Offload the sync read+write+reload of products.json so the event loop
+    # stays free; the handler itself must remain async because _spawn_prewarm
+    # calls asyncio.create_task, which requires a running loop in this thread.
     try:
-        product = register_product(payload.model_dump())
+        product = await anyio.to_thread.run_sync(register_product, payload.model_dump())
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
     except Exception as e:

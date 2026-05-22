@@ -231,11 +231,13 @@ async def prewarm_disk_slices(products: list[Product]) -> None:
                 "seconds": round(time.monotonic() - t0, 1),
             },
         )
+
+        # Inside the try so is_prewarm_running() stays true through the trailing
+        # eviction; otherwise /admin/cache/disk could race against this unlink pass.
+        await anyio.to_thread.run_sync(_evict_if_over_threshold)
     finally:
         with _prewarm_lock:
             _prewarm_running = False
-
-    await anyio.to_thread.run_sync(_evict_if_over_threshold)
 
 
 def evict_stale_and_orphans(products: list[Product]) -> None:
