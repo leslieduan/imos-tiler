@@ -21,6 +21,12 @@ try:
 
     _HAS_NUMBA = True
 
+    # fastmath=True (all flags) is safe here even though `nnan` claims "no NaN":
+    # NaN propagates through hardware FP arithmetic regardless of the compile-time
+    # nnan flag (which only enables removing explicit isnan checks, not changing
+    # FP op semantics). Verified by the resample benchmark (100% nan_match vs
+    # xr.interp). The explicit isnan check below is dead code under fastmath but
+    # left for readability and as a guard if fastmath is ever disabled.
     @njit(parallel=True, cache=True, fastmath=True)
     def _numba_bilinear(src: np.ndarray, total_h: int, total_w: int) -> np.ndarray:
         """JIT-compiled bilinear with NaN propagation. Output positions match
@@ -59,6 +65,75 @@ try:
                     out[i, j] = top * (1.0 - dy) + bot * dy
         return out
 
+    # Selective fastmath (no 'nnan') so np.isnan() works correctly inside the
+    # kernel. Folds the NaN-mask scan into the normalize pass — one traversal
+    # produces both the normalized output and the per-pixel valid mask, which
+    # is significantly faster than a separate isnan kernel + normalize kernel
+    # (two full grid reads vs one).
+    @njit(
+        parallel=True,
+        cache=True,
+        fastmath={"nsz", "arcp", "contract", "afn", "reassoc"},
+    )
+    def _numba_normalize_uint32(
+        arr: np.ndarray, lo: float, hi: float, out_max: int
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Normalize float32 → uint32 in one pass, also producing the per-pixel
+        valid mask (1 where non-NaN, 0 where NaN).
+        """
+        h, w = arr.shape
+        out = np.empty((h, w), dtype=np.uint32)
+        valid = np.empty((h, w), dtype=np.uint8)
+        span = hi - lo if hi != lo else 1.0
+        scale = (1.0 / span) * out_max
+        out_max_f = float(out_max)
+        for i in prange(h):
+            for j in range(w):
+                v = arr[i, j]
+                if np.isnan(v):
+                    out[i, j] = np.uint32(0)
+                    valid[i, j] = np.uint8(0)
+                else:
+                    val = (v - lo) * scale
+                    if val < 0.0:
+                        val = 0.0
+                    elif val > out_max_f:
+                        val = out_max_f
+                    out[i, j] = np.uint32(val)
+                    valid[i, j] = np.uint8(1)
+        return out, valid
+
+    @njit(
+        parallel=True,
+        cache=True,
+        fastmath={"nsz", "arcp", "contract", "afn", "reassoc"},
+    )
+    def _numba_normalize_uint8(
+        arr: np.ndarray, lo: float, hi: float, out_max: int
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """uint8 specialisation of _numba_normalize_uint32 for multi-variable products."""
+        h, w = arr.shape
+        out = np.empty((h, w), dtype=np.uint8)
+        valid = np.empty((h, w), dtype=np.uint8)
+        span = hi - lo if hi != lo else 1.0
+        scale = (1.0 / span) * out_max
+        out_max_f = float(out_max)
+        for i in prange(h):
+            for j in range(w):
+                v = arr[i, j]
+                if np.isnan(v):
+                    out[i, j] = np.uint8(0)
+                    valid[i, j] = np.uint8(0)
+                else:
+                    val = (v - lo) * scale
+                    if val < 0.0:
+                        val = 0.0
+                    elif val > out_max_f:
+                        val = out_max_f
+                    out[i, j] = np.uint8(val)
+                    valid[i, j] = np.uint8(1)
+        return out, valid
+
 except (
     ImportError
 ):  # pragma: no cover — numba is a hard dep; this guards against broken install only
@@ -87,6 +162,10 @@ def warmup_resample() -> None:
         coords={"lat": np.linspace(1.0, 0.0, 16), "lon": np.linspace(0.0, 1.0, 16)},
     )
     _resample_variables_to_grid(ds, ["v"], 32, 32)
+    if _HAS_NUMBA:
+        sample = np.zeros((32, 32), dtype=np.float32)
+        _numba_normalize_uint32(sample, 0.0, 1.0, 16777215)
+        _numba_normalize_uint8(sample, 0.0, 1.0, 255)
     logger.info(
         "[timing] resample warmup",
         extra={
@@ -173,18 +252,32 @@ def _compute_processed(
     resample_ms = (time.monotonic() - t0) * 1000
 
     t0 = time.monotonic()
-    invalid = np.zeros(raw[0].shape, dtype=bool)
-    for arr in raw:
-        invalid |= np.isnan(arr)
-    ocean = (~invalid).astype(np.uint8)
-
     # Scalar: pack one value across 3 bytes (R/G/B) for sub-percent precision over the
     # data range. Multi-variable: one byte per channel — precision drops to ~0.4%, but
     # the frontend shader needs each channel independently addressable.
     out_max = 16777215 if len(variables) == 1 else 255
-    normalised = [
-        _normalize(r, *_var_range(ds, v), out_max) for r, v in zip(raw, variables, strict=True)
-    ]
+    normalised: list[np.ndarray] = []
+    valid_masks: list[np.ndarray] = []
+    for r, v in zip(raw, variables, strict=True):
+        lo, hi = _var_range(ds, v)
+        if _HAS_NUMBA:
+            if out_max > 255:
+                norm, valid = _numba_normalize_uint32(r, lo, hi, out_max)
+            else:
+                norm, valid = _numba_normalize_uint8(r, lo, hi, out_max)
+        else:
+            norm = _normalize(r, lo, hi, out_max)
+            valid = (~np.isnan(r)).astype(np.uint8)
+        normalised.append(norm)
+        valid_masks.append(valid)
+
+    # ocean = AND of per-variable valid masks (1 where every variable is non-NaN).
+    if len(valid_masks) == 1:
+        ocean = valid_masks[0]
+    else:
+        ocean = valid_masks[0].copy()
+        for vm in valid_masks[1:]:
+            ocean &= vm
     normalize_ms = (time.monotonic() - t0) * 1000
 
     logger.info(
