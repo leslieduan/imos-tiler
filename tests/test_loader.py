@@ -75,14 +75,14 @@ def test_storage_options_s3_defaults_anon(monkeypatch):
     monkeypatch.delenv("S3_ANON", raising=False)
     opts = _storage_options("s3://bucket/path.zarr")
     assert opts["anon"] is True
-    assert "config" in opts["client_kwargs"]  # botocore timeouts attached
+    assert "connect_timeout" in opts["config_kwargs"]
 
 
 def test_storage_options_s3_anon_disabled_via_env(monkeypatch):
     monkeypatch.setenv("S3_ANON", "false")
     opts = _storage_options("s3://bucket/path.zarr")
     assert opts["anon"] is False
-    assert "config" in opts["client_kwargs"]
+    assert "connect_timeout" in opts["config_kwargs"]
 
 
 def test_storage_options_non_s3_returns_empty():
