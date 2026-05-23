@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 import xarray as xr
 
-from app.constants import Product
+from app.domain.product import Product
 from app.services.loader import get_lod_grids
 from app.services.store_registry import _storage_options, get_store, store_registry
 

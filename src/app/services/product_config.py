@@ -5,7 +5,8 @@ import tempfile
 import threading
 from pathlib import Path
 
-from app.constants import CHUNK_PX, PADDING, PRODUCTS, PRODUCTS_CONFIG_PATH, Product
+from app.constants import CHUNK_PX, PADDING, PRODUCTS, PRODUCTS_CONFIG_PATH
+from app.domain.product import Product
 
 logger = logging.getLogger(__name__)
 

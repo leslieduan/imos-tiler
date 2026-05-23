@@ -1,6 +1,7 @@
 import pytest
 
-from app.constants import PRODUCTS, Product
+from app.constants import PRODUCTS
+from app.domain.product import Product
 
 
 @pytest.fixture(autouse=True)

@@ -9,7 +9,8 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from starlette.middleware.cors import CORSMiddleware
 
-from app.constants import DISK_CACHE_PATH, PRODUCTS, Product
+from app.constants import DISK_CACHE_PATH, PRODUCTS
+from app.domain.product import Product
 from app.log_config import configure_logging
 from app.routers.admin import admin_router
 from app.routers.data_tiles import router as data_tiles_router

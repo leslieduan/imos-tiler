@@ -23,7 +23,7 @@ import pandas as pd
 import xarray as xr
 from cachetools import TTLCache
 
-from app.constants import Product
+from app.domain.product import Product
 from app.services.disk_cache import (
     disk_cache_path,
     evict_product_dir,

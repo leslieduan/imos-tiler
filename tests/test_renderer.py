@@ -3,7 +3,7 @@ import pytest
 import xarray as xr
 
 import app.services.data_renderer as renderer_module
-from app.constants import Product
+from app.domain.product import Product
 from app.services.data_renderer import render_manifest, render_tile
 
 

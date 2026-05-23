@@ -5,7 +5,8 @@ from datetime import date as _Date
 from fastapi import HTTPException
 from fastapi.openapi.models import Example
 
-from app.constants import PRODUCTS, Product
+from app.constants import PRODUCTS
+from app.domain.product import Product
 from app.services.colormap_config import is_categorical
 from app.services.colormap_lookup import resolve_colormap
 from app.services.loader import load_slice

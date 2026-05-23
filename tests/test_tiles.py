@@ -4,7 +4,7 @@ import numpy as np
 import xarray as xr
 from starlette.testclient import TestClient
 
-from app.constants import Product
+from app.domain.product import Product
 from app.main import app
 
 client = TestClient(app, raise_server_exceptions=True)

@@ -10,7 +10,8 @@ import json
 import pytest
 
 import app.services.product_config as product_config
-from app.constants import PRODUCTS, Product
+from app.constants import PRODUCTS
+from app.domain.product import Product
 
 
 @pytest.fixture

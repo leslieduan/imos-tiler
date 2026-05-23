@@ -7,7 +7,8 @@ import anyio
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
-from app.constants import CHUNK_PX, PADDING, PRODUCTS, Product
+from app.constants import CHUNK_PX, PADDING, PRODUCTS
+from app.domain.product import Product
 from app.schemas.admin import ProductCreatedResponse
 from app.services.disk_cache import prewarm_disk_slices
 from app.services.loader import evict_product_cache

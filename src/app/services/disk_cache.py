@@ -30,7 +30,8 @@ import anyio
 import lz4.frame
 import xarray as xr
 
-from app.constants import DISK_CACHE_PATH, PRODUCTS, Product
+from app.constants import DISK_CACHE_PATH, PRODUCTS
+from app.domain.product import Product
 
 logger = logging.getLogger(__name__)
 

@@ -12,7 +12,8 @@ import pytest
 import xarray as xr
 
 import app.services.disk_cache as disk_cache
-from app.constants import PRODUCTS, Product
+from app.constants import PRODUCTS
+from app.domain.product import Product
 
 
 @pytest.fixture

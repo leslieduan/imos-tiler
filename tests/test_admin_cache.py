@@ -9,7 +9,8 @@ from starlette.testclient import TestClient
 import app.services.data_renderer as data_renderer
 import app.services.disk_cache as disk_cache
 import app.services.loader as loader
-from app.constants import PRODUCTS, Product
+from app.constants import PRODUCTS
+from app.domain.product import Product
 from app.main import app
 
 client = TestClient(app, raise_server_exceptions=True)

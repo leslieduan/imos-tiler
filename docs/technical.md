@@ -157,7 +157,9 @@ S3 cold   → load_slice (S3 .compute(), ~2s)  → _to_scalar_parts → XarrayRe
 imos-tiler/
   src/app/
     main.py                      ← mounts all routers, CORS middleware, lifespan startup
-    constants.py                 ← Product dataclass + LOD algorithm + LODConfig (server-shader contract)
+    constants.py                 ← LOD/LODConfig (server-shader contract), CHUNK_PX, PADDING, CACHE_VERSION
+    domain/
+      product.py                 ← Product dataclass + LOD algorithm
     log_config.py                ← logging setup (JSON in Docker, coloured text locally)
     routers/
       data_tiles.py              ← /data_tiles — raw value-encoded RGBA tiles for WebGL
@@ -471,7 +473,7 @@ The three LOD knobs are bundled into a single frozen-dataclass instance, `LOD = 
 - `LOD.min_coarsest = (2, 2)` — minimum (cols, rows) for the coarsest LOD level; levels below this are dropped. If all levels are filtered out (data smaller than one chunk), falls back to the native finest grid so there is always at least one LOD.
 - `LOD.zoom_thresholds: dict[LODIndex, ZoomLevel]` — maps each LOD index to the minimum map-zoom level at which the shader activates it (e.g. `{2: 4, 3: 5, 4: 6}` means LOD 2 is used at map-zoom ≥ 4, LOD 3 at ≥ 5, etc.). The shader reads these values from the manifest to decide which LOD to request at each map-zoom. If the server and frontend disagree on these thresholds, the shader requests nonexistent LOD levels or fetches the wrong resolution — the atlas mapping breaks silently and data tiles are useless regardless of whether they are individually served correctly. Treat any change to `zoom_thresholds` with the same caution as `max_lods` and `min_coarsest`: it requires a coordinated frontend redeploy.
 
-### 7.2 LOD algorithm (`Product._compute_lod_grids` in `constants.py`)
+### 7.2 LOD algorithm (`Product._compute_lod_grids` in `domain/product.py`)
 
 Derives LOD grids from actual data dimensions and chunk size. Accepts `max_lods` and `min_coarsest` as parameters (defaulting to `LOD.max_lods` and `LOD.min_coarsest`).
 

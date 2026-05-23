@@ -13,7 +13,7 @@ import xarray as xr
 import app.services.disk_cache as disk_cache
 import app.services.loader as loader
 import app.services.store_registry as store_registry_module
-from app.constants import Product
+from app.domain.product import Product
 from app.services.store_registry import store_registry
 
 

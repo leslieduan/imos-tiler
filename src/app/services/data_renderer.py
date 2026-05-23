@@ -8,7 +8,8 @@ import numpy as np
 import xarray as xr
 from cachetools import TTLCache
 
-from app.constants import LOD, Product
+from app.constants import LOD
+from app.domain.product import Product
 from app.utils.geo import json_safe_float
 from app.utils.image import encode_rgba
 from app.utils.memoizer import Memoizer

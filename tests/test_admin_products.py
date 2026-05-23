@@ -6,7 +6,8 @@ from unittest.mock import patch
 import pytest
 from starlette.testclient import TestClient
 
-from app.constants import PRODUCTS, Product
+from app.constants import PRODUCTS
+from app.domain.product import Product
 from app.main import app
 from app.routers.admin import products as admin_products
 
