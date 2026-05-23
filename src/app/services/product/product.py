@@ -1,7 +1,11 @@
 import math
+import threading
 from dataclasses import dataclass, field
 
 from app.constants import LOD, TILE
+from app.services.store.registry import get_store
+
+_lod_grids_lock = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -60,3 +64,24 @@ class Product:
         if self.lod_grids:
             return
         self.lod_grids.update(self._compute_lod_grids(data_width, data_height, self.chunk_px))
+
+
+def get_lod_grids(product: Product) -> dict[int, tuple[int, int]]:
+    """
+    Ensure product.lod_grids is populated from actual store dimensions, then return it.
+    Writes back to product on first call so subsequent callers find it already set.
+    Double-checked locking: fast path avoids lock overhead on every warm call.
+    """
+    if product.lod_grids:
+        return product.lod_grids
+
+    with _lod_grids_lock:
+        if product.lod_grids:
+            return product.lod_grids
+
+        store = get_store(product.source_path)
+        data_height = store.sizes["lat"]
+        data_width = store.sizes["lon"]
+        product.apply_computed_lod_grids(data_width, data_height)
+
+    return product.lod_grids

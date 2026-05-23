@@ -110,7 +110,7 @@ Zarr eliminates this: metadata is one `.zmetadata` HTTP request, and variable ch
 ┌────────────────────────────────────────────────────────────────────────────┐
 │       caching/slice_cache.py  +  store/registry.py                         │
 │   StoreRegistry (stale-while-revalidate)    L2 Slice cache (in-memory LRU) │
-│   load_slice / get_available_dates          keyed (url, date, vars)        │
+│   get_store / get_available_dates           load_slice, keyed (url,d,vars) │
 └────────────────────────────────────────────────────────────────────────────┘
                                       │ L2 miss
                                       ▼
@@ -175,7 +175,7 @@ imos-tiler/
     services/
       caching/
         lifecycle.py             ← cross-layer orchestration: prewarm, refresh, stale eviction, evict_product_cache fan-out
-        slice_cache.py           ← L2 LRU + load_slice + get_available_dates + get_lod_grids + evict_slice_cache_for_product
+        slice_cache.py           ← L2 LRU + load_slice + evict_slice_cache_for_product
         processed_cache.py       ← L1 processed-grid cache + memoizer + per-product eviction
         disk.py                  ← L3 disk IO + per-file/dir eviction: path, read/write, pressure eviction, clear, stats
       colormap/
@@ -183,7 +183,7 @@ imos-tiler/
         resolver.py              ← resolve_colormap() — custom→rio-tiler→matplotlib fallback chain
         legend.py                ← render_legend() — color bar + tick labels
       product/
-        product.py               ← Product dataclass + LOD algorithm
+        product.py               ← Product dataclass + LOD algorithm + get_lod_grids lazy-init
         registry.py              ← PRODUCTS dict + load/register/remove + get_product / iter_products facades
         manifest.py              ← render_manifest() — product introspection (bounds + per-variable ranges + LOD meta)
       rendering/
@@ -191,7 +191,7 @@ imos-tiler/
         data_tiles.py            ← render_tile() — chunk extract + RGBA pack + PNG encode (data tiles)
         visual_tiles.py          ← render_tile / render_bbox / render_bbox_animation — Web Mercator (visual tiles)
       store/
-        registry.py              ← Zarr store singleton (stale-while-revalidate) + per-URL date index
+        registry.py              ← Zarr store singleton (stale-while-revalidate) + per-URL date index + get_available_dates
         spatial.py               ← bbox_to_wgs84 + native_resolution_in_bbox + default_bbox_from_store
     utils/
       dates.py                   ← LOCAL_TZ + ts_to_local_date + three_months_ago
@@ -498,7 +498,7 @@ Example: `Product._compute_lod_grids(3000, 1500, (256, 256))` → `{1: (3, 2), 2
 
 Small-dataset example (radar SA Gulfs, 102×74, chunk 240×192): finest=(1,1), filtered to nothing, fallback → `{1: (1, 1)}`.
 
-### 7.3 Lazy population (`services/caching/slice_cache.py` — `get_lod_grids`)
+### 7.3 Lazy population (`services/product/product.py` — `get_lod_grids`)
 
 Products start with `lod_grids={}`. On the first request:
 

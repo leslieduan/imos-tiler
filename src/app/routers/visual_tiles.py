@@ -8,7 +8,7 @@ from fastapi.openapi.models import Example
 from fastapi.responses import Response
 
 from app.schemas.visual_tiles import ColormapListResponse
-from app.services.caching.slice_cache import get_available_dates, load_slice_uncached
+from app.services.caching.slice_cache import load_slice_uncached
 from app.services.colormap.legend import render_legend
 from app.services.colormap.registry import list_colormaps
 from app.services.rendering.visual_tiles import (
@@ -16,6 +16,7 @@ from app.services.rendering.visual_tiles import (
     render_bbox_animation,
     render_tile,
 )
+from app.services.store.registry import get_available_dates
 from app.services.store.spatial import (
     bbox_to_wgs84,
     default_bbox_from_store,

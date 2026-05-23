@@ -42,11 +42,11 @@ from app.services.caching.disk import (
 from app.services.caching.processed_cache import evict_processed_cache
 from app.services.caching.slice_cache import (
     evict_slice_cache_for_product,
-    get_available_dates,
     load_slice_uncached,
 )
 from app.services.product.product import Product
 from app.services.product.registry import get_product
+from app.services.store.registry import get_available_dates
 
 logger = logging.getLogger(__name__)
 

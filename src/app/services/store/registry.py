@@ -219,5 +219,11 @@ def get_store(store_url: str) -> xr.Dataset:
     return store_registry.get(store_url)
 
 
+def get_available_dates(store_url: str) -> list[str]:
+    get_store(store_url)  # ensures the date index for this URL is populated
+    index = store_registry.date_index(store_url)
+    return sorted(index) if index else []
+
+
 async def prewarm_stores(store_urls: list[str]) -> None:
     await store_registry.prewarm(store_urls)

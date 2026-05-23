@@ -207,7 +207,7 @@ def test_global_disk_stats_aggregate_across_products(cache_root, monkeypatch):
 def test_refresh_status_ok_after_successful_run(cache_root):
     p = PRODUCTS["sea_level_anomaly"]
     with (
-        patch("app.services.caching.slice_cache.get_available_dates", return_value=[]),
+        patch("app.services.caching.lifecycle.get_available_dates", return_value=[]),
         patch("app.services.caching.slice_cache.load_slice"),
     ):
         anyio.run(lifecycle.refresh_disk_cache, [p])
