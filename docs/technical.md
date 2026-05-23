@@ -99,16 +99,16 @@ Zarr eliminates this: metadata is one `.zmetadata` HTTP request, and variable ch
                    │                                       │
                    ▼                                       ▼
 ┌────────────────────────────────────┐  ┌────────────────────────────────────┐
-│        data_renderer.py            │  │  visual_renderer.py                │
-│   EPSG:4326 (Plate Carrée)         │  │  + colormap_lookup.py              │
-│   L1 Processed grid cache          │  │  + legend_renderer.py              │
+│   rendering/data_tiles.py          │  │  rendering/visual_tiles.py         │
+│   EPSG:4326 (Plate Carrée)         │  │  + colormap/resolver.py            │
+│   L1 caching/processed_cache.py    │  │  + colormap/legend.py              │
 │   PNG encode for WebGL shader      │  │  EPSG:4326 → EPSG:3857 + LUT       │
 └──────────────────┬─────────────────┘  └──────────────────┬─────────────────┘
                    │ L1 miss                               │ every request
                    └──────────────────┬────────────────────┘
                                       ▼
 ┌────────────────────────────────────────────────────────────────────────────┐
-│            loader.py  +  store_registry.py                                 │
+│       caching/slice_cache.py  +  store/registry.py                         │
 │   StoreRegistry (stale-while-revalidate)    L2 Slice cache (in-memory LRU) │
 │   load_slice / get_available_dates          keyed (url, date, vars)        │
 └────────────────────────────────────────────────────────────────────────────┘
@@ -116,7 +116,7 @@ Zarr eliminates this: metadata is one `.zmetadata` HTTP request, and variable ch
                                       ▼
 ┌────────────────────────────────────────────────────────────────────────────┐
 │                           L3  Disk cache                                   │
-│       disk_cache.py  ·  .pkl.lz4 per date  ·  DISK_CACHE_PATH              │
+│       caching/disk.py  ·  .pkl.lz4 per date  ·  DISK_CACHE_PATH            │
 └────────────────────────────────────────────────────────────────────────────┘
                                       │ L3 miss
                                       ▼
@@ -157,9 +157,9 @@ S3 cold   → load_slice (S3 .compute(), ~2s)  → _to_scalar_parts → XarrayRe
 imos-tiler/
   src/app/
     main.py                      ← mounts all routers, CORS middleware, lifespan startup
-    constants.py                 ← LOD/LODConfig (server-shader contract), CHUNK_PX, PADDING, CACHE_VERSION
-    domain/
-      product.py                 ← Product dataclass + LOD algorithm
+    constants.py                 ← LOD/LODConfig + TILE/TileConfig (server-shader contract), CACHE_VERSION, COORD_NAMES
+    config/
+      paths.py                   ← PRODUCTS_CONFIG_PATH, COLORMAPS_CONFIG_PATH, DISK_CACHE_PATH
     log_config.py                ← logging setup (JSON in Docker, coloured text locally)
     routers/
       data_tiles.py              ← /data_tiles — raw value-encoded RGBA tiles for WebGL
@@ -173,17 +173,26 @@ imos-tiler/
         colormaps.py             ← POST/DELETE /admin/colormaps
         cache.py                 ← GET /admin/cache (state snapshot) + DELETE /admin/cache/memory (clear L1+L2) + DELETE /admin/cache/disk (clear L3)
     services/
-      store_registry.py          ← Zarr store singleton (stale-while-revalidate) + per-URL date index
-      disk_cache.py              ← L3 disk IO + per-file/dir eviction: path, read/write, pressure eviction, clear, stats
       caching/
         lifecycle.py             ← cross-layer orchestration: prewarm, refresh, stale eviction, evict_product_cache fan-out
-      loader.py                  ← load_slice (L2 LRU) + get_available_dates + get_lod_grids + evict_slice_cache_for_product
-      data_renderer.py           ← processed grid cache + chunk extract + PNG encode (data tiles)
-      visual_renderer.py         ← Web Mercator tile/bbox render (visual tiles) — encodes PNG or WebP
-      colormap_lookup.py         ← resolve_colormap() — custom→rio-tiler→matplotlib fallback chain
-      legend_renderer.py         ← render_legend() — color bar + tick labels
-      colormap_config.py         ← colormaps.json read/write + in-memory colormap registry + ColormapMode type + invalidation hooks
-      product_config.py          ← products.json read/write + in-memory PRODUCTS dict management
+        slice_cache.py           ← L2 LRU + load_slice + get_available_dates + get_lod_grids + evict_slice_cache_for_product
+        processed_cache.py       ← L1 processed-grid cache + memoizer + per-product eviction
+        disk.py                  ← L3 disk IO + per-file/dir eviction: path, read/write, pressure eviction, clear, stats
+      colormap/
+        registry.py              ← colormaps.json read/write + in-memory colormap registry + ColormapMode + invalidation hooks
+        resolver.py              ← resolve_colormap() — custom→rio-tiler→matplotlib fallback chain
+        legend.py                ← render_legend() — color bar + tick labels
+      product/
+        product.py               ← Product dataclass + LOD algorithm
+        registry.py              ← PRODUCTS dict + load/register/remove + get_product / iter_products facades
+        manifest.py              ← render_manifest() — product introspection (bounds + per-variable ranges + LOD meta)
+      rendering/
+        kernels.py               ← numba JIT bilinear + normalize kernels + xr.interp fallback + warmup_resample
+        data_tiles.py            ← render_tile() — chunk extract + RGBA pack + PNG encode (data tiles)
+        visual_tiles.py          ← render_tile / render_bbox / render_bbox_animation — Web Mercator (visual tiles)
+      store/
+        registry.py              ← Zarr store singleton (stale-while-revalidate) + per-URL date index
+        spatial.py               ← bbox_to_wgs84 + native_resolution_in_bbox + default_bbox_from_store
     utils/
       dates.py                   ← LOCAL_TZ + ts_to_local_date + three_months_ago
       geo.py                     ← dataset_bounds + json_safe_float
@@ -258,7 +267,7 @@ The data-tiles `z` axis indexes a **custom LOD pyramid** anchored to the product
 
 Source Zarr data lives on a regular lat/lon grid. Data tiles preserve that grid exactly: longitude maps linearly to pixel X, latitude maps linearly to pixel Y. This is Plate Carrée — the visual representation of EPSG:4326 / WGS84 geographic coordinates.
 
-The projection is implemented implicitly in `_resample_to_grid` (`services/data_renderer.py`):
+The projection is implemented implicitly in `resample_variables_to_grid` (`services/rendering/kernels.py`):
 
 ```python
 target_lons = np.linspace(lon_min, lon_max, total_w)  # lon → x (linear in degrees)
@@ -279,7 +288,7 @@ The manifest returns geographic bounds (`lonMin`, `lonMax`, `latMin`, `latMax`) 
 
 ### 5.4 Visual tiles — generated in EPSG:3857 (Web Mercator)
 
-`services/visual_renderer.py` calls `XarrayReader.tile(x, y, z, reproject_method="bilinear")`. The reader internally:
+`services/rendering/visual_tiles.py` calls `XarrayReader.tile(x, y, z, reproject_method="bilinear")`. The reader internally:
 
 1. Reads the source slice (already tagged `EPSG:4326` via `da.rio.write_crs("EPSG:4326")`).
 2. Computes the Web Mercator footprint of the target tile from `(x, y, z)`.
@@ -431,7 +440,7 @@ GET /visual_tiles/{product_id}/{from_date}/{to_date}/animation.{ext}
 
 | Layer                      | Behaviour                                                                                                                                                                                                                                                                            |
 | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| In-memory slice cache (L2) | **Bypassed.** Animations call `load_slice_uncached` (`services/loader.py`) which never touches the LRU. A rare 30-frame request can therefore not evict hot slices serving the static `/visual_tiles` and `/data_tiles` endpoints.                                                   |
+| In-memory slice cache (L2) | **Bypassed.** Animations call `load_slice_uncached` (`services/caching/slice_cache.py`) which never touches the LRU. A rare 30-frame request can therefore not evict hot slices serving the static `/visual_tiles` and `/data_tiles` endpoints.                                                   |
 | Disk cache (L3)            | **Read-through.** If the prewarmed disk slice exists it is reused; otherwise the slice is fetched directly from the Zarr store. Animations never **write** to L3 — they may request dates outside the prewarmed window and we don't want to pollute L3 or trigger an eviction cycle. |
 | HTTP cache headers         | **None.** No `Cache-Control` set. CloudFront/CDN configurations should treat this path as no-cache; otherwise rare requests would still incur full origin cost while occupying CDN storage.                                                                                          |
 
@@ -475,7 +484,7 @@ The three LOD knobs are bundled into a single frozen-dataclass instance, `LOD = 
 - `LOD.min_coarsest = (2, 2)` — minimum (cols, rows) for the coarsest LOD level; levels below this are dropped. If all levels are filtered out (data smaller than one chunk), falls back to the native finest grid so there is always at least one LOD.
 - `LOD.zoom_thresholds: dict[LODIndex, ZoomLevel]` — maps each LOD index to the minimum map-zoom level at which the shader activates it (e.g. `{2: 4, 3: 5, 4: 6}` means LOD 2 is used at map-zoom ≥ 4, LOD 3 at ≥ 5, etc.). The shader reads these values from the manifest to decide which LOD to request at each map-zoom. If the server and frontend disagree on these thresholds, the shader requests nonexistent LOD levels or fetches the wrong resolution — the atlas mapping breaks silently and data tiles are useless regardless of whether they are individually served correctly. Treat any change to `zoom_thresholds` with the same caution as `max_lods` and `min_coarsest`: it requires a coordinated frontend redeploy.
 
-### 7.2 LOD algorithm (`Product._compute_lod_grids` in `domain/product.py`)
+### 7.2 LOD algorithm (`Product._compute_lod_grids` in `services/product/product.py`)
 
 Derives LOD grids from actual data dimensions and chunk size. Accepts `max_lods` and `min_coarsest` as parameters (defaulting to `LOD.max_lods` and `LOD.min_coarsest`).
 
@@ -489,7 +498,7 @@ Example: `Product._compute_lod_grids(3000, 1500, (256, 256))` → `{1: (3, 2), 2
 
 Small-dataset example (radar SA Gulfs, 102×74, chunk 240×192): finest=(1,1), filtered to nothing, fallback → `{1: (1, 1)}`.
 
-### 7.3 Lazy population (`services/loader.py` — `get_lod_grids`)
+### 7.3 Lazy population (`services/caching/slice_cache.py` — `get_lod_grids`)
 
 Products start with `lod_grids={}`. On the first request:
 
@@ -501,10 +510,10 @@ Products start with `lod_grids={}`. On the first request:
 
 ### 7.4 Resample and normalize (numba JIT)
 
-The hot path for every cold-L1 data tile is two CPU-bound steps in `services/data_renderer.py`:
+The hot path for every cold-L1 data tile is two CPU-bound steps in `services/rendering/kernels.py` (called from `services/rendering/data_tiles.py`):
 
-1. **Bilinear resample** (`_resample_variables_to_grid`) — interpolates the source Zarr slice onto the LOD's `total_w × total_h` grid. Output pixel positions match `np.linspace(0, src-1, total)` on both axes — the same mapping the WebGL shader assumes (see [§5.6](#56-the-manifest-is-the-contract-between-server-and-shader)).
-2. **Normalize + ocean mask** (`_numba_normalize_uint32` / `_numba_normalize_uint8`) — clips each variable into its byte-range output and produces the per-pixel valid mask in a single pass.
+1. **Bilinear resample** (`resample_variables_to_grid`) — interpolates the source Zarr slice onto the LOD's `total_w × total_h` grid. Output pixel positions match `np.linspace(0, src-1, total)` on both axes — the same mapping the WebGL shader assumes (see [§5.6](#56-the-manifest-is-the-contract-between-server-and-shader)).
+2. **Normalize + ocean mask** (`_numba_normalize_uint32` / `_numba_normalize_uint8`, dispatched via `normalize()`) — clips each variable into its byte-range output and produces the per-pixel valid mask in a single pass.
 
 Both steps are implemented as `@njit`-compiled numba kernels. Switching from `xr.interp` + numpy normalize to the numba kernels was a ~5× speedup on Intel EC2 — see the benchmark below.
 
@@ -571,7 +580,7 @@ Visual tiles do **not** use this contract — they return ordinary colourised PN
 
 Everything specific to the `/visual_tiles` pipeline: how the renderer guards against unexpected CRSs, how datasets that straddle the antimeridian are handled, and how colormaps are looked up and rendered.
 
-`services/visual_renderer.py` uses rio-tiler's `XarrayReader`, which requires data in **EPSG:4326** (geographic lat/lon degrees) with bounds strictly within `(−180, −90, 180, 90)`.
+`services/rendering/visual_tiles.py` uses rio-tiler's `XarrayReader`, which requires data in **EPSG:4326** (geographic lat/lon degrees) with bounds strictly within `(−180, −90, 180, 90)`.
 
 ### 8.1 CRS guard
 
@@ -621,7 +630,7 @@ An unrecognised name returns `400 Bad Request`.
 }
 ```
 
-**Custom colormaps.** Registered via `POST /admin/colormaps` and persisted in `colormaps.json`. Loaded on startup by `load_colormaps()` in `services/colormap_config.py` and take effect immediately without a server restart. All colormap state lives in `colormap_config.py` — no other module holds it directly. Runtime lookup (custom → rio-tiler → matplotlib fallback) is implemented in a separate module, `services/colormap_lookup.py`, which subscribes to `colormap_config`'s invalidation hooks to clear its LRU caches whenever the registry changes.
+**Custom colormaps.** Registered via `POST /admin/colormaps` and persisted in `colormaps.json`. Loaded on startup by `load_colormaps()` in `services/colormap/registry.py` and take effect immediately without a server restart. All colormap state lives in `colormap/registry.py` — no other module holds it directly. Runtime lookup (custom → rio-tiler → matplotlib fallback) is implemented in a separate module, `services/colormap/resolver.py`, which subscribes to `colormap/registry`'s invalidation hooks to clear its LRU caches whenever the registry changes.
 
 All colormaps are stored internally as **256-entry RGBA LUTs** (one tuple per normalised byte value, where 0 = data minimum and 255 = data maximum after `rescale`). The `POST /admin/colormaps` payload normalises the input to this format at registration time.
 
@@ -668,7 +677,7 @@ Practical rules:
 - Name categorical colormaps after the dataset or variable they describe (e.g. `land_cover_classes`, `ocean_current_flag`) to make the coupling explicit.
 - Ramp colormaps are dataset-agnostic; categorical colormaps are not.
 
-**Cache behaviour.** `resolve_colormap()` in `services/colormap_lookup.py` is `@lru_cache`-d (max 64 entries). `legend_renderer.render_legend()` caches the final PNG bytes (max 256 entries) and converts the colormap dict to a numpy array inline. The caches are cleared automatically whenever a colormap is added or deleted via the admin API — `colormap_config._reload()` invokes the registered invalidation hooks, which include `resolve_colormap.cache_clear()` and `render_legend.cache_clear()`.
+**Cache behaviour.** `resolve_colormap()` in `services/colormap/resolver.py` is `@lru_cache`-d (max 64 entries). `colormap/legend.render_legend()` caches the final PNG bytes (max 256 entries) and converts the colormap dict to a numpy array inline. The caches are cleared automatically whenever a colormap is added or deleted via the admin API — `colormap/registry._reload()` invokes the registered invalidation hooks, which include `resolve_colormap.cache_clear()` and `render_legend.cache_clear()`.
 
 ### 8.4 Output format (PNG vs WebP)
 
@@ -746,7 +755,7 @@ The current API is day-granularity only. If a store has sub-daily resolution, mu
 
 ### 9.5 Coordinate name normalisation
 
-On store open, `_open_store` in `services/store_registry.py` applies `COORD_NAMES = {"TIME": "time", "LATITUDE": "lat", "LONGITUDE": "lon"}` to rename any uppercase coordinate names to lowercase. This happens once per store URL and is cached on the singleton. All downstream code (renderer, manifest, point endpoint) can assume `lat`/`lon`/`time` regardless of what the store uses natively.
+On store open, `_open_store` in `services/store/registry.py` applies `COORD_NAMES = {"TIME": "time", "LATITUDE": "lat", "LONGITUDE": "lon"}` to rename any uppercase coordinate names to lowercase. This happens once per store URL and is cached on the singleton. All downstream code (renderer, manifest, point endpoint) can assume `lat`/`lon`/`time` regardless of what the store uses natively.
 
 If `lat`/`lon` are still missing after renaming, `_open_store` raises `ValueError` with a clear message rather than failing deeper in the pipeline.
 
@@ -762,7 +771,7 @@ Three-tier cache stack ordered tiles → S3: **L1 (in-memory processed grid, LRU
 
 > Full design rationale (why disk over Redis / EFS / Fargate ephemeral): [`docs/cache_analysis.md`](cache_analysis.md).
 
-### 10.1 Store singleton (`services/store_registry.py`, `StoreRegistry`)
+### 10.1 Store singleton (`services/store/registry.py`, `StoreRegistry`)
 
 Caches the open Zarr store handle (lazy, metadata only). Shared across all products that point at the same store URL.
 
@@ -777,7 +786,7 @@ Re-opening is cheap — `xr.open_zarr` reads only metadata and coordinate arrays
 
 Alongside the dataset, the registry builds a per-URL `{local_date: [timestamps]}` index (`_build_date_index`) so `load_slice` / `get_available_dates` can resolve a local date in O(1) instead of converting every timestamp on the hot path.
 
-### 10.2 L1 — Processed grid cache (`services/data_renderer.py`, `_processed_cache`)
+### 10.2 L1 — Processed grid cache (`services/caching/processed_cache.py`, `_processed_cache`)
 
 Keyed `(source_path, date, str(variable), lod)`. Stores the resampled + normalised numpy arrays for the **full LOD grid**, not per-tile. A hit reduces per-tile work to `_extract_chunk` + PNG encode only — no S3 I/O, no resampling. The key is semantic (not object identity), so cache hits survive L2 slice evictions and disk-reloaded slices.
 
@@ -792,11 +801,11 @@ After eviction, the next request for that key recomputes the processed grid from
 
 Size is controlled by `PROCESSED_CACHE_SIZE` (default `50`). Sized as `SLICE_CACHE_SIZE × LOD.max_lods` with headroom: `10 × 4 = 40`, rounded to 50. This keeps all LOD levels warm for every date in the L2 slice cache.
 
-On product deletion, `evict_processed_cache` is called from `evict_product_cache` in `loader.py` to purge all entries matching `source_path`.
+On product deletion, `evict_processed_cache` is called from `evict_product_cache` in `caching/lifecycle.py` to purge all entries matching `source_path`.
 
 Visual tiles do not use L1 — `XarrayReader` handles its own rendering per request from the L2 slice.
 
-### 10.3 L2 — Slice cache, in-memory (`services/loader.py`, `_slice_cache`)
+### 10.3 L2 — Slice cache, in-memory (`services/caching/slice_cache.py`, `_slice_cache`)
 
 Keyed `(store_url, date, variables_tuple)`. Stores a fully-computed (`.compute()`) 2-D lat×lon `xr.Dataset` slice. Sub-millisecond on hit. Keyed by `variables_tuple` so different products using the same store cache independently.
 
@@ -840,7 +849,7 @@ Always enabled; path is the hardcoded constant `DISK_CACHE_PATH = "slice_cache"`
 
 - _Stale dates_ — `evict_stale_and_orphans` (and the refresh cycle) deletes `.pkl.lz4` files whose dates are no longer in the `CACHE_DAYS` window for any registered product.
 - _Orphan product directories_ — `evict_stale_and_orphans` removes any sub-directory under `DISK_CACHE_PATH` whose name does not correspond to a currently-registered product. This is what makes runtime product deletion safe: leftover disk slices from removed products are cleaned up automatically on the next refresh (and at startup).
-- _Disk pressure_ — `evict_if_over_threshold` in `services/disk_cache.py` (run at the start of each refresh cycle) removes files when total usage exceeds `DISK_EVICTION_THRESHOLD × DISK_CACHE_LIMIT_GB`. Files are sorted `(size ascending, date ascending)` — small + old files are evicted first, keeping the large satellite slices that would be most expensive to re-fetch.
+- _Disk pressure_ — `evict_if_over_threshold` in `services/caching/disk.py` (run at the start of each refresh cycle) removes files when total usage exceeds `DISK_EVICTION_THRESHOLD × DISK_CACHE_LIMIT_GB`. Files are sorted `(size ascending, date ascending)` — small + old files are evicted first, keeping the large satellite slices that would be most expensive to re-fetch.
 - _Explicit product deletion_ — `evict_product_cache` in `services/caching/lifecycle.py` (called by `DELETE /admin/products/{id}`) removes the product's disk directory via `shutil.rmtree` and purges matching entries from the L2 in-memory cache immediately.
 
 Disk eviction never invalidates L2 in-memory entries — the in-memory data is still valid and serves requests until it falls out of the LRU naturally.
@@ -866,13 +875,13 @@ A single read-only admin endpoint surfaces everything a production debugger usua
 - **`memory_cache`** — current size and max for the slice and processed-grid LRUs.
 - **`products`** — per-product breakdown: disk file count, total bytes, oldest/newest cached date, most recent write mtime, and in-flight counts attributed by `(source_path, sorted_variables)` so two products sharing a Zarr don't collide.
 
-The handler is a sync `def` (FastAPI dispatches it to the anyio pool automatically) and the filesystem walk is single-pass — every cache file is stat'd once, then attributed to a product via parent-dir-name lookup in `services/disk_cache.collect_disk_stats` — so a thousand-file cache costs at most a few milliseconds of thread-pool time and never blocks tile requests. Peak/total counters are bumped under the Memoizer's existing lock; ambient cost on the tile-serving path is two integer ops per cache miss.
+The handler is a sync `def` (FastAPI dispatches it to the anyio pool automatically) and the filesystem walk is single-pass — every cache file is stat'd once, then attributed to a product via parent-dir-name lookup in `services/caching/disk.collect_disk_stats` — so a thousand-file cache costs at most a few milliseconds of thread-pool time and never blocks tile requests. Peak/total counters are bumped under the Memoizer's existing lock; ambient cost on the tile-serving path is two integer ops per cache miss.
 
 ### 10.7 In-memory cache flush (`DELETE /admin/cache/memory`)
 
 Drops every entry from both in-memory tiers — `_processed_cache` (L1) and `_slice_cache` (L2) — and returns the counts cleared as `{"cleared": {"slice": N, "processed": M}}`. Disk (L3) is untouched, so the next request for any flushed key still hits disk in ~30 ms instead of re-fetching from S3.
 
-Implemented as `Memoizer.evict_matching(lambda _: True)` in both `services/loader.clear_slice_cache` and `services/data_renderer.clear_processed_cache`. Per-product fan-out for a specific deleted product is `evict_product_cache` in `services/caching/lifecycle.py`. The eviction runs under the Memoizer's existing lock — concurrent `get_or_compute` calls block briefly while keys are removed. Any **in-flight** compute is not cancelled: it finishes and re-publishes into the (now-empty) cache when it completes, so a flush during heavy load may leave a handful of partially-refilled entries from work that was already running. Callers that arrived before the flush and are still `await`ing a shared Future receive the original result, not a re-computed one — there is no torn state.
+Implemented as `Memoizer.evict_matching(lambda _: True)` in both `services/caching/slice_cache.clear_slice_cache` and `services/caching/processed_cache.clear_processed_cache`. Per-product fan-out for a specific deleted product is `evict_product_cache` in `services/caching/lifecycle.py`. The eviction runs under the Memoizer's existing lock — concurrent `get_or_compute` calls block briefly while keys are removed. Any **in-flight** compute is not cancelled: it finishes and re-publishes into the (now-empty) cache when it completes, so a flush during heavy load may leave a handful of partially-refilled entries from work that was already running. Callers that arrived before the flush and are still `await`ing a shared Future receive the original result, not a re-computed one — there is no torn state.
 
 Use cases: forcing a re-read after a Zarr store has been updated out-of-band, recovering from a poisoned cache entry, or freeing memory during an interactive debugging session without restarting the process.
 
@@ -882,7 +891,7 @@ Deletes every `.pkl.lz4` slice file from the L3 disk cache directory and returns
 
 If `prewarm_disk_slices` or `refresh_disk_cache` is currently running the endpoint returns **409 Conflict** immediately without touching the disk — both operations write slice files, so clearing during either is pointless. Wait for the operation to complete before retrying.
 
-Implemented in `services/disk_cache.clear_disk_cache` — iterates the per-product subdirectories under `DISK_CACHE_PATH` and removes each with `shutil.rmtree`, leaving the base directory itself intact. The handler is a sync `def`, so FastAPI dispatches it to the anyio pool automatically and the event loop stays free. In-flight computes are not cancelled — they may re-populate the disk cache on completion.
+Implemented in `services/caching/disk.clear_disk_cache` — iterates the per-product subdirectories under `DISK_CACHE_PATH` and removes each with `shutil.rmtree`, leaving the base directory itself intact. The handler is a sync `def`, so FastAPI dispatches it to the anyio pool automatically and the event loop stays free. In-flight computes are not cancelled — they may re-populate the disk cache on completion.
 
 Use cases: forcing a full cold repopulation from S3 (e.g. after the underlying Zarr data has been rewritten), recovering disk space during debugging, or resetting a corrupted cache state without restarting the server. After a flush, the next request for any date will fall through to S3 (~2 s) and the disk cache will be repopulated gradually — or trigger `prewarm_disk_slices` via a server restart to repopulate in bulk.
 
@@ -930,7 +939,7 @@ Wraps `_startup_cache_sync(products)`, which does two sequential phases:
 
    This ensures the disk cache reflects the current product/date state from the moment the server starts serving, not just after the first refresh cycle.
 
-2. **`prewarm_disk_slices(products)`** — itself `async def`; awaited directly, it manages its own offload. For each `(product, date)` pair in the last `CACHE_DAYS` dates, calls `_prewarm_one` (sync). Pairs are fanned out via `anyio.create_task_group` where the spawn loop acquires `_PREWARM_SEM` (`anyio.Semaphore(PREWARM_WORKERS)`, default 8) _before_ `tg.start_soon`, so at most N tasks exist at once — bounding both S3 fan-out and the pending-coroutine count when product × date is large. Disk-cached pairs return instantly; missing ones are fetched from S3 and written to disk. The task group exits only once every job has finished. The trailing `_evict_if_over_threshold` runs inside the same `try` so `is_prewarm_running()` stays `True` through the unlink pass and `DELETE /admin/cache/disk` cannot race it.
+2. **`prewarm_disk_slices(products)`** — itself `async def`; awaited directly, it manages its own offload. For each `(product, date)` pair in the last `CACHE_DAYS` dates, calls `_prewarm_one` (sync). Pairs are fanned out via `anyio.create_task_group` where the spawn loop acquires `_PREWARM_SEM` (`anyio.Semaphore(PREWARM_WORKERS)`, default 8) _before_ `tg.start_soon`, so at most N tasks exist at once — bounding both S3 fan-out and the pending-coroutine count when product × date is large. Disk-cached pairs return instantly; missing ones are fetched from S3 and written to disk. The task group exits only once every job has finished. The trailing `evict_if_over_threshold` runs inside the same `try` so `is_prewarm_running()` stays `True` through the unlink pass and `DELETE /admin/cache/disk` cannot race it.
 
 If eviction fails for any reason it is logged and prewarm proceeds anyway — partial cache is better than no cache.
 
@@ -1125,7 +1134,7 @@ The current design collapses this to one pool with one default limiter and three
 - **Default limiter** (size `THREAD_POOL_SIZE`, default 100) — the limiter `anyio.to_thread.current_default_thread_limiter()` returns. Used by every sync `def` tile handler (dispatched automatically by FastAPI) and by every `anyio.to_thread.run_sync(...)` call that doesn't pass an explicit limiter. Admin GET/DELETE endpoints also fall under this budget.
 - **`_PREWARM_SEM`** (size `PREWARM_WORKERS`, default 8) — a module-level `anyio.Semaphore` in `services/caching/lifecycle.py`. Acquired _before_ `tg.start_soon` in `prewarm_disk_slices` / `refresh_disk_cache` so at most N tasks (and thus N pending coroutines) exist at a time. Sized to the S3 connection-pool ceiling.
 - **`_ANIMATION_LIMITER`** (size `ANIMATION_WORKERS`, default 10) — a module-level `anyio.CapacityLimiter` in `routers/visual_tiles.py`. Used by the per-frame `load_slice_uncached` fan-out inside `/animation`, via the explicit `limiter=_ANIMATION_LIMITER` argument. Sized to the aiobotocore S3 connection-pool ceiling (~10/host); going higher just queues on the connection pool without reducing latency, and the bound keeps a many-frame request from monopolising the tile-handler budget.
-- **`_STORE_PREWARM_LIMITER`** (size `STORE_PREWARM_WORKERS`, default 8) — a module-level `anyio.CapacityLimiter` in `services/store_registry.py`. Used by `StoreRegistry.prewarm` to gate concurrent `xr.open_zarr` opens at startup. Same S3 connection-pool rationale as `_PREWARM_SEM`.
+- **`_STORE_PREWARM_LIMITER`** (size `STORE_PREWARM_WORKERS`, default 8) — a module-level `anyio.CapacityLimiter` in `services/store/registry.py`. Used by `StoreRegistry.prewarm` to gate concurrent `xr.open_zarr` opens at startup. Same S3 connection-pool rationale as `_PREWARM_SEM`.
 
 All four budgets live over the **same** anyio worker pool. Anyio creates worker threads on demand and they're shared across budgets — but each call only acquires (or pre-acquires) the budget it was given, so the slices are independent. A prewarm burst saturating its 8-slot budget does not reduce the tile-handler budget of 100, and a 30-frame animation does not steal from prewarm either.
 
@@ -1274,7 +1283,7 @@ Concurrency pressure on the origin is therefore much lower than the theoretical 
 
 ## 13. Adding a new product
 
-`products.json` is the single source of truth for the product list. The server reads it once on startup (`load_products()` in `services/product_config.py`) and exposes a runtime admin API that reads and writes the same file. Two equivalent flows:
+`products.json` is the single source of truth for the product list. The server reads it once on startup (`load_products()` in `services/product/registry.py`) and exposes a runtime admin API that reads and writes the same file. Two equivalent flows:
 
 | Flow                                                             | When to use                                                                  | Effect                                                                                                                                |
 | ---------------------------------------------------------------- | ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
@@ -1584,7 +1593,7 @@ A wrong-layer choice has real costs: making `max_lods` an env var would let an o
 
 ### 15.3 S3 client
 
-Tuning knobs for the botocore client used by `fsspec`/`s3fs` underneath every Zarr read. The defaults match `docker-compose.yml`; assembled into a single `botocore.Config` at module import in `services/store_registry.py` and passed through `client_kwargs` to `fsspec` for every `s3://` URL.
+Tuning knobs for the botocore client used by `fsspec`/`s3fs` underneath every Zarr read. The defaults match `docker-compose.yml`; assembled into a single `botocore.Config` at module import in `services/store/registry.py` and passed through `client_kwargs` to `fsspec` for every `s3://` URL.
 
 | Variable             | Default | Description                                                                                                                                                                                                                                                            |
 | -------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -1646,7 +1655,7 @@ Format is chosen automatically from the TTY state of stdout — no configuration
 JSON records share a single schema for both app logs and uvicorn access logs:
 
 ```json
-{"time": "2026-05-19T06:02:50.073+00:00", "level": "INFO", "logger": "services.store_registry", "message": "Store opened", "store_url": "s3://bucket/sla.zarr", "date_count": 365}
+{"time": "2026-05-19T06:02:50.073+00:00", "level": "INFO", "logger": "services.store.registry", "message": "Store opened", "store_url": "s3://bucket/sla.zarr", "date_count": 365}
 {"time": "2026-05-19T06:02:51.210+00:00", "level": "ERROR", "logger": "main", "message": "Unhandled error", "method": "GET", "path": "/data_tiles/...", "exc": "Traceback ..."}
 {"time": "2026-05-19T06:03:00.001+00:00", "level": "INFO", "logger": "uvicorn.access", "message": "...", "client_addr": "1.2.3.4:52100", "request_line": "GET /data_tiles/sla/2026-05-19/2/0/0.png HTTP/1.1", "status_code": 200}
 ```

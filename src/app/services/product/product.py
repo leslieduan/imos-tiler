@@ -1,7 +1,7 @@
 import math
 from dataclasses import dataclass, field
 
-from app.constants import CHUNK_PX, LOD, PADDING
+from app.constants import LOD, TILE
 
 
 @dataclass(frozen=True)
@@ -10,8 +10,8 @@ class Product:
     source_path: str
     variable: str | list[str]
     lod_grids: dict[int, tuple[int, int]] = field(default_factory=dict)
-    chunk_px: tuple[int, int] = CHUNK_PX
-    padding: int = PADDING
+    chunk_px: tuple[int, int] = TILE.chunk_px
+    padding: int = TILE.padding
 
     def __post_init__(self) -> None:
         if not self.variable:

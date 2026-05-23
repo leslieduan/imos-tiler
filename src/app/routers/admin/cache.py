@@ -12,16 +12,16 @@ loop stays free; the response itself is small.
 
 from fastapi import APIRouter, HTTPException
 
-from app.constants import PRODUCTS
 from app.schemas.admin import CacheStateResponse, DiskClearedResponse, MemoryClearedResponse
+from app.services.caching.disk import clear_disk_cache, collect_disk_stats
 from app.services.caching.lifecycle import (
     get_refresh_status,
     is_prewarm_running,
     is_refresh_running,
 )
-from app.services.data_renderer import clear_processed_cache, processed_memo_stats
-from app.services.disk_cache import clear_disk_cache, collect_disk_stats
-from app.services.loader import clear_slice_cache, slice_memo_stats
+from app.services.caching.processed_cache import clear_processed_cache, processed_memo_stats
+from app.services.caching.slice_cache import clear_slice_cache, slice_memo_stats
+from app.services.product.registry import iter_product_items, iter_products
 
 router = APIRouter()
 
@@ -33,8 +33,8 @@ def _inflight_by_product(
 
     Two distinct products can share a source_path (e.g. UV currents and SLA both
     served from the same Zarr), so store_url alone is ambiguous. The slice key's
-    variables are already sorted (services/loader.py); the processed key's are
-    not (services/data_renderer.py) — sort defensively here.
+    variables are already sorted (services/caching/slice_cache.py); the processed key's are
+    not (services/rendering/data_tiles.py) — sort defensively here.
     """
     counts: dict[str, int] = {}
     for key in inflight_keys:
@@ -48,24 +48,23 @@ def _build_response() -> dict:
     slice_stats = slice_memo_stats()
     processed_stats = processed_memo_stats()
 
-    # Snapshot under list(...) so a concurrent load_products() reload can't
-    # raise "dictionary changed size during iteration" mid-comprehension.
-    product_index = {
-        (p.source_path, tuple(sorted(p.variables))): pid for pid, p in list(PRODUCTS.items())
-    }
+    # iter_product_items returns a snapshot so a concurrent load_products() reload
+    # can't raise "dictionary changed size during iteration" mid-comprehension.
+    items = iter_product_items()
+    product_index = {(p.source_path, tuple(sorted(p.variables))): pid for pid, p in items}
     slice_inflight_by_pid = _inflight_by_product(slice_stats["inflight_keys"], product_index)
     processed_inflight_by_pid = _inflight_by_product(
         processed_stats["inflight_keys"], product_index
     )
 
-    disk_stats = collect_disk_stats(list(PRODUCTS.values()))
+    disk_stats = collect_disk_stats(iter_products())
     products = {
         pid: {
             **disk_stats["per_product"][pid],
             "slice_in_flight": slice_inflight_by_pid.get(pid, 0),
             "processed_in_flight": processed_inflight_by_pid.get(pid, 0),
         }
-        for pid in PRODUCTS
+        for pid, _ in items
     }
 
     return {
@@ -75,12 +74,12 @@ def _build_response() -> dict:
             "refresh": get_refresh_status(),
         },
         "in_flight": {
-            "slice": {  # L2 in-memory slice cache (services/loader.py)
+            "slice": {  # L2 in-memory slice cache (services/caching/slice_cache.py)
                 "current": slice_stats["inflight"],
                 "peak": slice_stats["peak_inflight"],
                 "total_computes": slice_stats["total_computes"],
             },
-            "processed": {  # L1 processed grid cache (services/data_renderer.py)
+            "processed": {  # L1 processed grid cache (services/caching/processed_cache.py)
                 "current": processed_stats["inflight"],
                 "peak": processed_stats["peak_inflight"],
                 "total_computes": processed_stats["total_computes"],

@@ -3,7 +3,7 @@
 Two patterns recur in this project:
   (a) cache + dedup — concurrent callers requesting the same key share a single
       computation, and the result is stored in an LRU for later reuse
-      (services.loader.load_slice, services.data_renderer._get_processed).
+      (services.caching.slice_cache.load_slice, services.rendering.data_tiles._get_processed).
   (b) dedup only — there's no cache (e.g. results are too large or already cached
       downstream), but identical in-flight requests should still share work
       (routers.visual_tiles tile/bbox dedup).
@@ -16,7 +16,7 @@ Errors propagate to all concurrent waiters via the shared Future, and the
 in-flight entry is removed in ``finally`` so a failed compute does not
 permanently block subsequent attempts for the same key.
 
-NOT a replacement for ``services.loader._get_store`` — that adds TTL +
+NOT a replacement for ``services.caching.slice_cache._get_store`` — that adds TTL +
 stale-while-revalidate + background refresh on top of the dedup pattern, which
 this helper deliberately does not model.
 """

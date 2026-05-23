@@ -21,8 +21,8 @@ from pathlib import Path
 import lz4.frame
 import xarray as xr
 
-from app.constants import DISK_CACHE_PATH
-from app.domain.product import Product
+from app.config.paths import DISK_CACHE_PATH
+from app.services.product.product import Product
 
 logger = logging.getLogger(__name__)
 

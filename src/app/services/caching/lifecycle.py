@@ -32,20 +32,21 @@ from pathlib import Path
 
 import anyio
 
-from app.constants import DISK_CACHE_PATH, PRODUCTS
-from app.domain.product import Product
-from app.services.data_renderer import evict_processed_cache
-from app.services.disk_cache import (
+from app.config.paths import DISK_CACHE_PATH
+from app.services.caching.disk import (
     disk_cache_path,
     evict_if_over_threshold,
     evict_product_dir,
     write_slice_to_disk,
 )
-from app.services.loader import (
+from app.services.caching.processed_cache import evict_processed_cache
+from app.services.caching.slice_cache import (
     evict_slice_cache_for_product,
     get_available_dates,
     load_slice_uncached,
 )
+from app.services.product.product import Product
+from app.services.product.registry import get_product
 
 logger = logging.getLogger(__name__)
 
@@ -116,7 +117,7 @@ def _prewarm_one(product: Product, date: str, variables: list[str]) -> str:
         # (or replaced with a different object under the same id) while we were
         # fetching from S3, don't recreate its cache dir — write_slice_to_disk would
         # silently undo the deletion and leak orphan files until the next eviction.
-        if PRODUCTS.get(product.id) is not product:
+        if get_product(product.id) is not product:
             logger.debug(
                 "Prewarm write skipped — product no longer registered",
                 extra={"product_id": product.id, "date": date},

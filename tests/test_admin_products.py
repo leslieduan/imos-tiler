@@ -6,10 +6,10 @@ from unittest.mock import patch
 import pytest
 from starlette.testclient import TestClient
 
-from app.constants import PRODUCTS
-from app.domain.product import Product
 from app.main import app
 from app.routers.admin import products as admin_products
+from app.services.product.product import Product
+from app.services.product.registry import PRODUCTS
 
 client = TestClient(app, raise_server_exceptions=True)
 

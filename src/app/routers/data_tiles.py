@@ -2,8 +2,9 @@ from fastapi import APIRouter, HTTPException, Path, Response
 from fastapi.openapi.models import Example
 
 from app.schemas.data_tiles import DataTileManifestResponse
-from app.services.data_renderer import render_manifest, render_tile
-from app.services.loader import get_lod_grids
+from app.services.caching.slice_cache import get_lod_grids
+from app.services.product.manifest import render_manifest
+from app.services.rendering.data_tiles import render_tile
 
 from .products import router as products_router
 from .shared import (

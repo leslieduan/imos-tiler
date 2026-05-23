@@ -1,7 +1,7 @@
 """Web Mercator tile and bbox rendering for the visual_tiles router.
 
 Resamples a 2-D scalar field through rio-tiler's XarrayReader, applies a
-colormap LUT from [[colormap_lookup]], and encodes as PNG or WebP. The
+colormap LUT from [[colormap.resolver]], and encodes as PNG or WebP. The
 antimeridian split in `_to_scalar_parts` is the one non-obvious bit — regional
 grids that cross 180° E (e.g. GSLA 57–185°E) are split into two segments so
 each fits inside rio_tiler's strict ±180 bound; the parts are composited as
@@ -13,14 +13,14 @@ import time
 
 import numpy as np
 import xarray as xr
-from pyproj import Transformer
 from rio_tiler.colormap import apply_cmap
 from rio_tiler.errors import TileOutsideBounds
 from rio_tiler.io.xarray import XarrayReader
 from rio_tiler.models import ImageData
 from rioxarray.exceptions import NoDataInBounds
 
-from app.services.colormap_lookup import resolve_colormap
+from app.services.colormap.resolver import resolve_colormap
+from app.services.store.spatial import bbox_to_wgs84
 from app.utils.image import (
     AnimatedFormat,
     ImageFormat,
@@ -30,8 +30,6 @@ from app.utils.image import (
 )
 
 logger = logging.getLogger(__name__)
-
-_mercator_to_wgs84 = Transformer.from_crs("EPSG:3857", "EPSG:4326", always_xy=True)
 
 
 def warmup_visual() -> None:
@@ -185,17 +183,6 @@ def render_tile(
     return encode_rgba(result, fmt) if result is not None else empty_tile(fmt)
 
 
-def _bbox_to_wgs84(
-    bbox: tuple[float, float, float, float], crs: str
-) -> tuple[float, float, float, float]:
-    minx, miny, maxx, maxy = bbox
-    if crs == "EPSG:3857":
-        lon_min, lat_min = _mercator_to_wgs84.transform(minx, miny)
-        lon_max, lat_max = _mercator_to_wgs84.transform(maxx, maxy)
-        return lon_min, lat_min, lon_max, lat_max
-    return minx, miny, maxx, maxy
-
-
 def _bbox_parts_to_rgba(
     parts: list[xr.DataArray],
     bbox_wgs84: tuple[float, float, float, float],
@@ -256,7 +243,7 @@ def render_bbox(
     vmin, vmax = vrange
     span = vmax - vmin or 1.0
     cm = resolve_colormap(colormap_name)
-    bbox_wgs84 = _bbox_to_wgs84(bbox, crs)
+    bbox_wgs84 = bbox_to_wgs84(bbox, crs)
 
     result = _bbox_parts_to_rgba(parts, bbox_wgs84, width, height, vmin, span, cm)
     return encode_rgba(result, fmt) if result is not None else empty_tile(fmt)
@@ -299,7 +286,7 @@ def render_bbox_animation(
 
     span = vmax - vmin or 1.0
     cm = resolve_colormap(colormap_name)
-    bbox_wgs84 = _bbox_to_wgs84(bbox, crs)
+    bbox_wgs84 = bbox_to_wgs84(bbox, crs)
 
     frames: list[np.ndarray] = []
     for parts in parts_per_frame:

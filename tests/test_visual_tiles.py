@@ -79,7 +79,7 @@ def test_tile_ok_with_custom_colormap():
     with (
         patch("app.routers.shared.load_slice", return_value=_make_ds()),
         patch("app.routers.visual_tiles.render_tile", return_value=_PNG),
-        patch("app.services.colormap_config._custom_colormaps", {"test_ramp": custom}),
+        patch("app.services.colormap.registry._custom_colormaps", {"test_ramp": custom}),
     ):
         response = client.get(
             "/visual_tiles/sea_level_anomaly/2024-01-01/5/0/0.png?colormap=test_ramp"
@@ -109,8 +109,8 @@ def test_tile_webp_rejected_for_categorical_colormap():
     categorical = [(0, 0, 0, 0)] * 256
     with (
         patch("app.routers.shared.load_slice", return_value=_make_ds()),
-        patch("app.services.colormap_config._custom_colormaps", {"cat_map": categorical}),
-        patch("app.services.colormap_config._custom_colormap_modes", {"cat_map": "categorical"}),
+        patch("app.services.colormap.registry._custom_colormaps", {"cat_map": categorical}),
+        patch("app.services.colormap.registry._custom_colormap_modes", {"cat_map": "categorical"}),
     ):
         response = client.get(
             "/visual_tiles/sea_level_anomaly/2024-01-01/5/0/0.webp?colormap=cat_map&rescale=1,4"
@@ -156,11 +156,11 @@ def test_animation_ok_with_default_bbox():
         patch("app.routers.visual_tiles.load_slice_uncached", return_value=_make_ds()),
         patch("app.routers.visual_tiles.render_bbox_animation", return_value=_APNG),
         patch(
-            "app.routers.visual_tiles._default_bbox_from_store",
+            "app.routers.visual_tiles.default_bbox_from_store",
             return_value=(140.0, -40.0, 150.0, -30.0),
         ),
         patch(
-            "app.routers.visual_tiles._native_resolution_in_bbox",
+            "app.routers.visual_tiles.native_resolution_in_bbox",
             return_value=(256, 256),
         ),
     ):
@@ -182,7 +182,7 @@ def test_animation_no_data_in_range_returns_404():
     with (
         patch("app.routers.visual_tiles.get_available_dates", return_value=["2025-01-01"]),
         patch(
-            "app.routers.visual_tiles._default_bbox_from_store",
+            "app.routers.visual_tiles.default_bbox_from_store",
             return_value=(140.0, -40.0, 150.0, -30.0),
         ),
     ):
@@ -197,7 +197,7 @@ def test_animation_frame_cap_rejected():
     with (
         patch("app.routers.visual_tiles.get_available_dates", return_value=too_many),
         patch(
-            "app.routers.visual_tiles._default_bbox_from_store",
+            "app.routers.visual_tiles.default_bbox_from_store",
             return_value=(140.0, -40.0, 150.0, -30.0),
         ),
     ):
@@ -260,7 +260,7 @@ def test_animation_native_resolution_used_when_both_dims_omitted():
     with (
         patch("app.routers.visual_tiles.get_available_dates", return_value=["2024-01-01"]),
         patch("app.routers.visual_tiles.load_slice_uncached", return_value=_make_ds()),
-        patch("app.routers.visual_tiles._native_resolution_in_bbox", return_value=(640, 350)),
+        patch("app.routers.visual_tiles.native_resolution_in_bbox", return_value=(640, 350)),
         patch_render,
     ):
         response = client.get(

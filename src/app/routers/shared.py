@@ -5,11 +5,11 @@ from datetime import date as _Date
 from fastapi import HTTPException
 from fastapi.openapi.models import Example
 
-from app.constants import PRODUCTS
-from app.domain.product import Product
-from app.services.colormap_config import is_categorical
-from app.services.colormap_lookup import resolve_colormap
-from app.services.loader import load_slice
+from app.services.caching.slice_cache import load_slice
+from app.services.colormap.registry import is_categorical
+from app.services.colormap.resolver import resolve_colormap
+from app.services.product.product import Product
+from app.services.product.registry import get_product
 
 PRODUCT_EX: dict[str, Example] = {"default": Example(value="sea_level_anomaly")}
 DATE_EX: dict[str, Example] = {"default": Example(value="2024-02-24")}
@@ -24,7 +24,7 @@ IMMUTABLE_CACHE_HEADERS = {"Cache-Control": f"public, max-age={86400 * 365}, imm
 
 
 def get_product_or_404(product_id: str) -> Product:
-    product = PRODUCTS.get(product_id)
+    product = get_product(product_id)
     if product is None:
         raise HTTPException(status_code=404, detail=f"Unknown product: {product_id}")
     return product

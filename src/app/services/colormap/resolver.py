@@ -1,6 +1,6 @@
 """Colormap name → LUT resolution for the rendering pipeline.
 
-Distinct from [[colormap_config]]: that module handles persistence and the
+Distinct from [[colormap.registry]]: that module handles persistence and the
 custom registry on disk. This module is the runtime fallback chain used by
 every render call — custom → rio-tiler → matplotlib — plus the LRU caches that
 keep repeat lookups O(1).
@@ -14,7 +14,7 @@ from functools import lru_cache
 
 import numpy as np
 
-from app.services.colormap_config import get_colormap, on_invalidate
+from app.services.colormap.registry import get_colormap, on_invalidate
 
 
 @lru_cache(

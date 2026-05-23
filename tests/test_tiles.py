@@ -4,8 +4,8 @@ import numpy as np
 import xarray as xr
 from starlette.testclient import TestClient
 
-from app.domain.product import Product
 from app.main import app
+from app.services.product.product import Product
 
 client = TestClient(app, raise_server_exceptions=True)
 
@@ -141,7 +141,7 @@ def test_point_ok():
 
 def test_availability_ok():
     with (
-        patch("app.routers.products.PRODUCTS", _FAKE_PRODUCTS),
+        patch("app.routers.products.iter_product_items", return_value=list(_FAKE_PRODUCTS.items())),
         patch(
             "app.routers.products.get_available_dates", return_value=["2024-06-01", "2024-07-01"]
         ),
@@ -157,7 +157,7 @@ def test_availability_ok():
 def test_availability_date_filters():
     all_dates = ["2024-01-01", "2024-06-01", "2024-09-01", "2024-12-01"]
     with (
-        patch("app.routers.products.PRODUCTS", _FAKE_PRODUCTS),
+        patch("app.routers.products.iter_product_items", return_value=list(_FAKE_PRODUCTS.items())),
         patch("app.routers.products.get_available_dates", return_value=all_dates),
     ):
         response = client.get("/data_tiles/manifest?from=2024-06-01&to=2024-09-01")
@@ -170,7 +170,7 @@ def test_availability_date_filters():
 
 def test_availability_no_dates_in_range():
     with (
-        patch("app.routers.products.PRODUCTS", _FAKE_PRODUCTS),
+        patch("app.routers.products.iter_product_items", return_value=list(_FAKE_PRODUCTS.items())),
         patch("app.routers.products.get_available_dates", return_value=["2020-01-01"]),
         patch("app.routers.products.three_months_ago", return_value="2024-01-01"),
     ):

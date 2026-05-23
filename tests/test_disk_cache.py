@@ -10,8 +10,8 @@ import numpy as np
 import pytest
 import xarray as xr
 
-import app.services.disk_cache as disk_cache
-from app.domain.product import Product
+import app.services.caching.disk as disk_cache
+from app.services.product.product import Product
 
 
 @pytest.fixture

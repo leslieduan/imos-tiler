@@ -29,7 +29,7 @@ _STORE_TTL = float(os.environ.get("STORE_TTL_SECONDS", 600))
 
 # Capacity gate for concurrent store opens during prewarm. Bounded to the S3
 # connection ceiling, not CPU — same rationale as _PREWARM_LIMITER in
-# services/disk_cache.py. Runs on the shared anyio pool but a separate budget
+# services/caching/disk.py. Runs on the shared anyio pool but a separate budget
 # so a many-product startup can't transiently consume tile-handler slots.
 _STORE_PREWARM_LIMITER = anyio.CapacityLimiter(int(os.environ.get("STORE_PREWARM_WORKERS", 8)))
 

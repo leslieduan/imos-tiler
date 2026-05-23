@@ -1,8 +1,4 @@
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from app.domain.product import Product
 
 LODIndex = int
 ZoomLevel = int
@@ -36,12 +32,23 @@ class LODConfig:
 
 LOD = LODConfig()
 
-PADDING = 1
-CHUNK_PX = (240, 192)
 
-PRODUCTS_CONFIG_PATH = "data/products.json"
-COLORMAPS_CONFIG_PATH = "data/colormaps.json"
-DISK_CACHE_PATH = "slice_cache"
+@dataclass(frozen=True)
+class TileConfig:
+    """Per-product tile geometry defaults — also part of the server↔shader contract.
+
+    ``chunk_px`` is the visible tile size; ``padding`` is the extra ring of edge
+    pixels included on each side so the shader can sample a bilinear filter
+    without seams between tiles. Products may override either value via
+    ``products.json``, but the defaults must stay in lockstep with the frontend
+    atlas layout — see [[LODConfig]] for the same caveat.
+    """
+
+    chunk_px: tuple[int, int] = (240, 192)
+    padding: int = 1
+
+
+TILE = TileConfig()
 
 # Bump when anything changes that would make the server render different bytes for an
 # existing URL: renderer code (colormap interpolation, PNG encoder, projection algorithm,
@@ -51,6 +58,3 @@ DISK_CACHE_PATH = "slice_cache"
 # Do NOT bump on every build — only on changes that affect rendered output.
 # See docs/http_caching.md for the full design.
 CACHE_VERSION = "cv1"
-
-
-PRODUCTS: "dict[str, Product]" = {}

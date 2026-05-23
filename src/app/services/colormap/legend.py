@@ -7,7 +7,7 @@ as equal-width blocks, one per registered category.
 Memoised by full argument tuple — legend PNGs are pure functions of their args
 and frontends typically request the same legend many times per page load. The
 cache is cleared together with the underlying colormap LUTs whenever the custom
-colormap registry changes (see [[colormap_lookup]]).
+colormap registry changes (see [[colormap.resolver]]).
 """
 
 import io
@@ -16,8 +16,8 @@ from functools import lru_cache
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-from app.services.colormap_config import is_categorical, on_invalidate
-from app.services.colormap_lookup import resolve_colormap
+from app.services.colormap.registry import is_categorical, on_invalidate
+from app.services.colormap.resolver import resolve_colormap
 
 _LABEL_PX = 20  # pixels reserved alongside the bar for tick labels
 

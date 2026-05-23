@@ -11,7 +11,7 @@ Three responsibilities:
     [[caching.lifecycle.evict_product_cache]] (the cross-layer fan-out).
 
 Long-lived store handles, disk IO, and cross-layer lifecycle live in their own
-modules ([[store_registry]], [[disk_cache]], [[caching.lifecycle]]).
+modules ([[store.registry]], [[caching.disk]], [[caching.lifecycle]]).
 """
 
 import logging
@@ -23,9 +23,9 @@ import pandas as pd
 import xarray as xr
 from cachetools import TTLCache
 
-from app.domain.product import Product
-from app.services.disk_cache import disk_cache_path, read_slice_from_disk
-from app.services.store_registry import get_store, store_registry
+from app.services.caching.disk import disk_cache_path, read_slice_from_disk
+from app.services.product.product import Product
+from app.services.store.registry import get_store, store_registry
 from app.utils.memoizer import Memoizer
 
 logger = logging.getLogger(__name__)

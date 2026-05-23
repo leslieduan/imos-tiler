@@ -6,13 +6,13 @@ import anyio
 import pytest
 from starlette.testclient import TestClient
 
+import app.services.caching.disk as disk_cache
 import app.services.caching.lifecycle as lifecycle
-import app.services.data_renderer as data_renderer
-import app.services.disk_cache as disk_cache
-import app.services.loader as loader
-from app.constants import PRODUCTS
-from app.domain.product import Product
+import app.services.caching.processed_cache as processed_cache
+import app.services.caching.slice_cache as loader
 from app.main import app
+from app.services.product.product import Product
+from app.services.product.registry import PRODUCTS
 
 client = TestClient(app, raise_server_exceptions=True)
 
@@ -30,8 +30,8 @@ def reset_memoizer_counters():
     """Other tests share the module-level memoizers; reset counters for isolation."""
     loader._slice_memo._peak_inflight = 0
     loader._slice_memo._total_computes = 0
-    data_renderer._processed_memo._peak_inflight = 0
-    data_renderer._processed_memo._total_computes = 0
+    processed_cache.processed_memo._peak_inflight = 0
+    processed_cache.processed_memo._total_computes = 0
     yield
 
 
@@ -207,8 +207,8 @@ def test_global_disk_stats_aggregate_across_products(cache_root, monkeypatch):
 def test_refresh_status_ok_after_successful_run(cache_root):
     p = PRODUCTS["sea_level_anomaly"]
     with (
-        patch("app.services.loader.get_available_dates", return_value=[]),
-        patch("app.services.loader.load_slice"),
+        patch("app.services.caching.slice_cache.get_available_dates", return_value=[]),
+        patch("app.services.caching.slice_cache.load_slice"),
     ):
         anyio.run(lifecycle.refresh_disk_cache, [p])
 

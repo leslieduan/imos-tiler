@@ -12,7 +12,7 @@ import pytest
 import xarray as xr
 from PIL import Image
 
-import app.services.visual_renderer as visual_renderer
+import app.services.rendering.visual_tiles as visual_renderer
 from app.utils.image import TILE_SIZE
 
 

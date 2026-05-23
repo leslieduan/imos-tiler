@@ -7,12 +7,12 @@ import anyio
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
-from app.constants import CHUNK_PX, PADDING, PRODUCTS
-from app.domain.product import Product
+from app.constants import TILE
 from app.schemas.admin import ProductCreatedResponse
 from app.services.caching.lifecycle import evict_product_cache, prewarm_disk_slices
-from app.services.product_config import register_product, remove_product
-from app.services.store_registry import get_store
+from app.services.product.product import Product
+from app.services.product.registry import get_product, register_product, remove_product
+from app.services.store.registry import get_store
 
 logger = logging.getLogger(__name__)
 
@@ -49,8 +49,8 @@ class ProductPayload(BaseModel):
     id: str
     source_path: str
     variable: str | list[str]
-    chunk_px: list[int] = Field(default_factory=lambda: list(CHUNK_PX))
-    padding: int = PADDING
+    chunk_px: list[int] = Field(default_factory=lambda: list(TILE.chunk_px))
+    padding: int = TILE.padding
 
     @field_validator("id")
     @classmethod
@@ -137,7 +137,7 @@ async def add_product(payload: ProductPayload):
     description="Removes the product and evicts its cached data. Returns 404 if the product does not exist.",
 )
 def delete_product(product_id: str):
-    product = PRODUCTS.get(product_id)
+    product = get_product(product_id)
     try:
         remove_product(product_id)
     except KeyError as e:

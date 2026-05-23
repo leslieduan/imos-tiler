@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException, Path
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.schemas.admin import ColormapCreatedResponse
-from app.services.colormap_config import ColormapMode, register_colormap, remove_colormap
+from app.services.colormap.registry import ColormapMode, register_colormap, remove_colormap
 from app.utils.colors import build_categorical_lut, interpolate_colormap, parse_color
 
 logger = logging.getLogger(__name__)

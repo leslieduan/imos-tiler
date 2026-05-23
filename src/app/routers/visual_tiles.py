@@ -8,15 +8,18 @@ from fastapi.openapi.models import Example
 from fastapi.responses import Response
 
 from app.schemas.visual_tiles import ColormapListResponse
-from app.services.colormap_config import list_colormaps
-from app.services.legend_renderer import render_legend
-from app.services.loader import get_available_dates, load_slice_uncached
-from app.services.store_registry import get_store
-from app.services.visual_renderer import (
-    _bbox_to_wgs84,
+from app.services.caching.slice_cache import get_available_dates, load_slice_uncached
+from app.services.colormap.legend import render_legend
+from app.services.colormap.registry import list_colormaps
+from app.services.rendering.visual_tiles import (
     render_bbox,
     render_bbox_animation,
     render_tile,
+)
+from app.services.store.spatial import (
+    bbox_to_wgs84,
+    default_bbox_from_store,
+    native_resolution_in_bbox,
 )
 from app.utils.image import AnimatedFormat, ImageFormat, animated_media_type, media_type
 from app.utils.memoizer import Memoizer
@@ -49,7 +52,7 @@ router.include_router(products_router)
 
 
 # Dedup-only Memoizers (cache=None): /data_tiles already shares the rio-tiler /
-# encoding work across concurrent requests via _processed_memo, visual tiles had
+# encoding work across concurrent requests via processed_memo, visual tiles had
 # no equivalent. With these, N concurrent identical-tile requests run one render;
 # the rest block on the shared Future. No caching needed here — Cache-Control +
 # browser/CDN absorb cross-request repeats.
@@ -153,29 +156,6 @@ def get_tile(
     return Response(content=body, media_type=media_type(ext), headers=IMMUTABLE_CACHE_HEADERS)
 
 
-def _native_resolution_in_bbox(
-    product_source_path: str,
-    bbox_wgs84: tuple[float, float, float, float],
-    max_dim: int = 2048,
-) -> tuple[int, int]:
-    """Output dimensions that match the dataset's native cell resolution inside the bbox.
-
-    Clamped to ``[1, max_dim]`` per axis so a huge bbox over a high-resolution grid
-    can't blow the response up to an unreasonable size. Cell spacing is read from
-    the first two lat/lon coordinates — all current products are on regular grids;
-    irregular grids would need a different code path.
-    """
-    store = get_store(product_source_path)
-    lat_vals = store.lat.values
-    lon_vals = store.lon.values
-    lat_spacing = abs(float(lat_vals[1] - lat_vals[0]))
-    lon_spacing = abs(float(lon_vals[1] - lon_vals[0]))
-    lon_min, lat_min, lon_max, lat_max = bbox_wgs84
-    w = max(1, min(max_dim, int(round((lon_max - lon_min) / lon_spacing))))
-    h = max(1, min(max_dim, int(round((lat_max - lat_min) / lat_spacing))))
-    return w, h
-
-
 def _resolve_resolution(
     product_source_path: str,
     bbox_tuple: tuple[float, float, float, float],
@@ -194,8 +174,8 @@ def _resolve_resolution(
         return width, height
 
     if width is None and height is None:
-        bbox_wgs84 = _bbox_to_wgs84(bbox_tuple, crs)
-        return _native_resolution_in_bbox(product_source_path, bbox_wgs84, max_dim)
+        bbox_wgs84 = bbox_to_wgs84(bbox_tuple, crs)
+        return native_resolution_in_bbox(product_source_path, bbox_wgs84, max_dim)
 
     minx, miny, maxx, maxy = bbox_tuple
     span_x = (maxx - minx) or 1.0
@@ -213,25 +193,6 @@ def _resolve_resolution(
     return derived_w, height
 
 
-def _default_bbox_from_store(product_source_path: str) -> tuple[float, float, float, float]:
-    """Return EPSG:4326 bounds for the dataset, clamped to ±180 lon.
-
-    Antimeridian-straddling datasets (e.g. GSLA at 57–185°E) lose the sliver past
-    180° in the default rendering — callers can pass an explicit bbox to cover
-    the other side.
-    """
-    store = get_store(product_source_path)
-    lat_min = float(store.lat.min())
-    lat_max = float(store.lat.max())
-    lon_min = float(store.lon.min())
-    lon_max = float(store.lon.max())
-    if lon_min > 180:
-        lon_min -= 360
-    if lon_max > 180:
-        lon_max = 180.0
-    return (lon_min, lat_min, lon_max, lat_max)
-
-
 def _parse_bbox_and_crs(
     bbox: str | None, crs: str, source_path: str
 ) -> tuple[tuple[float, float, float, float], str]:
@@ -244,7 +205,7 @@ def _parse_bbox_and_crs(
     if crs not in ("EPSG:4326", "EPSG:3857"):
         raise HTTPException(status_code=400, detail="crs must be 'EPSG:4326' or 'EPSG:3857'")
     if bbox is None:
-        return _default_bbox_from_store(source_path), "EPSG:4326"
+        return default_bbox_from_store(source_path), "EPSG:4326"
     try:
         minx, miny, maxx, maxy = (float(v) for v in bbox.split(","))
     except ValueError as e:

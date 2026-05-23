@@ -9,8 +9,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from starlette.middleware.cors import CORSMiddleware
 
-from app.constants import DISK_CACHE_PATH, PRODUCTS
-from app.domain.product import Product
+from app.config.paths import DISK_CACHE_PATH
 from app.log_config import configure_logging
 from app.routers.admin import admin_router
 from app.routers.data_tiles import router as data_tiles_router
@@ -20,11 +19,12 @@ from app.services.caching.lifecycle import (
     prewarm_disk_slices,
     refresh_disk_cache,
 )
-from app.services.colormap_config import load_colormaps
-from app.services.data_renderer import warmup_resample
-from app.services.product_config import load_products
-from app.services.store_registry import prewarm_stores
-from app.services.visual_renderer import warmup_visual
+from app.services.colormap.registry import load_colormaps
+from app.services.product.product import Product
+from app.services.product.registry import iter_products, load_products
+from app.services.rendering.kernels import warmup_resample
+from app.services.rendering.visual_tiles import warmup_visual
+from app.services.store.registry import prewarm_stores
 
 load_dotenv()
 configure_logging()
@@ -60,7 +60,7 @@ async def _cache_refresh_loop(interval: int) -> None:
         # Catch broadly: an unhandled exception here would kill the loop for the lifetime
         # of the process, silently disabling all future refreshes.
         try:
-            await refresh_disk_cache(list(PRODUCTS.values()))
+            await refresh_disk_cache(iter_products())
         except Exception:
             logger.exception("Cache refresh cycle failed; will retry next interval")
 
@@ -94,9 +94,9 @@ async def lifespan(app: FastAPI):
 
     await anyio.to_thread.run_sync(warmup_resample)
     await anyio.to_thread.run_sync(warmup_visual)
-    store_urls = list({p.source_path for p in PRODUCTS.values()})
+    store_urls = list({p.source_path for p in iter_products()})
     store_prewarm_task = asyncio.create_task(prewarm_stores(store_urls))
-    prewarm_task = asyncio.create_task(_startup_cache_sync(list(PRODUCTS.values())))
+    prewarm_task = asyncio.create_task(_startup_cache_sync(iter_products()))
     interval = int(os.environ.get("CACHE_REFRESH_INTERVAL_SECONDS", 14400))
     logger.info("Cache refresh interval set", extra={"interval_seconds": interval})
     refresh_task = asyncio.create_task(_cache_refresh_loop(interval))

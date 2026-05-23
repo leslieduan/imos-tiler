@@ -12,10 +12,10 @@ import numpy as np
 import pytest
 import xarray as xr
 
+import app.services.caching.disk as disk_cache
 import app.services.caching.lifecycle as lifecycle
-import app.services.disk_cache as disk_cache
-from app.constants import PRODUCTS
-from app.domain.product import Product
+from app.services.product.product import Product
+from app.services.product.registry import PRODUCTS
 
 
 @pytest.fixture
