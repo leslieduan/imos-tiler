@@ -15,13 +15,13 @@ from app.log_config import configure_logging
 from app.routers.admin import admin_router
 from app.routers.data_tiles import router as data_tiles_router
 from app.routers.visual_tiles import router as visual_tiles_router
-from app.services.colormap_config import load_colormaps
-from app.services.data_renderer import warmup_resample
-from app.services.disk_cache import (
+from app.services.caching.lifecycle import (
     evict_stale_and_orphans,
     prewarm_disk_slices,
     refresh_disk_cache,
 )
+from app.services.colormap_config import load_colormaps
+from app.services.data_renderer import warmup_resample
 from app.services.product_config import load_products
 from app.services.store_registry import prewarm_stores
 from app.services.visual_renderer import warmup_visual

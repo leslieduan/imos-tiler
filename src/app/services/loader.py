@@ -1,4 +1,4 @@
-"""In-memory slice loading and cross-cutting product cache eviction.
+"""In-memory slice loading (L2) and store-aware accessors.
 
 Three responsibilities:
   * ``load_slice`` — return a fully-computed 2-D slice for a (store, date,
@@ -7,11 +7,11 @@ Three responsibilities:
     the slice Memoizer.
   * ``get_available_dates`` / ``get_lod_grids`` — small store-aware accessors
     used by routers; both touch the store registry on first call.
-  * ``evict_product_cache`` — fan-out eviction across every layer (L2 slices,
-    L1 processed grids, L3 disk dir) when a product is deregistered.
+  * ``evict_slice_cache_for_product`` — narrow L2-only eviction helper used by
+    [[caching.lifecycle.evict_product_cache]] (the cross-layer fan-out).
 
-Long-lived store handles and disk-cache lifecycle live in their own modules
-([[store_registry]], [[disk_cache]]).
+Long-lived store handles, disk IO, and cross-layer lifecycle live in their own
+modules ([[store_registry]], [[disk_cache]], [[caching.lifecycle]]).
 """
 
 import logging
@@ -24,11 +24,7 @@ import xarray as xr
 from cachetools import TTLCache
 
 from app.domain.product import Product
-from app.services.disk_cache import (
-    disk_cache_path,
-    evict_product_dir,
-    read_slice_from_disk,
-)
+from app.services.disk_cache import disk_cache_path, read_slice_from_disk
 from app.services.store_registry import get_store, store_registry
 from app.utils.memoizer import Memoizer
 
@@ -163,20 +159,12 @@ def clear_slice_cache() -> int:
     return removed
 
 
-def evict_product_cache(product: Product) -> None:
-    """Remove all in-memory and disk cache entries for a deleted product."""
-    from app.services.data_renderer import evict_processed_cache
+def evict_slice_cache_for_product(product: Product) -> int:
+    """Evict L2 slice cache entries belonging to ``product``. Returns count removed.
 
+    Narrow helper exposed for [[caching.lifecycle.evict_product_cache]] so the
+    cross-layer fan-out can drop L2 entries without reaching into ``_slice_memo``
+    internals.
+    """
     vars_tuple = tuple(sorted(product.variables))
-
-    removed = _slice_memo.evict_matching(
-        lambda k: k[0] == product.source_path and k[2] == vars_tuple
-    )
-    if removed:
-        logger.info(
-            "Memory cache evicted for product",
-            extra={"product_id": product.id, "slices_removed": removed},
-        )
-
-    evict_processed_cache(product)
-    evict_product_dir(product)
+    return _slice_memo.evict_matching(lambda k: k[0] == product.source_path and k[2] == vars_tuple)

@@ -14,14 +14,13 @@ from fastapi import APIRouter, HTTPException
 
 from app.constants import PRODUCTS
 from app.schemas.admin import CacheStateResponse, DiskClearedResponse, MemoryClearedResponse
-from app.services.data_renderer import clear_processed_cache, processed_memo_stats
-from app.services.disk_cache import (
-    clear_disk_cache,
-    collect_disk_stats,
+from app.services.caching.lifecycle import (
     get_refresh_status,
     is_prewarm_running,
     is_refresh_running,
 )
+from app.services.data_renderer import clear_processed_cache, processed_memo_stats
+from app.services.disk_cache import clear_disk_cache, collect_disk_stats
 from app.services.loader import clear_slice_cache, slice_memo_stats
 
 router = APIRouter()

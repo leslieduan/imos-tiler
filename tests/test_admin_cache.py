@@ -6,6 +6,7 @@ import anyio
 import pytest
 from starlette.testclient import TestClient
 
+import app.services.caching.lifecycle as lifecycle
 import app.services.data_renderer as data_renderer
 import app.services.disk_cache as disk_cache
 import app.services.loader as loader
@@ -37,8 +38,8 @@ def reset_memoizer_counters():
 @pytest.fixture(autouse=True)
 def reset_refresh_status():
     """Refresh status is module-level; reset to the 'never_run' baseline per test."""
-    with disk_cache._refresh_status_lock:
-        disk_cache._refresh_status.update(
+    with lifecycle._refresh_status_lock:
+        lifecycle._refresh_status.update(
             {
                 "last_started_at": None,
                 "last_completed_at": None,
@@ -52,11 +53,11 @@ def reset_refresh_status():
 @pytest.fixture(autouse=True)
 def reset_prewarm_running():
     """Prewarm flag is module-level; ensure it is False before and after each test."""
-    with disk_cache._prewarm_lock:
-        disk_cache._prewarm_running = False
+    with lifecycle._prewarm_lock:
+        lifecycle._prewarm_running = False
     yield
-    with disk_cache._prewarm_lock:
-        disk_cache._prewarm_running = False
+    with lifecycle._prewarm_lock:
+        lifecycle._prewarm_running = False
 
 
 @pytest.fixture
@@ -112,8 +113,8 @@ def test_prewarm_running_false_by_default():
 
 
 def test_prewarm_running_true_when_active():
-    with disk_cache._prewarm_lock:
-        disk_cache._prewarm_running = True
+    with lifecycle._prewarm_lock:
+        lifecycle._prewarm_running = True
     body = client.get("/admin/cache", headers=_HEADERS).json()
     assert body["disk_writes"]["prewarm"]["running"] is True
 
@@ -209,7 +210,7 @@ def test_refresh_status_ok_after_successful_run(cache_root):
         patch("app.services.loader.get_available_dates", return_value=[]),
         patch("app.services.loader.load_slice"),
     ):
-        anyio.run(disk_cache.refresh_disk_cache, [p])
+        anyio.run(lifecycle.refresh_disk_cache, [p])
 
     body = client.get("/admin/cache", headers=_HEADERS).json()
     assert body["disk_writes"]["refresh"]["status"] == "ok"
@@ -222,10 +223,10 @@ def test_refresh_status_error_when_run_raises(cache_root):
     p = PRODUCTS["sea_level_anomaly"]
     # evict_stale_and_orphans is the first sub-call inside refresh; force it to blow up.
     with (
-        patch.object(disk_cache, "evict_stale_and_orphans", side_effect=RuntimeError("boom")),
+        patch.object(lifecycle, "evict_stale_and_orphans", side_effect=RuntimeError("boom")),
         pytest.raises(RuntimeError),
     ):
-        anyio.run(disk_cache.refresh_disk_cache, [p])
+        anyio.run(lifecycle.refresh_disk_cache, [p])
 
     body = client.get("/admin/cache", headers=_HEADERS).json()
     assert body["disk_writes"]["refresh"]["status"] == "error"
@@ -314,16 +315,16 @@ def test_delete_disk_cache_wrong_admin_key_returns_403():
 
 
 def test_delete_disk_cache_returns_409_when_prewarm_running(monkeypatch):
-    with disk_cache._prewarm_lock:
-        disk_cache._prewarm_running = True
+    with lifecycle._prewarm_lock:
+        lifecycle._prewarm_running = True
     r = client.delete("/admin/cache/disk", headers=_HEADERS)
     assert r.status_code == 409
     assert "prewarm" in r.json()["detail"].lower()
 
 
 def test_delete_disk_cache_returns_409_when_refresh_running():
-    with disk_cache._refresh_status_lock:
-        disk_cache._refresh_status["status"] = "running"
+    with lifecycle._refresh_status_lock:
+        lifecycle._refresh_status["status"] = "running"
     r = client.delete("/admin/cache/disk", headers=_HEADERS)
     assert r.status_code == 409
     assert "refresh" in r.json()["detail"].lower()

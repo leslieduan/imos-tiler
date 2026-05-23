@@ -174,8 +174,10 @@ imos-tiler/
         cache.py                 ← GET /admin/cache (state snapshot) + DELETE /admin/cache/memory (clear L1+L2) + DELETE /admin/cache/disk (clear L3)
     services/
       store_registry.py          ← Zarr store singleton (stale-while-revalidate) + per-URL date index
-      disk_cache.py              ← L3 disk cache lifecycle: path, read/write, prewarm, refresh, eviction
-      loader.py                  ← load_slice (L2 LRU) + get_available_dates + get_lod_grids + evict_product_cache
+      disk_cache.py              ← L3 disk IO + per-file/dir eviction: path, read/write, pressure eviction, clear, stats
+      caching/
+        lifecycle.py             ← cross-layer orchestration: prewarm, refresh, stale eviction, evict_product_cache fan-out
+      loader.py                  ← load_slice (L2 LRU) + get_available_dates + get_lod_grids + evict_slice_cache_for_product
       data_renderer.py           ← processed grid cache + chunk extract + PNG encode (data tiles)
       visual_renderer.py         ← Web Mercator tile/bbox render (visual tiles) — encodes PNG or WebP
       colormap_lookup.py         ← resolve_colormap() — custom→rio-tiler→matplotlib fallback chain
@@ -838,8 +840,8 @@ Always enabled; path is the hardcoded constant `DISK_CACHE_PATH = "slice_cache"`
 
 - _Stale dates_ — `evict_stale_and_orphans` (and the refresh cycle) deletes `.pkl.lz4` files whose dates are no longer in the `CACHE_DAYS` window for any registered product.
 - _Orphan product directories_ — `evict_stale_and_orphans` removes any sub-directory under `DISK_CACHE_PATH` whose name does not correspond to a currently-registered product. This is what makes runtime product deletion safe: leftover disk slices from removed products are cleaned up automatically on the next refresh (and at startup).
-- _Disk pressure_ — `_evict_if_over_threshold` in `services/disk_cache.py` (run at the start of each refresh cycle) removes files when total usage exceeds `DISK_EVICTION_THRESHOLD × DISK_CACHE_LIMIT_GB`. Files are sorted `(size ascending, date ascending)` — small + old files are evicted first, keeping the large satellite slices that would be most expensive to re-fetch.
-- _Explicit product deletion_ — `evict_product_cache` (called by `DELETE /admin/products/{id}`) removes the product's disk directory via `shutil.rmtree` and purges matching entries from the L2 in-memory cache immediately.
+- _Disk pressure_ — `evict_if_over_threshold` in `services/disk_cache.py` (run at the start of each refresh cycle) removes files when total usage exceeds `DISK_EVICTION_THRESHOLD × DISK_CACHE_LIMIT_GB`. Files are sorted `(size ascending, date ascending)` — small + old files are evicted first, keeping the large satellite slices that would be most expensive to re-fetch.
+- _Explicit product deletion_ — `evict_product_cache` in `services/caching/lifecycle.py` (called by `DELETE /admin/products/{id}`) removes the product's disk directory via `shutil.rmtree` and purges matching entries from the L2 in-memory cache immediately.
 
 Disk eviction never invalidates L2 in-memory entries — the in-memory data is still valid and serves requests until it falls out of the LRU naturally.
 
@@ -870,7 +872,7 @@ The handler is a sync `def` (FastAPI dispatches it to the anyio pool automatical
 
 Drops every entry from both in-memory tiers — `_processed_cache` (L1) and `_slice_cache` (L2) — and returns the counts cleared as `{"cleared": {"slice": N, "processed": M}}`. Disk (L3) is untouched, so the next request for any flushed key still hits disk in ~30 ms instead of re-fetching from S3.
 
-Implemented as `Memoizer.evict_matching(lambda _: True)` in both `services/loader.clear_slice_cache` and `services/data_renderer.clear_processed_cache`. The eviction runs under the Memoizer's existing lock — concurrent `get_or_compute` calls block briefly while keys are removed. Any **in-flight** compute is not cancelled: it finishes and re-publishes into the (now-empty) cache when it completes, so a flush during heavy load may leave a handful of partially-refilled entries from work that was already running. Callers that arrived before the flush and are still `await`ing a shared Future receive the original result, not a re-computed one — there is no torn state.
+Implemented as `Memoizer.evict_matching(lambda _: True)` in both `services/loader.clear_slice_cache` and `services/data_renderer.clear_processed_cache`. Per-product fan-out for a specific deleted product is `evict_product_cache` in `services/caching/lifecycle.py`. The eviction runs under the Memoizer's existing lock — concurrent `get_or_compute` calls block briefly while keys are removed. Any **in-flight** compute is not cancelled: it finishes and re-publishes into the (now-empty) cache when it completes, so a flush during heavy load may leave a handful of partially-refilled entries from work that was already running. Callers that arrived before the flush and are still `await`ing a shared Future receive the original result, not a re-computed one — there is no torn state.
 
 Use cases: forcing a re-read after a Zarr store has been updated out-of-band, recovering from a poisoned cache entry, or freeing memory during an interactive debugging session without restarting the process.
 
@@ -1100,7 +1102,7 @@ This is why a 60-second prewarm at startup does not delay the first request by 6
 ### 12.5 Failure modes to watch
 
 - **`async def` an endpoint by accident.** If a future contributor turns a `def` handler into `async def`, blocking calls inside it (any `xarray`/`rio-tiler` call) will freeze the event loop and serialise every request behind the slowest one. There is no static check for this — review carefully.
-- **Forget `anyio.to_thread.run_sync` inside an `async def` function.** `prewarm_disk_slices`, `refresh_disk_cache`, and the admin coroutines all run on the event loop. Any blocking call inside their body — `get_available_dates`, `evict_stale_and_orphans`, `_evict_if_over_threshold`, filesystem walks — must be wrapped in `anyio.to_thread.run_sync(...)` or it freezes the loop. The `async def` shape converts a one-time offload (at the call site of a sync function) into a per-call discipline (every blocking line inside the body); review additions to these functions carefully.
+- **Forget `anyio.to_thread.run_sync` inside an `async def` function.** `prewarm_disk_slices`, `refresh_disk_cache`, and the admin coroutines all run on the event loop. Any blocking call inside their body — `get_available_dates`, `evict_stale_and_orphans`, `evict_if_over_threshold`, filesystem walks — must be wrapped in `anyio.to_thread.run_sync(...)` or it freezes the loop. The `async def` shape converts a one-time offload (at the call site of a sync function) into a per-call discipline (every blocking line inside the body); review additions to these functions carefully.
 - **Unbounded background tasks.** Both lifespan tasks have a top-level `try/except`. New background tasks must do the same — an unhandled exception in an `asyncio.Task` is silent until the task is awaited.
 - **Saturate `_PREWARM_SEM` with the wrong workload.** The semaphore is sized to the S3 connection ceiling for slice fetches (`PREWARM_WORKERS=8`). Don't acquire it around filesystem ops, metadata reads, or anything else not bound by that resource — semantically wrong and accidentally serialises unrelated work.
 
@@ -1121,7 +1123,7 @@ The three-pool layout bought isolation but at the cost of conceptual overhead �
 The current design collapses this to one pool with one default limiter and three named feature budgets:
 
 - **Default limiter** (size `THREAD_POOL_SIZE`, default 100) — the limiter `anyio.to_thread.current_default_thread_limiter()` returns. Used by every sync `def` tile handler (dispatched automatically by FastAPI) and by every `anyio.to_thread.run_sync(...)` call that doesn't pass an explicit limiter. Admin GET/DELETE endpoints also fall under this budget.
-- **`_PREWARM_SEM`** (size `PREWARM_WORKERS`, default 8) — a module-level `anyio.Semaphore` in `services/disk_cache.py`. Acquired _before_ `tg.start_soon` in `prewarm_disk_slices` / `refresh_disk_cache` so at most N tasks (and thus N pending coroutines) exist at a time. Sized to the S3 connection-pool ceiling.
+- **`_PREWARM_SEM`** (size `PREWARM_WORKERS`, default 8) — a module-level `anyio.Semaphore` in `services/caching/lifecycle.py`. Acquired _before_ `tg.start_soon` in `prewarm_disk_slices` / `refresh_disk_cache` so at most N tasks (and thus N pending coroutines) exist at a time. Sized to the S3 connection-pool ceiling.
 - **`_ANIMATION_LIMITER`** (size `ANIMATION_WORKERS`, default 10) — a module-level `anyio.CapacityLimiter` in `routers/visual_tiles.py`. Used by the per-frame `load_slice_uncached` fan-out inside `/animation`, via the explicit `limiter=_ANIMATION_LIMITER` argument. Sized to the aiobotocore S3 connection-pool ceiling (~10/host); going higher just queues on the connection pool without reducing latency, and the bound keeps a many-frame request from monopolising the tile-handler budget.
 - **`_STORE_PREWARM_LIMITER`** (size `STORE_PREWARM_WORKERS`, default 8) — a module-level `anyio.CapacityLimiter` in `services/store_registry.py`. Used by `StoreRegistry.prewarm` to gate concurrent `xr.open_zarr` opens at startup. Same S3 connection-pool rationale as `_PREWARM_SEM`.
 
