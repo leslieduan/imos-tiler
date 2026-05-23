@@ -1,9 +1,9 @@
 """Store-aware spatial helpers: CRS conversion, native cell resolution, default bounds.
 
-Sits between the store registry and the visual-tile pipeline. Routers and
-``visual_renderer`` were previously reaching into the registry directly
+Sits between the store registry and the visual-tile pipeline. Without it,
+routers and ``rendering.visual_tiles`` would reach into the registry directly
 (``store.lat.values``, ``store.lon.values``) to compute things like bbox
-resolution; that data-access logic now lives here so the HTTP layer talks in
+resolution; keeping that data-access logic here lets the HTTP layer talk in
 domain terms (``native_resolution_in_bbox(product, bbox)``) instead of xarray
 internals.
 """

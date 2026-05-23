@@ -3,7 +3,9 @@ from dataclasses import dataclass, field
 LODIndex = int
 ZoomLevel = int
 
-# Applied in loaders to normalise coordinate names across all products.
+# Applied by the store registry to normalise source coordinate names so the rest
+# of the pipeline can assume `time` / `lat` / `lon` regardless of how a product
+# names its dimensions upstream.
 COORD_NAMES = {"TIME": "time", "LATITUDE": "lat", "LONGITUDE": "lon"}
 
 

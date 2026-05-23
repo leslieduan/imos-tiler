@@ -29,11 +29,6 @@ class Product:
         max_lods: int = LOD.max_lods,
         min_coarsest: tuple[int, int] = LOD.min_coarsest,
     ) -> dict[int, tuple[int, int]]:
-        # Compute how many chunks fit across the data at native resolution (finest level).
-        # Then build a pyramid by halving the grid at each coarser level (doubling the scale).
-        # Levels that don't meet min_coarsest are dropped; if none survive (data smaller than
-        # one chunk), fall back to the native finest grid so there is always at least one LOD.
-        # The finest max_lods levels are returned keyed 1..N (1 = coarsest kept).
         cw, ch = chunk_px
         finest_cols = max(1, math.ceil(data_width / cw))
         finest_rows = max(1, math.ceil(data_height / ch))

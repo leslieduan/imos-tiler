@@ -31,14 +31,6 @@ configure_logging()
 
 logger = logging.getLogger(__name__)
 
-# Thinking on pixel drill: currently, to make tiles response fast, we cache Zarr slices per date per variable on disk. Because current chuking shape is (5 times, full_grid), this is good for map visualisation.
-# But not good for pixel drill, chuking like (full_time, small_grid) would be good. Even though we have this chunking Zarr, we still will face tricky chanlledge in how to cache the zarr slice on disk. Becasue
-# the cache on disk for tiles visualisation cannot be used for pixel drill, so we might need to cache a duplciate zarr slice on disk for pixel drill, the cache will be like full time per variable. It seems
-# impossible that  we can share the cache on disk between pixel drill and tiles visualisation. Because if tiles use the full time per variable cache, the response will be too slow, it will need read full grid.
-# Also memory cache is enabled for tiles, because lods change, there will be new request to the same slice, so the slice cache can be shared. But for pixel drill, it will be very unlikely that there are requests
-# sharing the same slice. Even if the chunking is (full_time, small_grid), the hit rate of memory cache will still be very low, as there are too many small grids. So it is not worth to enable memory cache for pixel drill.
-# So the cache strategy for pixel drill is only cache on disk, and the cache strategy for tiles visualisation is cache on disk and in memory.
-
 
 async def _startup_cache_sync(products: list[Product]) -> None:
     # Evict stale dates and orphan product dirs first so the cache reflects the current
@@ -65,8 +57,6 @@ async def _cache_refresh_loop(interval: int) -> None:
             logger.exception("Cache refresh cycle failed; will retry next interval")
 
 
-# Lifespan manages server startup and shutdown. Everything before yield runs on startup,
-# everything after yield runs on shutdown. The server handles requests while paused at yield.
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     limiter = anyio.to_thread.current_default_thread_limiter()
