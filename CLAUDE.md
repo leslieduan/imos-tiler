@@ -24,12 +24,15 @@ Two tile systems with different coordinate conventions — do not mix them up:
 - **Visual tiles** (`/visual_tiles`) — Web Mercator XYZ, standard MapboxGL/Leaflet convention. Rendered via rio-tiler.
 
 Key modules:
-- `src/app/routers/` — HTTP endpoints; `products.py` is mounted into both `data_tiles` and `visual_tiles` via `include_router`, so every handler there is exposed under both prefixes
-- `src/app/services/loader.py` — Zarr store singleton, L2 in-memory slice cache, L3 disk cache
-- `src/app/services/data_renderer.py` — L1 processed grid cache, PNG encoding (data tiles)
-- `src/app/services/visual_renderer.py` — Web Mercator reprojection, colormap lookup (visual tiles)
-- `src/app/services/product_store.py` / `colormap_store.py` — runtime config persistence
-- `src/app/utils/` — shared helpers: `colors.py`, `dates.py`, `geo.py`
+- `src/app/routers/public/` — public HTTP endpoints (`data_tiles.py`, `visual_tiles.py`, `products.py`); `products.py` is mounted into both `data_tiles` and `visual_tiles` via `include_router`, so every handler there is exposed under both prefixes
+- `src/app/routers/admin/` — admin endpoints (auth, cache, colormaps, products)
+- `src/app/services/store/` — `registry.py` (Zarr store singleton + L3 disk cache), `spatial.py` (CRS / native-resolution / default-bbox helpers)
+- `src/app/services/caching/` — `slice_cache.py` (L2 in-memory slice cache), `processed_cache.py` (L1 processed grids), `disk.py`, `lifecycle.py` (prewarm + eviction)
+- `src/app/services/rendering/` — `data_tiles.py` (PNG encoding for data tiles), `visual_tiles.py` (Web Mercator reprojection + colormap), `kernels.py`
+- `src/app/services/product/` — product registry, manifest, dataclass
+- `src/app/services/colormap/` — colormap registry, resolver, legend rendering
+- `src/app/config/` — `paths.py`, `log_config.py`
+- `src/app/utils/` — shared helpers: `colors.py`, `dates.py`, `geo.py`, `image.py`, `memoizer.py`
 
 See `docs/technical.md` for full architecture, caching strategy, LOD algorithm, and PNG encoding contract.
 

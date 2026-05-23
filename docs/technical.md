@@ -160,12 +160,13 @@ imos-tiler/
     constants.py                 ← LOD/LODConfig + TILE/TileConfig (server-shader contract), CACHE_VERSION, COORD_NAMES
     config/
       paths.py                   ← PRODUCTS_CONFIG_PATH, COLORMAPS_CONFIG_PATH, DISK_CACHE_PATH
-    log_config.py                ← logging setup (JSON in Docker, coloured text locally)
+      log_config.py              ← logging setup (JSON in Docker, coloured text locally)
     routers/
-      data_tiles.py              ← /data_tiles — raw value-encoded RGBA tiles for WebGL
-      visual_tiles.py            ← /visual_tiles — colourised Web Mercator XYZ tiles + bbox + colormap listing/legend
-      products.py                ← shared: /products, /manifest, /{id}/{date}/point — included by both tile routers
       shared.py                  ← shared router helpers (PRODUCT_EX/DATE_EX examples, get_product_or_404, load_slice_or_404)
+      public/                    ← public tile endpoints (package)
+        data_tiles.py            ← /data_tiles — raw value-encoded RGBA tiles for WebGL
+        visual_tiles.py          ← /visual_tiles — colourised Web Mercator XYZ tiles + bbox + colormap listing/legend
+        products.py              ← shared: /products, /manifest, /{id}/{date}/point — included by both tile routers
       admin/                     ← /admin — product, colormap, and cache-state endpoints (key-protected, package)
         __init__.py              ← assembles admin_router and applies require_admin_key
         auth.py                  ← X-Admin-Key dependency
@@ -326,7 +327,7 @@ The manifest (data-tile pipeline only) is the interface between the server's coo
 
 ### 6.1 Shared endpoints (mounted under both `/data_tiles` and `/visual_tiles`)
 
-`routers/products.py` is included by both tile routers, so these paths exist under both prefixes:
+`routers/public/products.py` is included by both tile routers, so these paths exist under both prefixes:
 
 ```
 GET /{prefix}/products                                          → list all registered products
@@ -426,7 +427,7 @@ GET /visual_tiles/{product_id}/{from_date}/{to_date}/animation.{ext}
 | `crs`       | `EPSG:4326`                           | CRS of the explicit `bbox`. The default bbox is always returned in EPSG:4326 regardless of `crs`.                                                                                                                        |
 | `duration`  | `200`                                 | Milliseconds per frame (10–5000).                                                                                                                                                                                        |
 
-**Resolution defaulting** — three branches in `_resolve_resolution` (`routers/visual_tiles.py`):
+**Resolution defaulting** — three branches in `_resolve_resolution` (`routers/public/visual_tiles.py`):
 
 | Input                 | Output                                                                                                                                                                                                                                                |
 | --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -1133,7 +1134,7 @@ The current design collapses this to one pool with one default limiter and three
 
 - **Default limiter** (size `THREAD_POOL_SIZE`, default 100) — the limiter `anyio.to_thread.current_default_thread_limiter()` returns. Used by every sync `def` tile handler (dispatched automatically by FastAPI) and by every `anyio.to_thread.run_sync(...)` call that doesn't pass an explicit limiter. Admin GET/DELETE endpoints also fall under this budget.
 - **`_PREWARM_SEM`** (size `PREWARM_WORKERS`, default 8) — a module-level `anyio.Semaphore` in `services/caching/lifecycle.py`. Acquired _before_ `tg.start_soon` in `prewarm_disk_slices` / `refresh_disk_cache` so at most N tasks (and thus N pending coroutines) exist at a time. Sized to the S3 connection-pool ceiling.
-- **`_ANIMATION_LIMITER`** (size `ANIMATION_WORKERS`, default 10) — a module-level `anyio.CapacityLimiter` in `routers/visual_tiles.py`. Used by the per-frame `load_slice_uncached` fan-out inside `/animation`, via the explicit `limiter=_ANIMATION_LIMITER` argument. Sized to the aiobotocore S3 connection-pool ceiling (~10/host); going higher just queues on the connection pool without reducing latency, and the bound keeps a many-frame request from monopolising the tile-handler budget.
+- **`_ANIMATION_LIMITER`** (size `ANIMATION_WORKERS`, default 10) — a module-level `anyio.CapacityLimiter` in `routers/public/visual_tiles.py`. Used by the per-frame `load_slice_uncached` fan-out inside `/animation`, via the explicit `limiter=_ANIMATION_LIMITER` argument. Sized to the aiobotocore S3 connection-pool ceiling (~10/host); going higher just queues on the connection pool without reducing latency, and the bound keeps a many-frame request from monopolising the tile-handler budget.
 - **`_STORE_PREWARM_LIMITER`** (size `STORE_PREWARM_WORKERS`, default 8) — a module-level `anyio.CapacityLimiter` in `services/store/registry.py`. Used by `StoreRegistry.prewarm` to gate concurrent `xr.open_zarr` opens at startup. Same S3 connection-pool rationale as `_PREWARM_SEM`.
 
 All four budgets live over the **same** anyio worker pool. Anyio creates worker threads on demand and they're shared across budgets — but each call only acquires (or pre-acquires) the budget it was given, so the slices are independent. A prewarm burst saturating its 8-slot budget does not reduce the tile-handler budget of 100, and a 30-frame animation does not steal from prewarm either.

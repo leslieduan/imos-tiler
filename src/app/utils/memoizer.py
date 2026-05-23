@@ -6,7 +6,7 @@ Two patterns recur in this project:
       (services.caching.slice_cache.load_slice, services.rendering.data_tiles._get_processed).
   (b) dedup only — there's no cache (e.g. results are too large or already cached
       downstream), but identical in-flight requests should still share work
-      (routers.visual_tiles tile/bbox dedup).
+      (routers.public.visual_tiles tile/bbox dedup).
 
 Both shapes used to be inlined as the same ~25-line "check cache → create Future
 → fast-path wait → compute → publish → cleanup" boilerplate. This class is that

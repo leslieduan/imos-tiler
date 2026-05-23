@@ -9,11 +9,11 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from starlette.middleware.cors import CORSMiddleware
 
+from app.config.log_config import configure_logging
 from app.config.paths import DISK_CACHE_PATH
-from app.log_config import configure_logging
 from app.routers.admin import admin_router
-from app.routers.data_tiles import router as data_tiles_router
-from app.routers.visual_tiles import router as visual_tiles_router
+from app.routers.public.data_tiles import router as data_tiles_router
+from app.routers.public.visual_tiles import router as visual_tiles_router
 from app.services.caching.lifecycle import (
     evict_stale_and_orphans,
     prewarm_disk_slices,

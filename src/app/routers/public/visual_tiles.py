@@ -25,8 +25,7 @@ from app.services.store.spatial import (
 from app.utils.image import AnimatedFormat, ImageFormat, animated_media_type, media_type
 from app.utils.memoizer import Memoizer
 
-from .products import router as products_router
-from .shared import (
+from ..shared import (
     DATE_EX,
     IMMUTABLE_CACHE_HEADERS,
     PRODUCT_EX,
@@ -39,6 +38,7 @@ from .shared import (
     single_variable_or_400,
     validate_date,
 )
+from .products import router as products_router
 
 _MAX_ANIMATION_FRAMES = 30
 

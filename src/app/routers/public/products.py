@@ -16,7 +16,7 @@ from app.services.product.registry import iter_product_items, list_products
 from app.services.store.registry import get_available_dates
 from app.utils.dates import three_months_ago
 
-from .shared import (
+from ..shared import (
     DATE_EX,
     IMMUTABLE_CACHE_HEADERS,
     PRODUCT_EX,

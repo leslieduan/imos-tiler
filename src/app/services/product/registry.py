@@ -37,11 +37,6 @@ _lock = threading.Lock()
 PRODUCTS: dict[str, Product] = {}
 
 
-# ---------------------------------------------------------------------------
-# Read facade — production callers should prefer these over touching PRODUCTS
-# ---------------------------------------------------------------------------
-
-
 def get_product(product_id: str) -> Product | None:
     """Return the registered Product for ``product_id``, or None if not registered."""
     return PRODUCTS.get(product_id)
@@ -59,11 +54,6 @@ def iter_products() -> list[Product]:
 def iter_product_items() -> list[tuple[str, Product]]:
     """Snapshot of every (product_id, Product) pair. Snapshot rationale: see iter_products."""
     return list(PRODUCTS.items())
-
-
-# ---------------------------------------------------------------------------
-# Persistence
-# ---------------------------------------------------------------------------
 
 
 def load_products() -> None:
@@ -121,11 +111,6 @@ def list_products() -> list[dict]:
     """
     with _lock:
         return _read_file()
-
-
-# ---------------------------------------------------------------------------
-# Internals
-# ---------------------------------------------------------------------------
 
 
 def _read_file() -> list[dict]:
