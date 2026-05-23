@@ -2,7 +2,7 @@ import math
 import threading
 from dataclasses import dataclass, field
 
-from app.constants import LOD, TILE
+from app.config.constants import LOD, TILE
 from app.services.store.registry import get_store
 
 _lod_grids_lock = threading.Lock()

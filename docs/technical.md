@@ -157,8 +157,8 @@ S3 cold   → load_slice (S3 .compute(), ~2s)  → _to_scalar_parts → XarrayRe
 imos-tiler/
   src/app/
     main.py                      ← mounts all routers, CORS middleware, lifespan startup
-    constants.py                 ← LOD/LODConfig + TILE/TileConfig (server-shader contract), CACHE_VERSION, COORD_NAMES
     config/
+      constants.py               ← LOD/LODConfig + TILE/TileConfig (server-shader contract), CACHE_VERSION, COORD_NAMES
       paths.py                   ← PRODUCTS_CONFIG_PATH, COLORMAPS_CONFIG_PATH, DISK_CACHE_PATH
       log_config.py              ← logging setup (JSON in Docker, coloured text locally)
     routers/
@@ -216,7 +216,7 @@ imos-tiler/
     security.md                  ← admin endpoint protection (key + nginx + EC2 security group)
 ```
 
-All three runtime paths are hardcoded constants in `src/app/constants.py` — not env vars:
+All three runtime paths are hardcoded constants in `src/app/config/paths.py` — not env vars:
 
 | Constant                | Value                 | Notes                                                                                     |
 | ----------------------- | --------------------- | ----------------------------------------------------------------------------------------- |
@@ -477,7 +477,7 @@ Everything specific to the `/data_tiles` pipeline that the [coordinate-systems s
 
 This applies to data tiles only — visual tiles use Web Mercator zoom levels and ordinary colourised PNGs (see [§8](#8-visual-tile-internals)).
 
-### 7.1 LOD constants (`constants.py`)
+### 7.1 LOD constants (`config/constants.py`)
 
 The three LOD knobs are bundled into a single frozen-dataclass instance, `LOD = LODConfig()`. They are **not** environment variables — these values are baked into the WebGL shader on the frontend, so changing one without redeploying the frontend silently corrupts the rendering.
 
@@ -1309,7 +1309,7 @@ EOF
 docker-compose up --build
 ```
 
-The schema mirrors the admin-API payload (`ProductPayload` in `routers/admin/products.py`). `chunk_px` and `padding` are optional — omit them to inherit `CHUNK_PX = (240, 192)` and `PADDING = 1` from `constants.py`.
+The schema mirrors the admin-API payload (`ProductPayload` in `routers/admin/products.py`). `chunk_px` and `padding` are optional — omit them to inherit `CHUNK_PX = (240, 192)` and `PADDING = 1` from `config/constants.py`.
 
 ### 13.2 Admin-API flow
 
@@ -1353,7 +1353,7 @@ On deletion:
 
 | Requirement        | Detail                                                                                                                                                                                                  |
 | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Coordinate names   | Must be `lat`/`lon`/`time`, or the uppercase variants `LATITUDE`/`LONGITUDE`/`TIME` (renamed automatically on open). If a store uses different names, add a mapping to `COORD_NAMES` in `constants.py`. |
+| Coordinate names   | Must be `lat`/`lon`/`time`, or the uppercase variants `LATITUDE`/`LONGITUDE`/`TIME` (renamed automatically on open). If a store uses different names, add a mapping to `COORD_NAMES` in `config/constants.py`. |
 | Spatial dimensions | `lat` and `lon` must be present after normalisation — `_open_store` raises `ValueError` with a clear message if not.                                                                                    |
 | CRS                | Coordinates must be geographic degrees (EPSG:4326). The visual renderer guards against projected CRS values; see [§8.1](#81-crs-guard).                                                                 |
 | Variable           | The variable(s) named in `Product.variable` must exist in the store.                                                                                                                                    |
@@ -1574,7 +1574,7 @@ This codebase holds configuration in three places. Both env vars and code consta
 | Layer                                                | What lives here                                                                                          | Change discipline                                                               | Examples                                                                                           |
 | ---------------------------------------------------- | -------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
 | **Env vars** (this section)                          | Operational knobs — perf, resource limits, secrets. Do **not** affect wire format or shader contract.    | Rotate freely at deploy; the value itself doesn't need code review.             | `THREAD_POOL_SIZE`, `SLICE_CACHE_SIZE`, `CACHE_DAYS`, `ADMIN_API_KEY`                              |
-| **Code constants** (`constants.py`)                  | Wire / shader contracts — values that must stay in lockstep with the frontend or with the data encoding. | Change via PR so frontend and server stay in sync; the diff is the audit trail. | `LOD.max_lods`, `LOD.min_coarsest`, `LOD.zoom_thresholds`, `CHUNK_PX`, `PADDING` (global defaults) |
+| **Code constants** (`config/constants.py`)           | Wire / shader contracts — values that must stay in lockstep with the frontend or with the data encoding. | Change via PR so frontend and server stay in sync; the diff is the audit trail. | `LOD.max_lods`, `LOD.min_coarsest`, `LOD.zoom_thresholds`, `CHUNK_PX`, `PADDING` (global defaults) |
 | **Per-product fields** (`Product` dataclass + admin) | Data characteristics that legitimately vary across products.                                             | Set per product via `POST /admin/products`; no code change needed.              | `chunk_px`, `padding`, `variable`, `source_path`                                                   |
 
 **The rule when adding a new tunable**: ask _who needs to be informed when the value changes?_

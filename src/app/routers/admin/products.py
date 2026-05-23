@@ -7,7 +7,7 @@ import anyio
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
-from app.constants import TILE
+from app.config.constants import TILE
 from app.schemas.admin import ProductCreatedResponse
 from app.services.caching.lifecycle import evict_product_cache, prewarm_disk_slices
 from app.services.product.product import Product

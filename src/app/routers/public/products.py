@@ -5,7 +5,7 @@ from fastapi import APIRouter, Header, Path, Query, Response
 from fastapi.openapi.models import Example
 from fastapi.responses import JSONResponse
 
-from app.constants import CACHE_VERSION
+from app.config.constants import CACHE_VERSION
 from app.schemas.products import (
     ManifestResponse,
     PointResponse,

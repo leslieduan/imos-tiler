@@ -21,8 +21,8 @@ import tempfile
 import threading
 from pathlib import Path
 
+from app.config.constants import TILE
 from app.config.paths import PRODUCTS_CONFIG_PATH
-from app.constants import TILE
 from app.services.product.product import Product
 
 logger = logging.getLogger(__name__)

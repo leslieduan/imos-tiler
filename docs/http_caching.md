@@ -186,7 +186,7 @@ frontend appends `?cv=...` to URLs, bumping `CACHE_VERSION` is inert.
 
 ### Server side
 
-- `CACHE_VERSION` lives in `constants.py`. Single source of truth.
+- `CACHE_VERSION` lives in `config/constants.py`. Single source of truth.
 - Published in the `/manifest` response body as `cache_version`.
 - Included in the manifest's ETag fingerprint, so a bump forces clients to
   revalidate `/manifest` and pick up the new value within the 5-minute window.

@@ -11,7 +11,7 @@ from typing import Any
 
 import xarray as xr
 
-from app.constants import LOD
+from app.config.constants import LOD
 from app.services.product.product import Product
 from app.utils.geo import json_safe_float
 

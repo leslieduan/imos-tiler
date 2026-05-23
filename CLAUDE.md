@@ -48,7 +48,7 @@ API dates are **`TILE_TIMEZONE` local time** (default `Australia/Sydney`), not U
 
 ### LOD constants are a server↔shader contract
 
-`LODConfig` in `src/app/constants.py` (`max_lods`, `min_coarsest`, `zoom_thresholds`) is baked into the frontend WebGL shader's texture atlas layout. Changing any of these without a coordinated frontend redeploy silently corrupts rendering — no error, just wrong pixels.
+`LODConfig` in `src/app/config/constants.py` (`max_lods`, `min_coarsest`, `zoom_thresholds`) is baked into the frontend WebGL shader's texture atlas layout. Changing any of these without a coordinated frontend redeploy silently corrupts rendering — no error, just wrong pixels.
 
 ### Background tasks must offload heavy work
 

@@ -20,7 +20,7 @@ import time
 import anyio
 import xarray as xr
 
-from app.constants import COORD_NAMES
+from app.config.constants import COORD_NAMES
 from app.utils.dates import ts_to_local_date
 
 logger = logging.getLogger(__name__)
