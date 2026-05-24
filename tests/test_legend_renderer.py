@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-import app.services.legend_renderer as legend_renderer
+import app.services.colormap.legend as legend_renderer
 
 
 @pytest.fixture(autouse=True)
@@ -85,7 +85,7 @@ def test_different_rescale_produces_different_legend():
 
 def test_categorical_renders_discrete_blocks(monkeypatch):
     """Categorical colormaps should render as equal-width blocks, not a gradient."""
-    import app.services.colormap_config as colormap_config
+    import app.services.colormap.registry as colormap_config
 
     # Register a 3-category colormap inline.
     lut = [[0, 0, 0, 0] for _ in range(256)]
@@ -97,7 +97,7 @@ def test_categorical_renders_discrete_blocks(monkeypatch):
     monkeypatch.setitem(colormap_config._custom_colormap_modes, "_test_cats", "categorical")
 
     # Force LRU caches to refresh against the just-registered colormap.
-    import app.services.colormap_lookup as colormap_lookup
+    import app.services.colormap.resolver as colormap_lookup
 
     colormap_lookup.resolve_colormap.cache_clear()
 
@@ -121,7 +121,7 @@ def test_invalidation_hook_clears_cache():
     assert legend_renderer.render_legend.cache_info().currsize > 0
 
     # Trigger the invalidation chain.
-    import app.services.colormap_config as colormap_config
+    import app.services.colormap.registry as colormap_config
 
     for hook in colormap_config._invalidation_hooks:
         hook()

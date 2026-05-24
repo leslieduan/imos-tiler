@@ -2,9 +2,10 @@ import numpy as np
 import pytest
 import xarray as xr
 
-import app.services.data_renderer as renderer_module
-from app.constants import Product
-from app.services.data_renderer import render_manifest, render_tile
+import app.services.caching.processed_cache as processed_cache_module
+from app.services.product.manifest import render_manifest
+from app.services.product.product import Product
+from app.services.rendering.data_tiles import render_tile
 
 
 def _make_ds(variables: list[str]) -> xr.Dataset:
@@ -43,9 +44,9 @@ UV_PRODUCT = Product(
 
 @pytest.fixture(autouse=True)
 def clear_processed_cache():
-    renderer_module._processed_cache.clear()
+    processed_cache_module._processed_cache.clear()
     yield
-    renderer_module._processed_cache.clear()
+    processed_cache_module._processed_cache.clear()
 
 
 def test_render_tile_scalar_is_valid_png():

@@ -1,7 +1,5 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
 ## Commands
 
 ```bash
@@ -23,13 +21,10 @@ Two tile systems with different coordinate conventions — do not mix them up:
 - **Data tiles** (`/data_tiles`) — Plate Carrée (equirectangular). `z/x/y` = LOD level / chunk col / chunk row. For WebGL shader consumption.
 - **Visual tiles** (`/visual_tiles`) — Web Mercator XYZ, standard MapboxGL/Leaflet convention. Rendered via rio-tiler.
 
-Key modules:
-- `src/app/routers/` — HTTP endpoints; `products.py` is mounted into both `data_tiles` and `visual_tiles` via `include_router`, so every handler there is exposed under both prefixes
-- `src/app/services/loader.py` — Zarr store singleton, L2 in-memory slice cache, L3 disk cache
-- `src/app/services/data_renderer.py` — L1 processed grid cache, PNG encoding (data tiles)
-- `src/app/services/visual_renderer.py` — Web Mercator reprojection, colormap lookup (visual tiles)
-- `src/app/services/product_store.py` / `colormap_store.py` — runtime config persistence
-- `src/app/utils/` — shared helpers: `colors.py`, `dates.py`, `geo.py`
+Non-obvious wiring:
+
+- Routers split into `src/app/routers/public/` and `src/app/routers/admin/`. `public/products.py` is `include_router`'d into both `data_tiles` and `visual_tiles`, so its handlers are exposed under both prefixes.
+- Cache hierarchy in `src/app/services/caching/`: **L1** `processed_cache` (processed grids) → **L2** `slice_cache` (in-memory slices) → **L3** disk (managed via `services/store/registry.py`).
 
 See `docs/technical.md` for full architecture, caching strategy, LOD algorithm, and PNG encoding contract.
 
@@ -45,8 +40,16 @@ API dates are **`TILE_TIMEZONE` local time** (default `Australia/Sydney`), not U
 
 ### LOD constants are a server↔shader contract
 
-`LODConfig` in `src/app/constants.py` (`max_lods`, `min_coarsest`, `zoom_thresholds`) is baked into the frontend WebGL shader's texture atlas layout. Changing any of these without a coordinated frontend redeploy silently corrupts rendering — no error, just wrong pixels.
+`LODConfig` in `src/app/config/constants.py` (`max_lods`, `min_coarsest`, `zoom_thresholds`) is baked into the frontend WebGL shader's texture atlas layout. Changing any of these without a coordinated frontend redeploy silently corrupts rendering — no error, just wrong pixels.
 
 ### Background tasks must offload heavy work
 
 The lifespan in `src/app/main.py` schedules cache prewarm and refresh as `asyncio.create_task`s. Any CPU- or IO-heavy work inside them must go through `asyncio.to_thread`, or the event loop freezes and all in-flight requests stall.
+
+## Testing
+
+- **Bug fixes**: write the failing test first, then fix.
+- **New endpoints / product types**: TDD the request/response contract before implementing.
+- **Refactors / perf**: rely on the existing suite; don't add tests unless behavior changes.
+
+`tests/test_invariants.py` enforces the three invariants above. If one fails, the change needs coordinated review — don't update the test to make it pass.

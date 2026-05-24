@@ -1,6 +1,6 @@
 """Colormap name → LUT resolution for the rendering pipeline.
 
-Distinct from [[colormap_config]]: that module handles persistence and the
+Distinct from [[colormap.registry]]: that module handles persistence and the
 custom registry on disk. This module is the runtime fallback chain used by
 every render call — custom → rio-tiler → matplotlib — plus the LRU caches that
 keep repeat lookups O(1).
@@ -14,12 +14,12 @@ from functools import lru_cache
 
 import numpy as np
 
-from app.services.colormap_config import get_colormap, on_invalidate
+from app.services.colormap.registry import get_colormap, on_invalidate
 
 
-@lru_cache(
-    maxsize=64
-)  # called on every tile render in visual_renderer/visual_tiles, even though render_legend's cache means resolve_colormap is never called for repeat legend requests.
+# LRU because resolve_colormap is called on every visual-tile render; render_legend
+# has its own cache so this LRU is effectively just for the tile path.
+@lru_cache(maxsize=64)
 def resolve_colormap(name: str) -> dict[int, tuple[int, int, int, int]]:
     """Return a rio-tiler colormap dict for the given name.
 

@@ -1,35 +1,28 @@
-"""In-memory slice loading and cross-cutting product cache eviction.
+"""In-memory slice loading (L2).
 
-Three responsibilities:
+Two responsibilities:
   * ``load_slice`` — return a fully-computed 2-D slice for a (store, date,
     variables) tuple. Cached in an LRU (L2); checks the L3 disk cache before
     falling through to S3. Concurrent identical requests share one compute via
     the slice Memoizer.
-  * ``get_available_dates`` / ``get_lod_grids`` — small store-aware accessors
-    used by routers; both touch the store registry on first call.
-  * ``evict_product_cache`` — fan-out eviction across every layer (L2 slices,
-    L1 processed grids, L3 disk dir) when a product is deregistered.
+  * ``evict_slice_cache_for_product`` — narrow L2-only eviction helper used by
+    [[caching.lifecycle.evict_product_cache]] (the cross-layer fan-out).
 
-Long-lived store handles and disk-cache lifecycle live in their own modules
-([[store_registry]], [[disk_cache]]).
+Long-lived store handles, disk IO, and cross-layer lifecycle live in their own
+modules ([[store.registry]], [[caching.disk]], [[caching.lifecycle]]).
 """
 
 import logging
 import os
-import threading
 import time
 
 import pandas as pd
 import xarray as xr
 from cachetools import TTLCache
 
-from app.constants import Product
-from app.services.disk_cache import (
-    disk_cache_path,
-    evict_product_dir,
-    read_slice_from_disk,
-)
-from app.services.store_registry import get_store, store_registry
+from app.services.caching.disk import disk_cache_path, read_slice_from_disk
+from app.services.product.product import Product
+from app.services.store.registry import get_store, store_registry
 from app.utils.memoizer import Memoizer
 
 logger = logging.getLogger(__name__)
@@ -43,36 +36,6 @@ _SLICE_CACHE_TTL = int(os.environ.get("SLICE_CACHE_TTL_SECONDS", 600))
 _SLOW_FETCH_THRESHOLD = float(os.environ.get("SLOW_FETCH_THRESHOLD_SECONDS", 5))
 _slice_cache: TTLCache = TTLCache(maxsize=_SLICE_CACHE_SIZE, ttl=_SLICE_CACHE_TTL)
 _slice_memo: Memoizer = Memoizer(_slice_cache)
-
-# Separate lock for product.lod_grids lazy initialization (unrelated to store state).
-_lod_grids_lock = threading.Lock()
-
-
-def get_lod_grids(product: Product) -> dict[int, tuple[int, int]]:
-    """
-    Ensure product.lod_grids is populated from actual store dimensions, then return it.
-    Writes back to product on first call so subsequent callers find it already set.
-    Double-checked locking: fast path avoids lock overhead on every warm call.
-    """
-    if product.lod_grids:
-        return product.lod_grids
-
-    with _lod_grids_lock:
-        if product.lod_grids:
-            return product.lod_grids
-
-        store = get_store(product.source_path)
-        data_height = store.sizes["lat"]
-        data_width = store.sizes["lon"]
-        product.apply_computed_lod_grids(data_width, data_height)
-
-    return product.lod_grids
-
-
-def get_available_dates(store_url: str) -> list[str]:
-    get_store(store_url)  # ensures the date index for this URL is populated
-    index = store_registry.date_index(store_url)
-    return sorted(index) if index else []
 
 
 def _compute_slice_from_store(store_url: str, date: str, variables: list[str]) -> xr.Dataset:
@@ -163,20 +126,12 @@ def clear_slice_cache() -> int:
     return removed
 
 
-def evict_product_cache(product: Product) -> None:
-    """Remove all in-memory and disk cache entries for a deleted product."""
-    from app.services.data_renderer import evict_processed_cache
+def evict_slice_cache_for_product(product: Product) -> int:
+    """Evict L2 slice cache entries belonging to ``product``. Returns count removed.
 
+    Narrow helper exposed for [[caching.lifecycle.evict_product_cache]] so the
+    cross-layer fan-out can drop L2 entries without reaching into ``_slice_memo``
+    internals.
+    """
     vars_tuple = tuple(sorted(product.variables))
-
-    removed = _slice_memo.evict_matching(
-        lambda k: k[0] == product.source_path and k[2] == vars_tuple
-    )
-    if removed:
-        logger.info(
-            "Memory cache evicted for product",
-            extra={"product_id": product.id, "slices_removed": removed},
-        )
-
-    evict_processed_cache(product)
-    evict_product_dir(product)
+    return _slice_memo.evict_matching(lambda k: k[0] == product.source_path and k[2] == vars_tuple)

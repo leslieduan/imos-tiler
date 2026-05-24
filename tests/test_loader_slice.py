@@ -10,11 +10,12 @@ import pandas as pd
 import pytest
 import xarray as xr
 
-import app.services.disk_cache as disk_cache
-import app.services.loader as loader
-import app.services.store_registry as store_registry_module
-from app.constants import Product
-from app.services.store_registry import store_registry
+import app.services.caching.disk as disk_cache
+import app.services.caching.lifecycle as lifecycle
+import app.services.caching.slice_cache as loader
+import app.services.store.registry as store_registry_module
+from app.services.product.product import Product
+from app.services.store.registry import store_registry
 
 
 @pytest.fixture(autouse=True)
@@ -137,7 +138,7 @@ def test_evict_product_cache_clears_l2_and_disk(monkeypatch, tmp_path):
     disk_cache.write_slice_to_disk(disk_p, ds.isel(time=0))
     assert disk_p.exists()
 
-    loader.evict_product_cache(p)
+    lifecycle.evict_product_cache(p)
 
     # L2 entries for this product must be gone.
     assert not any(k[0] == p.source_path for k in loader._slice_cache)
@@ -154,7 +155,7 @@ def test_evict_product_cache_leaves_other_products_alone(monkeypatch, tmp_path):
     loader.load_slice(p_keep.source_path, "2024-01-16", ["v"])
     loader.load_slice(p_drop.source_path, "2024-01-16", ["v"])
 
-    loader.evict_product_cache(p_drop)
+    lifecycle.evict_product_cache(p_drop)
 
     # keep's entry still in slice cache.
     assert any(k[0] == p_keep.source_path for k in loader._slice_cache)

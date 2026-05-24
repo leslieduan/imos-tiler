@@ -2,9 +2,8 @@ import numpy as np
 import pytest
 import xarray as xr
 
-from app.constants import Product
-from app.services.loader import get_lod_grids
-from app.services.store_registry import _storage_options, get_store, store_registry
+from app.services.product.product import Product, get_lod_grids
+from app.services.store.registry import _storage_options, get_store, store_registry
 
 
 def _make_ds(**dims: int) -> xr.Dataset:

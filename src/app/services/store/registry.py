@@ -20,7 +20,7 @@ import time
 import anyio
 import xarray as xr
 
-from app.constants import COORD_NAMES
+from app.config.constants import COORD_NAMES
 from app.utils.dates import ts_to_local_date
 
 logger = logging.getLogger(__name__)
@@ -28,9 +28,9 @@ logger = logging.getLogger(__name__)
 _STORE_TTL = float(os.environ.get("STORE_TTL_SECONDS", 600))
 
 # Capacity gate for concurrent store opens during prewarm. Bounded to the S3
-# connection ceiling, not CPU — same rationale as _PREWARM_LIMITER in
-# services/disk_cache.py. Runs on the shared anyio pool but a separate budget
-# so a many-product startup can't transiently consume tile-handler slots.
+# connection ceiling, not CPU — same rationale as _PREWARM_SEM in
+# services/caching/lifecycle.py. Runs on the shared anyio pool but a separate
+# budget so a many-product startup can't transiently consume tile-handler slots.
 _STORE_PREWARM_LIMITER = anyio.CapacityLimiter(int(os.environ.get("STORE_PREWARM_WORKERS", 8)))
 
 # Per-syscall timeouts on every S3 connection. Without these, a stuck socket can
@@ -217,6 +217,12 @@ store_registry = StoreRegistry(_STORE_TTL)
 
 def get_store(store_url: str) -> xr.Dataset:
     return store_registry.get(store_url)
+
+
+def get_available_dates(store_url: str) -> list[str]:
+    get_store(store_url)  # ensures the date index for this URL is populated
+    index = store_registry.date_index(store_url)
+    return sorted(index) if index else []
 
 
 async def prewarm_stores(store_urls: list[str]) -> None:

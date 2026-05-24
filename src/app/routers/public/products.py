@@ -5,18 +5,18 @@ from fastapi import APIRouter, Header, Path, Query, Response
 from fastapi.openapi.models import Example
 from fastapi.responses import JSONResponse
 
-from app.constants import CACHE_VERSION, PRODUCTS
+from app.config.constants import CACHE_VERSION
 from app.schemas.products import (
     ManifestResponse,
     PointResponse,
     ProductConfig,
     VariableValue,
 )
-from app.services.loader import get_available_dates
-from app.services.product_config import list_products
+from app.services.product.registry import iter_product_items, list_products
+from app.services.store.registry import get_available_dates
 from app.utils.dates import three_months_ago
 
-from .shared import (
+from ..shared import (
     DATE_EX,
     IMMUTABLE_CACHE_HEADERS,
     PRODUCT_EX,
@@ -92,9 +92,9 @@ def get_products_availability(
         f"from={effective_from}",
         f"to={to_date or ''}",
     ]
-    # Snapshot first: a concurrent admin reload mutating PRODUCTS during iteration
-    # would otherwise raise RuntimeError ("dictionary changed size during iteration").
-    for product_id, product in list(PRODUCTS.items()):
+    # iter_product_items returns a snapshot list so a concurrent admin reload can't
+    # raise RuntimeError ("dictionary changed size during iteration") here.
+    for product_id, product in iter_product_items():
         dates = get_available_dates(product.source_path)
         dates = [d for d in dates if d >= effective_from]
         if to_date:

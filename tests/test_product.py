@@ -1,4 +1,4 @@
-from app.constants import Product
+from app.services.product.product import Product
 
 
 def test_compute_lod_grids_returns_nonempty():

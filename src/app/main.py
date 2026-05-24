@@ -9,34 +9,27 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from starlette.middleware.cors import CORSMiddleware
 
-from app.constants import DISK_CACHE_PATH, PRODUCTS, Product
-from app.log_config import configure_logging
+from app.config.log_config import configure_logging
+from app.config.paths import DISK_CACHE_PATH
 from app.routers.admin import admin_router
-from app.routers.data_tiles import router as data_tiles_router
-from app.routers.visual_tiles import router as visual_tiles_router
-from app.services.colormap_config import load_colormaps
-from app.services.data_renderer import warmup_resample
-from app.services.disk_cache import (
+from app.routers.public.data_tiles import router as data_tiles_router
+from app.routers.public.visual_tiles import router as visual_tiles_router
+from app.services.caching.lifecycle import (
     evict_stale_and_orphans,
     prewarm_disk_slices,
     refresh_disk_cache,
 )
-from app.services.product_config import load_products
-from app.services.store_registry import prewarm_stores
-from app.services.visual_renderer import warmup_visual
+from app.services.colormap.registry import load_colormaps
+from app.services.product.product import Product
+from app.services.product.registry import iter_products, load_products
+from app.services.rendering.kernels import warmup_resample
+from app.services.rendering.visual_tiles import warmup_visual
+from app.services.store.registry import prewarm_stores
 
 load_dotenv()
 configure_logging()
 
 logger = logging.getLogger(__name__)
-
-# Thinking on pixel drill: currently, to make tiles response fast, we cache Zarr slices per date per variable on disk. Because current chuking shape is (5 times, full_grid), this is good for map visualisation.
-# But not good for pixel drill, chuking like (full_time, small_grid) would be good. Even though we have this chunking Zarr, we still will face tricky chanlledge in how to cache the zarr slice on disk. Becasue
-# the cache on disk for tiles visualisation cannot be used for pixel drill, so we might need to cache a duplciate zarr slice on disk for pixel drill, the cache will be like full time per variable. It seems
-# impossible that  we can share the cache on disk between pixel drill and tiles visualisation. Because if tiles use the full time per variable cache, the response will be too slow, it will need read full grid.
-# Also memory cache is enabled for tiles, because lods change, there will be new request to the same slice, so the slice cache can be shared. But for pixel drill, it will be very unlikely that there are requests
-# sharing the same slice. Even if the chunking is (full_time, small_grid), the hit rate of memory cache will still be very low, as there are too many small grids. So it is not worth to enable memory cache for pixel drill.
-# So the cache strategy for pixel drill is only cache on disk, and the cache strategy for tiles visualisation is cache on disk and in memory.
 
 
 async def _startup_cache_sync(products: list[Product]) -> None:
@@ -59,13 +52,11 @@ async def _cache_refresh_loop(interval: int) -> None:
         # Catch broadly: an unhandled exception here would kill the loop for the lifetime
         # of the process, silently disabling all future refreshes.
         try:
-            await refresh_disk_cache(list(PRODUCTS.values()))
+            await refresh_disk_cache(iter_products())
         except Exception:
             logger.exception("Cache refresh cycle failed; will retry next interval")
 
 
-# Lifespan manages server startup and shutdown. Everything before yield runs on startup,
-# everything after yield runs on shutdown. The server handles requests while paused at yield.
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     limiter = anyio.to_thread.current_default_thread_limiter()
@@ -93,9 +84,9 @@ async def lifespan(app: FastAPI):
 
     await anyio.to_thread.run_sync(warmup_resample)
     await anyio.to_thread.run_sync(warmup_visual)
-    store_urls = list({p.source_path for p in PRODUCTS.values()})
+    store_urls = list({p.source_path for p in iter_products()})
     store_prewarm_task = asyncio.create_task(prewarm_stores(store_urls))
-    prewarm_task = asyncio.create_task(_startup_cache_sync(list(PRODUCTS.values())))
+    prewarm_task = asyncio.create_task(_startup_cache_sync(iter_products()))
     interval = int(os.environ.get("CACHE_REFRESH_INTERVAL_SECONDS", 14400))
     logger.info("Cache refresh interval set", extra={"interval_seconds": interval})
     refresh_task = asyncio.create_task(_cache_refresh_loop(interval))
