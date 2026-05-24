@@ -224,12 +224,17 @@ See [`docs/security.md`](docs/security.md) for how admin endpoints are secured i
 ## Development
 
 ```bash
-uv run pytest          # run tests
-uv run pytest --cov    # run tests with coverage report
-uv run ruff check .    # lint
-uv run ruff format .   # format
-uv run mypy src/app tests  # type check
+uv run pytest                       # run tests
+uv run pytest --cov                 # run tests with coverage report (whole project)
+uv run pytest --cov=src/app         # run tests with coverage scoped to app/
+uv run ruff check .                 # lint
+uv run ruff check . --fix           # lint and auto-fix
+uv run ruff format .                # format (writes changes in place)
+uv run ruff format --check .        # verify formatting only (what CI runs)
+uv run mypy .                       # type check (whole project, including scripts/)
 ```
+
+> `ruff format .` rewrites files in place. Use `--check` in scripts/hooks when you only want to verify.
 
 ### Pre-commit hooks
 

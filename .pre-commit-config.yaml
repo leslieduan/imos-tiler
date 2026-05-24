@@ -39,3 +39,11 @@ repos:
         stages: [pre-push]
         pass_filenames: false
         always_run: true
+
+      - id: pytest
+        name: pytest
+        entry: uv run pytest -q
+        language: system
+        stages: [pre-push]
+        pass_filenames: false
+        always_run: true

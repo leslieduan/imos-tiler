@@ -56,7 +56,7 @@ def test_tile_unknown_colormap():
 def test_tile_ok():
     with (
         patch("app.routers.shared.load_slice", return_value=_make_ds()),
-        patch("app.routers.visual_tiles.render_tile", return_value=_PNG),
+        patch("app.routers.public.visual_tiles.render_tile", return_value=_PNG),
     ):
         response = client.get("/visual_tiles/sea_level_anomaly/2024-01-01/5/0/0.png")
     assert response.status_code == 200
@@ -66,7 +66,7 @@ def test_tile_ok():
 def test_tile_ok_with_rescale():
     with (
         patch("app.routers.shared.load_slice", return_value=_make_ds()),
-        patch("app.routers.visual_tiles.render_tile", return_value=_PNG),
+        patch("app.routers.public.visual_tiles.render_tile", return_value=_PNG),
     ):
         response = client.get(
             "/visual_tiles/sea_level_anomaly/2024-01-01/5/0/0.png?rescale=-0.5,0.5"
@@ -78,7 +78,7 @@ def test_tile_ok_with_custom_colormap():
     custom = [(i, 0, 255 - i, 255) for i in range(256)]
     with (
         patch("app.routers.shared.load_slice", return_value=_make_ds()),
-        patch("app.routers.visual_tiles.render_tile", return_value=_PNG),
+        patch("app.routers.public.visual_tiles.render_tile", return_value=_PNG),
         patch("app.services.colormap.registry._custom_colormaps", {"test_ramp": custom}),
     ):
         response = client.get(
@@ -93,7 +93,7 @@ _WEBP = b"RIFF\x00\x00\x00\x00WEBP"
 def test_tile_webp_ok():
     with (
         patch("app.routers.shared.load_slice", return_value=_make_ds()),
-        patch("app.routers.visual_tiles.render_tile", return_value=_WEBP),
+        patch("app.routers.public.visual_tiles.render_tile", return_value=_WEBP),
     ):
         response = client.get("/visual_tiles/sea_level_anomaly/2024-01-01/5/0/0.webp")
     assert response.status_code == 200
@@ -122,7 +122,7 @@ def test_tile_webp_rejected_for_categorical_colormap():
 def test_bbox_png_ok():
     with (
         patch("app.routers.shared.load_slice", return_value=_make_ds()),
-        patch("app.routers.visual_tiles.render_bbox", return_value=_PNG),
+        patch("app.routers.public.visual_tiles.render_bbox", return_value=_PNG),
     ):
         response = client.get("/visual_tiles/sea_level_anomaly/2024-01-01/bbox.png")
     assert response.status_code == 200
@@ -132,7 +132,7 @@ def test_bbox_png_ok():
 def test_bbox_webp_ok():
     with (
         patch("app.routers.shared.load_slice", return_value=_make_ds()),
-        patch("app.routers.visual_tiles.render_bbox", return_value=_WEBP),
+        patch("app.routers.public.visual_tiles.render_bbox", return_value=_WEBP),
     ):
         response = client.get("/visual_tiles/sea_level_anomaly/2024-01-01/bbox.webp")
     assert response.status_code == 200
@@ -150,17 +150,17 @@ _APNG = b"\x89PNG\r\n\x1a\n"
 def test_animation_ok_with_default_bbox():
     with (
         patch(
-            "app.routers.visual_tiles.get_available_dates",
+            "app.routers.public.visual_tiles.get_available_dates",
             return_value=["2024-01-01", "2024-01-02", "2024-01-03"],
         ),
-        patch("app.routers.visual_tiles.load_slice_uncached", return_value=_make_ds()),
-        patch("app.routers.visual_tiles.render_bbox_animation", return_value=_APNG),
+        patch("app.routers.public.visual_tiles.load_slice_uncached", return_value=_make_ds()),
+        patch("app.routers.public.visual_tiles.render_bbox_animation", return_value=_APNG),
         patch(
-            "app.routers.visual_tiles.default_bbox_from_store",
+            "app.routers.public.visual_tiles.default_bbox_from_store",
             return_value=(140.0, -40.0, 150.0, -30.0),
         ),
         patch(
-            "app.routers.visual_tiles.native_resolution_in_bbox",
+            "app.routers.public.visual_tiles.native_resolution_in_bbox",
             return_value=(256, 256),
         ),
     ):
@@ -180,9 +180,9 @@ def test_animation_swapped_dates_rejected():
 
 def test_animation_no_data_in_range_returns_404():
     with (
-        patch("app.routers.visual_tiles.get_available_dates", return_value=["2025-01-01"]),
+        patch("app.routers.public.visual_tiles.get_available_dates", return_value=["2025-01-01"]),
         patch(
-            "app.routers.visual_tiles.default_bbox_from_store",
+            "app.routers.public.visual_tiles.default_bbox_from_store",
             return_value=(140.0, -40.0, 150.0, -30.0),
         ),
     ):
@@ -195,9 +195,9 @@ def test_animation_frame_cap_rejected():
     too_many = [f"2024-01-{d:02d}" for d in range(1, 32)]
     assert len(too_many) == 31
     with (
-        patch("app.routers.visual_tiles.get_available_dates", return_value=too_many),
+        patch("app.routers.public.visual_tiles.get_available_dates", return_value=too_many),
         patch(
-            "app.routers.visual_tiles.default_bbox_from_store",
+            "app.routers.public.visual_tiles.default_bbox_from_store",
             return_value=(140.0, -40.0, 150.0, -30.0),
         ),
     ):
@@ -224,9 +224,9 @@ def test_animation_explicit_bbox_passed_through():
         return _APNG
 
     with (
-        patch("app.routers.visual_tiles.get_available_dates", return_value=["2024-01-01"]),
-        patch("app.routers.visual_tiles.load_slice_uncached", return_value=_make_ds()),
-        patch("app.routers.visual_tiles.render_bbox_animation", side_effect=fake_render),
+        patch("app.routers.public.visual_tiles.get_available_dates", return_value=["2024-01-01"]),
+        patch("app.routers.public.visual_tiles.load_slice_uncached", return_value=_make_ds()),
+        patch("app.routers.public.visual_tiles.render_bbox_animation", side_effect=fake_render),
     ):
         # width+height pinned so the test doesn't trip the native-resolution code path
         # (which would try to open the real store to read lat/lon spacing).
@@ -251,16 +251,16 @@ def _capture_render_dims():
         return _APNG
 
     return patch(
-        "app.routers.visual_tiles.render_bbox_animation", side_effect=fake_render
+        "app.routers.public.visual_tiles.render_bbox_animation", side_effect=fake_render
     ), captured
 
 
 def test_animation_native_resolution_used_when_both_dims_omitted():
     patch_render, captured = _capture_render_dims()
     with (
-        patch("app.routers.visual_tiles.get_available_dates", return_value=["2024-01-01"]),
-        patch("app.routers.visual_tiles.load_slice_uncached", return_value=_make_ds()),
-        patch("app.routers.visual_tiles.native_resolution_in_bbox", return_value=(640, 350)),
+        patch("app.routers.public.visual_tiles.get_available_dates", return_value=["2024-01-01"]),
+        patch("app.routers.public.visual_tiles.load_slice_uncached", return_value=_make_ds()),
+        patch("app.routers.public.visual_tiles.native_resolution_in_bbox", return_value=(640, 350)),
         patch_render,
     ):
         response = client.get(
@@ -275,8 +275,8 @@ def test_animation_height_derived_from_bbox_aspect_when_only_width_given():
     # width=500 → derived height = round(500 / 1.25) = 400
     patch_render, captured = _capture_render_dims()
     with (
-        patch("app.routers.visual_tiles.get_available_dates", return_value=["2024-01-01"]),
-        patch("app.routers.visual_tiles.load_slice_uncached", return_value=_make_ds()),
+        patch("app.routers.public.visual_tiles.get_available_dates", return_value=["2024-01-01"]),
+        patch("app.routers.public.visual_tiles.load_slice_uncached", return_value=_make_ds()),
         patch_render,
     ):
         response = client.get(
@@ -291,8 +291,8 @@ def test_animation_width_derived_from_bbox_aspect_when_only_height_given():
     # Bbox aspect: 50 / 40 = 1.25. height=400 → derived width = round(400 * 1.25) = 500.
     patch_render, captured = _capture_render_dims()
     with (
-        patch("app.routers.visual_tiles.get_available_dates", return_value=["2024-01-01"]),
-        patch("app.routers.visual_tiles.load_slice_uncached", return_value=_make_ds()),
+        patch("app.routers.public.visual_tiles.get_available_dates", return_value=["2024-01-01"]),
+        patch("app.routers.public.visual_tiles.load_slice_uncached", return_value=_make_ds()),
         patch_render,
     ):
         response = client.get(
@@ -309,8 +309,8 @@ def test_animation_derived_dimension_clamped_to_max():
     # height=2000 → derived width = round(2000 * 200) = 400000 → clamped to 2048.
     patch_render, captured = _capture_render_dims()
     with (
-        patch("app.routers.visual_tiles.get_available_dates", return_value=["2024-01-01"]),
-        patch("app.routers.visual_tiles.load_slice_uncached", return_value=_make_ds()),
+        patch("app.routers.public.visual_tiles.get_available_dates", return_value=["2024-01-01"]),
+        patch("app.routers.public.visual_tiles.load_slice_uncached", return_value=_make_ds()),
         patch_render,
     ):
         response = client.get(
