@@ -25,3 +25,14 @@ class PointResponse(BaseModel):
     lat: float
     lon: float
     variables: dict[str, VariableValue]
+
+
+class TimeseriesPoint(BaseModel):
+    date: str
+    variables: dict[str, VariableValue]
+
+
+class TimeseriesResponse(BaseModel):
+    lat: float
+    lon: float
+    series: list[TimeseriesPoint]

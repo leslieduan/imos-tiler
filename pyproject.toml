@@ -13,6 +13,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "cachetools>=7.0.6",
+    "dask[array]>=2026.3.0",
     "fastapi>=0.136.1",
     "lz4>=4.4.5",
     "matplotlib>=3.10.9",

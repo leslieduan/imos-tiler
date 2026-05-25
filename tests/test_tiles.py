@@ -1,6 +1,7 @@
 from unittest.mock import patch
 
 import numpy as np
+import pandas as pd
 import xarray as xr
 from starlette.testclient import TestClient
 
@@ -134,6 +135,69 @@ def test_point_ok():
     body = response.json()
     assert "lat" in body and "lon" in body and "variables" in body
     assert "GSLA" in body["variables"]
+
+
+# --- /{product}/timeseries ---
+
+
+def _fake_point_series():
+    """(actual_lat, actual_lon, dates, point_ds) as returned by load_point_series.
+
+    Third entry is NaN to exercise the NaN→null mapping.
+    """
+    times = pd.to_datetime(["2024-01-01", "2024-01-02", "2024-01-03"])
+    point_ds = xr.Dataset(
+        {
+            "GSLA": xr.DataArray(
+                np.array([0.1, 0.2, np.nan]),
+                dims=["time"],
+                coords={"time": times},
+                attrs={"units": "m"},
+            )
+        }
+    )
+    return (-35.0, 145.0, ["2024-01-01", "2024-01-02", "2024-01-03"], point_ds)
+
+
+def test_timeseries_unknown_product():
+    response = client.get("/data_tiles/nonexistent/timeseries?lat=-35&lon=145&from=2024-01-01")
+    assert response.status_code == 404
+
+
+def test_timeseries_ok():
+    with patch("app.routers.public.products.load_point_series", return_value=_fake_point_series()):
+        response = client.get(
+            "/data_tiles/sea_level_anomaly/timeseries?lat=-35&lon=145&from=2024-01-01&to=2024-01-03"
+        )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["lat"] == -35.0 and body["lon"] == 145.0
+    assert len(body["series"]) == 3
+    first = body["series"][0]
+    assert first["date"] == "2024-01-01"
+    assert first["variables"]["GSLA"]["value"] == 0.1
+    assert first["variables"]["GSLA"]["units"] == "m"
+    # NaN must serialise as null, not NaN (invalid JSON).
+    assert body["series"][2]["variables"]["GSLA"]["value"] is None
+
+
+def test_timeseries_empty_range():
+    with patch(
+        "app.routers.public.products.load_point_series",
+        return_value=(-35.0, 145.0, [], None),
+    ):
+        response = client.get(
+            "/data_tiles/sea_level_anomaly/timeseries?lat=-35&lon=145&from=2099-01-01&to=2099-12-31"
+        )
+    assert response.status_code == 200
+    assert response.json()["series"] == []
+
+
+def test_timeseries_bad_date():
+    response = client.get(
+        "/data_tiles/sea_level_anomaly/timeseries?lat=-35&lon=145&from=not-a-date"
+    )
+    assert response.status_code == 422
 
 
 # --- /manifest (products availability) ---
