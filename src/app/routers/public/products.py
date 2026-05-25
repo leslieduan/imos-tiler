@@ -10,8 +10,11 @@ from app.schemas.products import (
     ManifestResponse,
     PointResponse,
     ProductConfig,
+    TimeseriesPoint,
+    TimeseriesResponse,
     VariableValue,
 )
+from app.services.caching.slice_cache import load_point_series
 from app.services.product.registry import iter_product_items, list_products
 from app.services.store.registry import get_available_dates
 from app.utils.dates import three_months_ago
@@ -142,3 +145,66 @@ def get_point(
         lon=float(point.lon.values),
         variables=values,
     )
+
+
+@router.get(
+    "/{product_id}/timeseries",
+    summary="Point timeseries",
+    description=(
+        "Returns each product variable's value at the nearest grid cell to the given "
+        "lat/lon, for every available date in `[from, to]`. `from` defaults to 3 months "
+        "before today; `to` is unbounded by default."
+    ),
+    response_model=TimeseriesResponse,
+)
+def get_timeseries(
+    response: Response,
+    product_id: str = Path(openapi_examples=PRODUCT_EX),
+    lat: float = Query(..., openapi_examples={"default": Example(value=-33.8)}),
+    lon: float = Query(..., openapi_examples={"default": Example(value=151.2)}),
+    from_date: str | None = Query(
+        None,
+        alias="from",
+        pattern=r"^\d{4}-\d{2}-\d{2}$",
+        description="Start date (inclusive), YYYY-MM-DD. Defaults to 3 months before today.",
+        openapi_examples={"default": Example(value="2024-01-01")},
+    ),
+    to_date: str | None = Query(
+        None,
+        alias="to",
+        pattern=r"^\d{4}-\d{2}-\d{2}$",
+        description="End date (inclusive), YYYY-MM-DD. Defaults to no upper bound.",
+        openapi_examples={"default": Example(value="2024-12-31")},
+    ),
+):
+    product = get_product_or_404(product_id)
+    effective_from = from_date or three_months_ago()
+    validate_date(effective_from)
+    if to_date:
+        validate_date(to_date)
+
+    variables = product.variables
+    actual_lat, actual_lon, dates, point_ds = load_point_series(
+        product.source_path, variables, lat, lon, effective_from, to_date
+    )
+
+    series: list[TimeseriesPoint] = []
+    # point_ds is None if dates is empty; the guard both skips the no-data case and
+    # narrows point_ds to non-None for the type checker.
+    if point_ds is not None:
+        for i, date in enumerate(dates):
+            values: dict[str, VariableValue] = {}
+            for var in variables:
+                v = float(point_ds[var].isel(time=i))
+                values[var] = VariableValue(
+                    value=None if math.isnan(v) else v,
+                    units=point_ds[var].attrs.get("units"),
+                )
+            series.append(TimeseriesPoint(date=date, variables=values))
+
+    # Revalidate (not immutable): an open-ended `to` includes the latest date, so the
+    # series grows as new data lands. Mirror /manifest's freshness window — see
+    # _REVALIDATE_HEADERS — so CloudFront can absorb repeat reads without serving a
+    # response that's permanently frozen at the dates available when first cached.
+    response.headers.update(_REVALIDATE_HEADERS)
+    return TimeseriesResponse(lat=actual_lat, lon=actual_lon, series=series)

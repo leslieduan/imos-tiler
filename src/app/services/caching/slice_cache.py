@@ -109,6 +109,60 @@ def load_slice_uncached(store_url: str, date: str, variables: list[str]) -> xr.D
     return _compute_slice_from_store(store_url, date, variables)
 
 
+def load_point_series(
+    store_url: str,
+    variables: list[str],
+    lat: float,
+    lon: float,
+    from_date: str,
+    to_date: str | None,
+) -> tuple[float, float, list[str], xr.Dataset | None]:
+    """Return a point time series: ``(actual_lat, actual_lon, dates, point_ds)``.
+
+    Selects the grid cell nearest to ``(lat, lon)``, then every timestamp whose
+    *local* date falls in ``[from_date, to_date]`` (inclusive; ``to_date=None``
+    means unbounded), and computes a single 1-D-over-time slice in one shot.
+
+    Dates are resolved through the same store date index as [[load_slice]], so the
+    local-time API invariant holds: ``dates`` are the index's local-date keys, never
+    recomputed from the timestamps here. Selecting the point *before* compute keeps
+    the S3 read to the spatial chunk(s) covering the cell rather than full grids.
+
+    Bypasses the L2/L3 caches entirely — a series can span dates outside the
+    prewarmed window, and per-point reads shouldn't evict another product's hot
+    slices (same rationale as [[load_slice_uncached]]).
+
+    Returns ``dates == []`` and ``point_ds is None`` when no timestamp falls in
+    range (including a store with no time dimension); the nearest cell is still
+    resolved so the caller can report which point it snapped to.
+    """
+    store = get_store(store_url)
+    index = store_registry.date_index(store_url)
+    dates = sorted(d for d in index if d >= from_date and (to_date is None or d <= to_date))
+    point = store[variables].sel(lat=lat, lon=lon, method="nearest")
+    if not dates:
+        return float(point.lat), float(point.lon), [], None
+
+    timestamps = [index[d][0] for d in dates]
+    t0 = time.monotonic()
+    point = point.sel(time=timestamps).compute()
+    elapsed = time.monotonic() - t0
+    logger.debug(
+        "[timing] point series loaded from S3",
+        extra={
+            "store_url": store_url,
+            "points": len(dates),
+            "s3_fetch_ms": round(elapsed * 1000, 1),
+        },
+    )
+    if elapsed > _SLOW_FETCH_THRESHOLD:
+        logger.warning(
+            "Slow S3 fetch",
+            extra={"store_url": store_url, "points": len(dates), "seconds": elapsed},
+        )
+    return float(point.lat), float(point.lon), dates, point
+
+
 def slice_memo_stats() -> dict:
     """In-flight + LRU stats for the L2 slice memoizer. Used by /admin/cache."""
     return {
