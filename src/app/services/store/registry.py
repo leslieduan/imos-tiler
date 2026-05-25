@@ -64,7 +64,15 @@ def _storage_options(store_url: str) -> dict:
 
 
 def _open_store(store_url: str) -> xr.Dataset:
-    ds = xr.open_zarr(store_url, storage_options=_storage_options(store_url))
+    # chunks={} pins dask to the store's *native* on-disk chunking (one dask chunk
+    # per zarr chunk). This is what the no-arg default already resolves to, but we
+    # state it explicitly: the hot path is a single-time .sel(...).compute(), and
+    # native chunks mean that read fetches only the time-block(s) it needs while
+    # still letting dask fetch spatial chunks from S3 in parallel. Do NOT switch to
+    # chunks='auto' — auto merges adjacent time-blocks into one dask chunk, turning
+    # a one-slice read into a multi-slice S3 over-read. (Tests mock open_zarr with
+    # numpy datasets, so such a regression would pass CI but degrade production.)
+    ds = xr.open_zarr(store_url, chunks={}, storage_options=_storage_options(store_url))
     rename = {k: v for k, v in COORD_NAMES.items() if k in ds.dims or k in ds.coords}
     if rename:
         ds = ds.rename(rename)
