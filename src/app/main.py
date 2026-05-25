@@ -4,10 +4,12 @@ import os
 from contextlib import asynccontextmanager
 
 import anyio
+import starlette.middleware.gzip as _gzip_mw
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from starlette.middleware.cors import CORSMiddleware
+from starlette.middleware.gzip import GZipMiddleware
 
 from app.config.log_config import configure_logging
 from app.config.paths import DISK_CACHE_PATH
@@ -115,6 +117,17 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# GZipMiddleware's only content-type control is this module-level deny-list, which by
+# default excludes just text/event-stream. Extend it to skip image/* so already-compressed
+# PNG/GIF/WebP/APNG tiles aren't re-gzipped (pure CPU waste on the hot tile path) — JSON
+# responses (manifest, timeseries, listings) still compress. The deny-list is read by name
+# at request time, so a Starlette upgrade that renames/inlines it would silently disable
+# this exclusion; test_main.py::test_gzip_skips_image_tiles fails loudly if that happens.
+if "image/" not in _gzip_mw.DEFAULT_EXCLUDED_CONTENT_TYPES:
+    # Starlette types the constant as a 1-tuple; widening it trips mypy's assignment check.
+    _gzip_mw.DEFAULT_EXCLUDED_CONTENT_TYPES += ("image/",)  # type: ignore[assignment]
+app.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=5)
 
 app.include_router(data_tiles_router, prefix="/data_tiles", tags=["data_tiles"])
 app.include_router(visual_tiles_router, prefix="/visual_tiles", tags=["visual_tiles"])
