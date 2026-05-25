@@ -325,6 +325,8 @@ The manifest (data-tile pipeline only) is the interface between the server's coo
 
 `z`/`x`/`y` mean different things in each tile API — see [§5](#5-tile-coordinate-systems-and-projection-pipeline).
 
+**Response compression.** A `GZipMiddleware` (`main.py`) gzips responses ≥ 1000 bytes when the client sends `Accept-Encoding: gzip` — this targets the JSON endpoints below (`/manifest`, `/products`, `/timeseries`, tile `manifest.json`), where large date arrays compress well. Image tiles (PNG/GIF/WebP/APNG) are excluded: they are already compressed, so re-gzipping is pure CPU waste on the hot tile path. The exclusion is enforced by appending `image/` to Starlette's `DEFAULT_EXCLUDED_CONTENT_TYPES`; `test_main.py::test_gzip_skips_image_tiles` fails loudly if a Starlette upgrade drops it.
+
 ### 6.1 Shared endpoints (mounted under both `/data_tiles` and `/visual_tiles`)
 
 `routers/public/products.py` is included by both tile routers, so these paths exist under both prefixes:
@@ -333,27 +335,43 @@ The manifest (data-tile pipeline only) is the interface between the server's coo
 GET /{prefix}/products                                          → list all registered products
 GET /{prefix}/manifest?from=YYYY-MM-DD&to=YYYY-MM-DD             → available dates for all products
 GET /{prefix}/{product_id}/{date}/point?lat=&lon=                → variable value at one date
+GET /{prefix}/{product_id}/timeseries?lat=&lon=&from=&to=        → per-date variable values at one point
 ```
 
 `/manifest` parameters:
 
-| Parameter | Default               | Description                       |
-| --------- | --------------------- | --------------------------------- |
-| `from`    | 3 months before today | Start date inclusive (YYYY-MM-DD) |
-| `to`      | unbounded             | End date inclusive (YYYY-MM-DD)   |
+| Parameter | Default                            | Description                       |
+| --------- | ---------------------------------- | --------------------------------- |
+| `from`    | each product's earliest available date | Start date inclusive (YYYY-MM-DD) |
+| `to`      | unbounded                          | End date inclusive (YYYY-MM-DD)   |
 
 ```json
 {
   "products": {
-    "sea_level_anomaly": { "available_dates": ["2024-02-01", "2024-02-02", ...] },
-    "ocean_current":     { "available_dates": ["2024-02-01", ...] }
-  }
+    "sea_level_anomaly": {
+      "available_dates": ["2024-02-01", "2024-02-02", ...],
+      "full_date_range": { "start": "2011-01-01", "end": "2024-02-28" }
+    },
+    "ocean_current": {
+      "available_dates": ["2024-02-01", ...],
+      "full_date_range": { "start": "2011-01-01", "end": "2024-02-28" }
+    }
+  },
+  "cache_version": 1
 }
 ```
+
+`available_dates` is the `from`/`to`-filtered list. `full_date_range` is the product's full dataset bounds (earliest/latest available date) **independent of the filter**, so a client can show the full extent of a product while only listing the slice it asked for. Both `start` and `end` are `null` when the product has no dates at all.
 
 **Performance**: dates are read from the `time` coordinate of each Zarr store — a 1-D array held in the store singleton. No spatial data chunks are touched. Filtering is an in-memory string comparison. Responses are sub-millisecond once the store is warm.
 
 **`/point` cache headers — immutable.** The single-date `/{product_id}/{date}/point` form uses `IMMUTABLE_CACHE_HEADERS` (`max-age=31536000, immutable`) because the date is in the **path** — once that date's data exists, the URL → bytes mapping is pinned forever.
+
+**`/timeseries` — point value per date over a range.** Returns each variable's value at the grid cell nearest `(lat, lon)` for every available date in `[from, to]` (`from` defaults to 3 months before today; `to` unbounded). Unlike `/point`, the date range is in the **query string** and the latest date grows as new data lands, so it uses the same revalidate headers as `/manifest` (`max-age=300, must-revalidate`) rather than immutable caching. This path reads directly from the Zarr store and **bypasses the L2/L3 caches by design** — see [§6.1.1](#611-timeseries-read-cost) before pointing it at multi-year ranges.
+
+#### 6.1.1 Timeseries read cost
+
+A point timeseries is the *orthogonal* access pattern to tiles: one grid cell, many dates. Because the stores are chunked fat-in-space / thin-in-time, Zarr must read a whole spatial slab per time-chunk just to extract one pixel — a 10⁵–10⁶× read amplification that makes long ranges slow (≈22 s for a ~6-year GSLA series, >60 s for a ~14-year satellite series) regardless of dask parallelism or same-region S3 bandwidth. The full analysis, the byte math, and the mitigation options live in [`docs/timeseries_performance.md`](timeseries_performance.md).
 
 ### 6.2 Data tiles (`/data_tiles`)
 
