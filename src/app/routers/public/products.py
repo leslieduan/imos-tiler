@@ -61,7 +61,7 @@ async def get_products():
     summary="Products availability",
     description=(
         "Returns available dates for every product. "
-        "`from` defaults to 3 months before today; `to` is unbounded by default."
+        "`from` defaults to each product's earliest available date; `to` is unbounded by default."
     ),
     # response_model=ManifestResponse,  # can't use this because of the dynamic ETag-based 304 response
     responses={
@@ -74,7 +74,7 @@ def get_products_availability(
         None,
         alias="from",
         pattern=r"^\d{4}-\d{2}-\d{2}$",
-        description="Start date (inclusive), YYYY-MM-DD. Defaults to 3 months before today.",
+        description="Start date (inclusive), YYYY-MM-DD. Defaults to each product's earliest available date.",
         openapi_examples={"default": Example(value="2024-01-01")},
     ),
     to_date: str | None = Query(
@@ -87,22 +87,31 @@ def get_products_availability(
     if_none_match: str | None = Header(None, alias="if-none-match"),
     # Automatically sent by browser using previous ETag from previous response.
 ):
-    effective_from = from_date or three_months_ago()
     products = {}
 
     fingerprint_parts = [
         f"cv={CACHE_VERSION}",
-        f"from={effective_from}",
+        f"from={from_date or ''}",
         f"to={to_date or ''}",
     ]
     # iter_product_items returns a snapshot list so a concurrent admin reload can't
     # raise RuntimeError ("dictionary changed size during iteration") here.
     for product_id, product in iter_product_items():
-        dates = get_available_dates(product.source_path)
-        dates = [d for d in dates if d >= effective_from]
+        all_dates = get_available_dates(product.source_path)
+        # full_date_range is the product's full dataset bounds, independent of from/to;
+        # available_dates below is the from/to-filtered subset.
+        dates = all_dates
+        if from_date:
+            dates = [d for d in dates if d >= from_date]
         if to_date:
             dates = [d for d in dates if d <= to_date]
-        products[product_id] = {"available_dates": dates}
+        products[product_id] = {
+            "available_dates": dates,
+            "full_date_range": {
+                "start": all_dates[0] if all_dates else None,
+                "end": all_dates[-1] if all_dates else None,
+            },
+        }
         fingerprint_parts.append(f"{product_id}:{len(dates)}:{dates[-1] if dates else ''}")
 
     etag = _etag("|".join(fingerprint_parts))

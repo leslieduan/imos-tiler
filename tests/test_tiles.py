@@ -218,7 +218,12 @@ def test_availability_ok():
         response = client.get("/data_tiles/manifest")
     assert response.status_code == 200
     body = response.json()
-    assert body["products"] == {"product_a": {"available_dates": ["2024-06-01", "2024-07-01"]}}
+    assert body["products"] == {
+        "product_a": {
+            "available_dates": ["2024-06-01", "2024-07-01"],
+            "full_date_range": {"start": "2024-06-01", "end": "2024-07-01"},
+        }
+    }
     assert "cache_version" in body
 
 
@@ -233,10 +238,27 @@ def test_availability_date_filters():
     ):
         response = client.get("/data_tiles/manifest?from=2024-06-01&to=2024-09-01")
     assert response.status_code == 200
-    assert response.json()["products"]["product_a"]["available_dates"] == [
-        "2024-06-01",
-        "2024-09-01",
-    ]
+    product = response.json()["products"]["product_a"]
+    assert product["available_dates"] == ["2024-06-01", "2024-09-01"]
+    # full_date_range spans the full dataset, not the from/to-filtered subset.
+    assert product["full_date_range"] == {"start": "2024-01-01", "end": "2024-12-01"}
+
+
+def test_availability_default_from_is_dataset_start():
+    # With no `from`, dates are not clipped to a recent window — even old dates
+    # (well before 3 months ago) are returned, starting from the dataset's earliest.
+    with (
+        patch(
+            "app.routers.public.products.iter_product_items",
+            return_value=list(_FAKE_PRODUCTS.items()),
+        ),
+        patch("app.routers.public.products.get_available_dates", return_value=["2020-01-01"]),
+    ):
+        response = client.get("/data_tiles/manifest")
+    assert response.status_code == 200
+    product = response.json()["products"]["product_a"]
+    assert product["available_dates"] == ["2020-01-01"]
+    assert product["full_date_range"] == {"start": "2020-01-01", "end": "2020-01-01"}
 
 
 def test_availability_no_dates_in_range():
@@ -246,8 +268,10 @@ def test_availability_no_dates_in_range():
             return_value=list(_FAKE_PRODUCTS.items()),
         ),
         patch("app.routers.public.products.get_available_dates", return_value=["2020-01-01"]),
-        patch("app.routers.public.products.three_months_ago", return_value="2024-01-01"),
     ):
-        response = client.get("/data_tiles/manifest")
+        response = client.get("/data_tiles/manifest?to=2019-01-01")
     assert response.status_code == 200
-    assert response.json()["products"]["product_a"]["available_dates"] == []
+    product = response.json()["products"]["product_a"]
+    assert product["available_dates"] == []
+    # No dates in range, but the product still has data, so full_date_range is populated.
+    assert product["full_date_range"] == {"start": "2020-01-01", "end": "2020-01-01"}
