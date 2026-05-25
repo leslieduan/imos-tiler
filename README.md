@@ -100,6 +100,8 @@ Colourised Web Mercator (XYZ) tiles — compatible with MapboxGL `raster` source
 | GET    | `/visual_tiles/colormaps`                                           | All supported colormap names grouped by source (custom, rio-tiler, matplotlib)                                    |
 | GET    | `/visual_tiles/colormaps/{name}/legend`                             | Color legend PNG for a colormap (gradient bar ± tick labels)                                                      |
 
+> The product-metadata endpoints `/products`, `/manifest`, `/{product_id}/{date}/point`, and `/{product_id}/timeseries` listed under **Data tiles** above are also served under `/visual_tiles/…` with identical behaviour — the same router backs both prefixes — so a visual-only client never needs to call `/data_tiles`.
+
 Query parameters for tile requests:
 
 | Parameter  | Default                          | Description                                                                                         |
