@@ -1,7 +1,7 @@
 import hashlib
 import math
 
-from fastapi import APIRouter, Header, Path, Query, Response
+from fastapi import APIRouter, Header, HTTPException, Path, Query, Response
 from fastapi.openapi.models import Example
 from fastapi.responses import JSONResponse
 
@@ -10,13 +10,15 @@ from app.schemas.products import (
     ManifestResponse,
     PointResponse,
     ProductConfig,
+    ProductInspection,
     TimeseriesPoint,
     TimeseriesResponse,
     VariableValue,
 )
 from app.services.caching.slice_cache import load_point_series
+from app.services.product.inspect import inspect_product
 from app.services.product.registry import iter_product_items, list_products
-from app.services.store.registry import get_available_dates
+from app.services.store.registry import get_available_dates, get_store
 from app.utils.dates import three_months_ago
 
 from ..shared import (
@@ -118,6 +120,32 @@ def get_products_availability(
     return _etag_response(
         {"products": products, "cache_version": CACHE_VERSION}, etag, if_none_match
     )
+
+
+@router.get(
+    "/{product_id}/inspect",
+    summary="Inspect product",
+    description=(
+        "Returns the product's underlying Zarr store metadata: dimension sizes, and "
+        "per-variable dtype, shape, native chunk shape, and attributes — plus the "
+        "dataset's global attributes. Useful for debugging and client introspection."
+    ),
+    response_model=ProductInspection,
+)
+def inspect(
+    response: Response,
+    product_id: str = Path(openapi_examples=PRODUCT_EX),
+):
+    product = get_product_or_404(product_id)
+    try:
+        ds = get_store(product.source_path)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    # Revalidate (not immutable): the store grows as new dates land, so dimension
+    # sizes change over time. Mirror /manifest's freshness window — see
+    # _REVALIDATE_HEADERS — rather than freezing the first response forever.
+    response.headers.update(_REVALIDATE_HEADERS)
+    return ProductInspection(**inspect_product(product, ds))
 
 
 @router.get(
