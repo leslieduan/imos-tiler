@@ -200,6 +200,77 @@ def test_timeseries_bad_date():
     assert response.status_code == 422
 
 
+# --- /{product}/inspect ---
+
+
+def _make_store_ds() -> xr.Dataset:
+    """Full store dataset (with a time axis + chunk encoding) as returned by get_store."""
+    lat = np.linspace(-40, -30, 4)
+    lon = np.linspace(140, 150, 4)
+    time = pd.to_datetime(["2024-01-01", "2024-01-02"])
+    da = xr.DataArray(
+        np.random.rand(2, 4, 4).astype("float32"),
+        dims=["time", "lat", "lon"],
+        coords={"time": time, "lat": lat, "lon": lon},
+        attrs={"units": "m", "long_name": "Sea Level Anomaly", "_scale": np.float32(0.5)},
+    )
+    ds = xr.Dataset({"GSLA": da}, attrs={"title": "IMOS SLA", "ranges": np.array([0.0, 1.0])})
+    ds["GSLA"].encoding["chunks"] = (1, 4, 4)
+    return ds
+
+
+def test_inspect_unknown_product():
+    response = client.get("/data_tiles/nonexistent/inspect")
+    assert response.status_code == 404
+
+
+def test_inspect_ok():
+    with patch("app.routers.public.products.get_store", return_value=_make_store_ds()):
+        response = client.get("/data_tiles/sea_level_anomaly/inspect")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["id"] == "sea_level_anomaly"
+    assert body["dimensions"] == {"time": 2, "lat": 4, "lon": 4}
+
+    gsla = body["variables"]["GSLA"]
+    assert gsla["dimensions"] == ["time", "lat", "lon"]
+    assert gsla["shape"] == [2, 4, 4]
+    assert gsla["chunks"] == [1, 4, 4]
+    assert gsla["dtype"] == "float32"
+    assert gsla["units"] == "m"
+    # numpy attrs must round-trip through JSON (np.float32 → float, np.ndarray → list).
+    assert gsla["attributes"]["_scale"] == 0.5
+    assert body["attributes"]["title"] == "IMOS SLA"
+    assert body["attributes"]["ranges"] == [0.0, 1.0]
+
+
+def test_inspect_missing_store():
+    with patch(
+        "app.routers.public.products.get_store",
+        side_effect=FileNotFoundError("store gone"),
+    ):
+        response = client.get("/data_tiles/sea_level_anomaly/inspect")
+    assert response.status_code == 404
+
+
+def test_inspect_multi_variable():
+    # ocean_current declares variables ["UCUR", "VCUR"]; inspect must report exactly
+    # the product's declared variables.
+    lat = np.linspace(-40, -30, 4)
+    lon = np.linspace(140, 150, 4)
+    coords = {"lat": lat, "lon": lon}
+    ds = xr.Dataset(
+        {
+            "UCUR": xr.DataArray(np.random.rand(4, 4), dims=["lat", "lon"], coords=coords),
+            "VCUR": xr.DataArray(np.random.rand(4, 4), dims=["lat", "lon"], coords=coords),
+        }
+    )
+    with patch("app.routers.public.products.get_store", return_value=ds):
+        response = client.get("/data_tiles/ocean_current/inspect")
+    assert response.status_code == 200
+    assert set(response.json()["variables"]) == {"UCUR", "VCUR"}
+
+
 # --- /manifest (products availability) ---
 
 

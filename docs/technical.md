@@ -166,7 +166,7 @@ imos-tiler/
       public/                    ← public tile endpoints (package)
         data_tiles.py            ← /data_tiles — raw value-encoded RGBA tiles for WebGL
         visual_tiles.py          ← /visual_tiles — colourised Web Mercator XYZ tiles + bbox + colormap listing/legend
-        products.py              ← shared: /products, /manifest, /{id}/{date}/point — included by both tile routers
+        products.py              ← shared: /products, /manifest, /{id}/inspect, /{id}/{date}/point — included by both tile routers
       admin/                     ← /admin — product, colormap, and cache-state endpoints (key-protected, package)
         __init__.py              ← assembles admin_router and applies require_admin_key
         auth.py                  ← X-Admin-Key dependency
@@ -187,6 +187,7 @@ imos-tiler/
         product.py               ← Product dataclass + LOD algorithm + get_lod_grids lazy-init
         registry.py              ← PRODUCTS dict + load/register/remove + get_product / iter_products facades
         manifest.py              ← render_manifest() — product introspection (bounds + per-variable ranges + LOD meta)
+        inspect.py               ← inspect_product() — store introspection (dimensions + per-variable dtype/shape/chunks + attrs)
       rendering/
         kernels.py               ← numba JIT bilinear + normalize kernels + xr.interp fallback + warmup_resample
         data_tiles.py            ← render_tile() — chunk extract + RGBA pack + PNG encode (data tiles)
@@ -325,7 +326,7 @@ The manifest (data-tile pipeline only) is the interface between the server's coo
 
 `z`/`x`/`y` mean different things in each tile API — see [§5](#5-tile-coordinate-systems-and-projection-pipeline).
 
-**Response compression.** A `GZipMiddleware` (`main.py`) gzips responses ≥ 1000 bytes when the client sends `Accept-Encoding: gzip` — this targets the JSON endpoints below (`/manifest`, `/products`, `/timeseries`, tile `manifest.json`), where large date arrays compress well. Image tiles (PNG/GIF/WebP/APNG) are excluded: they are already compressed, so re-gzipping is pure CPU waste on the hot tile path. The exclusion is enforced by appending `image/` to Starlette's `DEFAULT_EXCLUDED_CONTENT_TYPES`; `test_main.py::test_gzip_skips_image_tiles` fails loudly if a Starlette upgrade drops it.
+**Response compression.** A `GZipMiddleware` (`main.py`) gzips responses ≥ 1000 bytes when the client sends `Accept-Encoding: gzip` — this targets the JSON endpoints below (`/manifest`, `/products`, `/timeseries`, `/inspect`, tile `manifest.json`), where large date arrays compress well. Image tiles (PNG/GIF/WebP/APNG) are excluded: they are already compressed, so re-gzipping is pure CPU waste on the hot tile path. The exclusion is enforced by appending `image/` to Starlette's `DEFAULT_EXCLUDED_CONTENT_TYPES`; `test_main.py::test_gzip_skips_image_tiles` fails loudly if a Starlette upgrade drops it.
 
 ### 6.1 Shared endpoints (mounted under both `/data_tiles` and `/visual_tiles`)
 
@@ -334,6 +335,7 @@ The manifest (data-tile pipeline only) is the interface between the server's coo
 ```
 GET /{prefix}/products                                          → list all registered products
 GET /{prefix}/manifest?from=YYYY-MM-DD&to=YYYY-MM-DD             → available dates for all products
+GET /{prefix}/{product_id}/inspect                               → store metadata: dimensions, per-variable dtype/shape/chunks, attrs
 GET /{prefix}/{product_id}/{date}/point?lat=&lon=                → variable value at one date
 GET /{prefix}/{product_id}/timeseries?lat=&lon=&from=&to=        → per-date variable values at one point
 ```
@@ -364,6 +366,27 @@ GET /{prefix}/{product_id}/timeseries?lat=&lon=&from=&to=        → per-date va
 `available_dates` is the `from`/`to`-filtered list. `full_date_range` is the product's full dataset bounds (earliest/latest available date) **independent of the filter**, so a client can show the full extent of a product while only listing the slice it asked for. Both `start` and `end` are `null` when the product has no dates at all.
 
 **Performance**: dates are read from the `time` coordinate of each Zarr store — a 1-D array held in the store singleton. No spatial data chunks are touched. Filtering is an in-memory string comparison. Responses are sub-millisecond once the store is warm.
+
+**`/inspect` — store introspection.** Returns a description of the product's underlying Zarr store: dimension sizes, and for each declared variable its `dimensions`, `shape`, `dtype`, native on-disk `chunks`, `units`, and `attributes`, plus the dataset's global `attributes`. Unlike `/manifest` (which describes a single date's slice and serves the WebGL decode contract), `inspect` reads the **full store dataset** via `get_store` — so the reported dimensions include the `time` axis and chunk shapes reflect the on-disk Zarr layout. Only the product's *declared* variables are reported, not every array in the store. Numpy-typed attributes (np scalars/arrays, NaN/inf) are coerced to JSON-safe values. The store grows as new dates land, so it uses the same revalidate headers as `/manifest` (`max-age=300, must-revalidate`).
+
+```json
+{
+  "id": "sea_level_anomaly",
+  "source_path": "s3://imos-data/.../GSLA.zarr",
+  "dimensions": { "time": 4838, "lat": 4500, "lon": 6000 },
+  "variables": {
+    "GSLA": {
+      "dimensions": ["time", "lat", "lon"],
+      "shape": [4838, 4500, 6000],
+      "dtype": "float32",
+      "chunks": [1, 500, 500],
+      "units": "m",
+      "attributes": { "long_name": "Gridded sea level anomaly" }
+    }
+  },
+  "attributes": { "title": "IMOS gridded sea level anomaly" }
+}
+```
 
 **`/point` cache headers — immutable.** The single-date `/{product_id}/{date}/point` form uses `IMMUTABLE_CACHE_HEADERS` (`max-age=31536000, immutable`) because the date is in the **path** — once that date's data exists, the URL → bytes mapping is pinned forever.
 

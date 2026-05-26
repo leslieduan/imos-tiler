@@ -1,4 +1,6 @@
-from pydantic import BaseModel
+from typing import Any
+
+from pydantic import BaseModel, Field
 
 
 class ProductConfig(BaseModel):
@@ -45,3 +47,22 @@ class TimeseriesResponse(BaseModel):
     lat: float
     lon: float
     series: list[TimeseriesPoint]
+
+
+class VariableInspection(BaseModel):
+    dimensions: list[str]
+    shape: list[int]
+    dtype: str
+    # Native Zarr (on-disk) chunk shape in `dimensions` order. None when the store
+    # is unchunked (e.g. a contiguous array, or a numpy-backed dataset in tests).
+    chunks: list[int] | None = None
+    units: str | None = None
+    attributes: dict[str, Any] = Field(default_factory=dict)
+
+
+class ProductInspection(BaseModel):
+    id: str
+    source_path: str
+    dimensions: dict[str, int]
+    variables: dict[str, VariableInspection]
+    attributes: dict[str, Any] = Field(default_factory=dict)
