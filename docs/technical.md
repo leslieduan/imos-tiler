@@ -189,7 +189,7 @@ imos-tiler/
         manifest.py              ← render_manifest() — product introspection (bounds + per-variable ranges + LOD meta)
         inspect.py               ← inspect_product() — store introspection (dimensions + per-variable dtype/shape/chunks + attrs)
       rendering/
-        kernels.py               ← numba JIT bilinear + normalize kernels + xr.interp fallback + warmup_resample
+        kernels.py               ← numba JIT bilinear/nearest resample + normalize kernels + xr.interp fallback + warmup_resample
         data_tiles.py            ← render_tile() — chunk extract + RGBA pack + PNG encode (data tiles)
         visual_tiles.py          ← render_tile / render_bbox / render_bbox_animation — Web Mercator (visual tiles)
       store/
@@ -557,7 +557,7 @@ Products start with `lod_grids={}`. On the first request:
 
 The hot path for every cold-L1 data tile is two CPU-bound steps in `services/rendering/kernels.py` (called from `services/rendering/data_tiles.py`):
 
-1. **Bilinear resample** (`resample_variables_to_grid`) — interpolates the source Zarr slice onto the LOD's `total_w × total_h` grid. Output pixel positions match `np.linspace(0, src-1, total)` on both axes — the same mapping the WebGL shader assumes (see [§5.6](#56-the-manifest-is-the-contract-between-server-and-shader)).
+1. **Resample** (`resample_variables_to_grid`) — maps the source Zarr slice onto the LOD's `total_w × total_h` grid. Output pixel positions match `np.linspace(0, src-1, total)` on both axes — the same mapping the WebGL shader assumes (see [§5.6](#56-the-manifest-is-the-contract-between-server-and-shader)). Continuous variables use **bilinear** interpolation (`_numba_bilinear`); categorical variables (CF `flag_values`) use **nearest-neighbour** (`_numba_nearest`), because bilinear would blend adjacent integer codes into fabricated in-between categories — and coarser LODs compound it. The shader pairs nearest-resampled categorical tiles with the manifest's `flagValues`/`flagMeanings` to do a discrete code→colour lookup instead of a ramp.
 2. **Normalize + ocean mask** (`_numba_normalize_uint32` / `_numba_normalize_uint8`, dispatched via `normalize()`) — clips each variable into its byte-range output and produces the per-pixel valid mask in a single pass.
 
 Both steps are implemented as `@njit`-compiled numba kernels. Switching from `xr.interp` + numpy normalize to the numba kernels was a ~5× speedup on Intel EC2 — see the benchmark below.

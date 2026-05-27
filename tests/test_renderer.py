@@ -6,6 +6,7 @@ import app.services.caching.processed_cache as processed_cache_module
 from app.services.product.manifest import render_manifest
 from app.services.product.product import Product
 from app.services.rendering.data_tiles import render_tile
+from app.services.rendering.kernels import resample_variables_to_grid
 
 
 def _make_ds(variables: list[str]) -> xr.Dataset:
@@ -114,3 +115,36 @@ def test_render_manifest_categorical_omits_misaligned_meanings():
     manifest = render_manifest(CATEGORICAL_PRODUCT, ds)
     assert manifest["flagValues"] == [0, 1, 2, 3, 4]
     assert "flagMeanings" not in manifest
+
+
+# --- resampling: categorical → nearest, continuous → bilinear ---------------
+
+
+def _two_by_two_ds(variable: str, flag_values: list[int] | None) -> xr.Dataset:
+    # Sharp 0/4 checkerboard so blended values (1/2/3) are unmistakable if they appear.
+    arr = np.array([[0.0, 4.0], [4.0, 0.0]], dtype="float32")
+    da = xr.DataArray(arr, dims=["lat", "lon"], coords={"lat": [1.0, 0.0], "lon": [0.0, 1.0]})
+    if flag_values is not None:
+        da.attrs["flag_values"] = flag_values
+    return xr.Dataset({variable: da})
+
+
+def test_resample_categorical_uses_nearest_no_blended_codes():
+    ds = _two_by_two_ds("cat", flag_values=[0, 4])
+    (out,) = resample_variables_to_grid(ds, ["cat"], 8, 8)
+    # Nearest must reproduce only the source codes — never an interpolated 1/2/3.
+    assert set(np.unique(out)).issubset({0.0, 4.0})
+
+
+def test_resample_continuous_uses_bilinear_blends():
+    ds = _two_by_two_ds("cont", flag_values=None)
+    (out,) = resample_variables_to_grid(ds, ["cont"], 8, 8)
+    # Bilinear must produce intermediate values absent from the source set.
+    assert not set(np.unique(out)).issubset({0.0, 4.0})
+
+
+def test_render_tile_categorical_is_valid_png():
+    # End-to-end data-tile render of a categorical product must not crash and
+    # must produce a valid PNG (resample is nearest under the hood).
+    png = render_tile(CATEGORICAL_PRODUCT, _make_categorical_ds, 1, 0, 0, "2024-01-01")
+    assert png[:8] == b"\x89PNG\r\n\x1a\n"
