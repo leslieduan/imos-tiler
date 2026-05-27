@@ -114,6 +114,30 @@ def test_manifest_ok():
     assert response.json() == payload
 
 
+def test_manifest_categorical_flag_fields_pass_through():
+    # The response schema must surface flagValues/flagMeanings; otherwise Pydantic
+    # silently drops them as unknown keys.
+    payload = {
+        "bounds": {"lonMin": 110.0, "lonMax": 160.0, "latMin": -50.0, "latMax": -10.0},
+        "valueRange": [0.0, 4.0],
+        "flagValues": [0, 1, 2, 3, 4],
+        "flagMeanings": ["none", "moderate", "strong", "severe", "extreme"],
+        "lods": {
+            "1": {"grid": [2, 2], "chunkPx": [256, 256], "storedPx": [258, 258], "padding": 1}
+        },
+    }
+    with (
+        patch("app.routers.public.data_tiles.get_lod_grids", return_value=_LOD_GRIDS),
+        patch("app.routers.shared.load_slice", return_value=_make_ds()),
+        patch("app.routers.public.data_tiles.render_manifest", return_value=payload),
+    ):
+        response = client.get("/data_tiles/sea_level_anomaly/2024-01-01/manifest.json")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["flagValues"] == [0, 1, 2, 3, 4]
+    assert body["flagMeanings"] == ["none", "moderate", "strong", "severe", "extreme"]
+
+
 # --- /{product}/{date}/point ---
 
 

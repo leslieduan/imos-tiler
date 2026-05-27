@@ -1,13 +1,9 @@
-from contextlib import contextmanager
 from unittest.mock import patch
 
-import numpy as np
 import pytest
-import xarray as xr
 from starlette.testclient import TestClient
 
 from app.main import app
-from app.services.product.product import Product
 
 client = TestClient(app, raise_server_exceptions=True)
 
@@ -18,29 +14,6 @@ _HEADERS = {"X-Admin-Key": _ADMIN_KEY}
 @pytest.fixture(autouse=True)
 def admin_key_env(monkeypatch):
     monkeypatch.setenv("ADMIN_API_KEY", _ADMIN_KEY)
-
-
-@contextmanager
-def _bound_product(flag_values: list[int] | None, variable: str | list[str] = "lc"):
-    """Patch the categorical colormap route's product/store lookups.
-
-    A categorical colormap is validated against a product's flag_values at
-    registration. flag_values=None mocks a continuous variable (no flag_values).
-    """
-    da = xr.DataArray(
-        np.zeros((2, 2), dtype="float32"),
-        dims=["lat", "lon"],
-        coords={"lat": [0, 1], "lon": [0, 1]},
-    )
-    if flag_values is not None:
-        da.attrs["flag_values"] = flag_values
-    store = xr.Dataset({"lc": da})
-    product = Product(id="land", source_path="s3://test/land.zarr", variable=variable)
-    with (
-        patch("app.routers.admin.colormaps.get_product", return_value=product),
-        patch("app.routers.admin.colormaps.get_store", return_value=store),
-    ):
-        yield
 
 
 # ---------------------------------------------------------------------------
@@ -95,87 +68,48 @@ def test_add_ramp_colormap_mode_defaults_to_ramp():
 
 
 def test_add_categorical_colormap():
+    # No product binding at registration — the colormap is matched against a
+    # product's flag_values at render time, not here.
     payload = {
         "name": "land_cover",
         "mode": "categorical",
-        "product_id": "land",
         "entries": {"1": "#ffff00", "2": "#0000ff", "3": "#ff0000", "4": "#000000"},
     }
-    with (
-        patch("app.routers.admin.colormaps.register_colormap") as mock_reg,
-        _bound_product([1, 2, 3, 4]),
-    ):
+    with patch("app.routers.admin.colormaps.register_colormap") as mock_reg:
         response = client.post("/admin/colormaps", json=payload, headers=_HEADERS)
     assert response.status_code == 201
     assert response.json() == {"name": "land_cover"}
     _, lut, mode = mock_reg.call_args.args
     assert mode == "categorical"
     assert len(lut) == 256
+    # Sorted category values are forwarded for persistence (used in the request-time match).
+    assert mock_reg.call_args.kwargs["values"] == [1, 2, 3, 4]
 
 
 def test_add_categorical_colormap_rgba_values():
     payload = {
         "name": "land_cover_rgba",
         "mode": "categorical",
-        "product_id": "land",
         "entries": {"1": [255, 255, 0, 255], "2": [0, 0, 255, 255]},
     }
-    with (
-        patch("app.routers.admin.colormaps.register_colormap") as mock_reg,
-        _bound_product([1, 2]),
-    ):
+    with patch("app.routers.admin.colormaps.register_colormap") as mock_reg:
         response = client.post("/admin/colormaps", json=payload, headers=_HEADERS)
     assert response.status_code == 201
     mock_reg.assert_called_once()
+    assert mock_reg.call_args.kwargs["values"] == [1, 2]
 
 
-def test_add_categorical_colormap_requires_product_id():
+def test_add_categorical_colormap_no_product_id_required():
+    # product_id is gone: a categorical colormap registers standalone.
     payload = {
         "name": "no_product",
         "mode": "categorical",
         "entries": {"1": "#ffff00", "2": "#0000ff"},
     }
-    response = client.post("/admin/colormaps", json=payload, headers=_HEADERS)
-    assert response.status_code == 422
-
-
-def test_add_categorical_colormap_value_mismatch_returns_400():
-    # Colormap covers {1,2,3} but the product's flag_values are {1,2,3,4}.
-    payload = {
-        "name": "mismatch",
-        "mode": "categorical",
-        "product_id": "land",
-        "entries": {"1": "#ffff00", "2": "#0000ff", "3": "#ff0000"},
-    }
-    with patch("app.routers.admin.colormaps.register_colormap"), _bound_product([1, 2, 3, 4]):
+    with patch("app.routers.admin.colormaps.register_colormap") as mock_reg:
         response = client.post("/admin/colormaps", json=payload, headers=_HEADERS)
-    assert response.status_code == 400
-    assert "flag_values" in response.json()["detail"]
-
-
-def test_add_categorical_colormap_unknown_product_returns_404():
-    payload = {
-        "name": "orphan",
-        "mode": "categorical",
-        "product_id": "nope",
-        "entries": {"1": "#ffff00", "2": "#0000ff"},
-    }
-    with patch("app.routers.admin.colormaps.get_product", return_value=None):
-        response = client.post("/admin/colormaps", json=payload, headers=_HEADERS)
-    assert response.status_code == 404
-
-
-def test_add_categorical_colormap_continuous_product_returns_400():
-    payload = {
-        "name": "on_continuous",
-        "mode": "categorical",
-        "product_id": "land",
-        "entries": {"1": "#ffff00", "2": "#0000ff"},
-    }
-    with patch("app.routers.admin.colormaps.register_colormap"), _bound_product(None):
-        response = client.post("/admin/colormaps", json=payload, headers=_HEADERS)
-    assert response.status_code == 400
-    assert "not categorical" in response.json()["detail"].lower()
+    assert response.status_code == 201
+    assert mock_reg.call_args.kwargs["values"] == [1, 2]
 
 
 # ---------------------------------------------------------------------------

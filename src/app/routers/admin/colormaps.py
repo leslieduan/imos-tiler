@@ -7,8 +7,6 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.schemas.admin import ColormapCreatedResponse
 from app.services.colormap.registry import ColormapMode, register_colormap, remove_colormap
-from app.services.product.registry import get_product
-from app.services.store.registry import get_store
 from app.utils.colors import build_categorical_lut, interpolate_colormap, parse_color
 
 logger = logging.getLogger(__name__)
@@ -24,10 +22,9 @@ class ColormapPayload(BaseModel):
         description=(
             "'ramp': evenly-spaced stops, linearly interpolated to 256 LUT entries. Dataset-agnostic. "
             "'categorical': discrete integer value→color mapping (equivalent to CF flag_values+flag_colors). "
-            "Dataset-specific — the entry keys must exactly match the integer values present in the dataset. "
-            "Applying a categorical colormap to a dataset with different values renders without error "
-            "but produces silently wrong colours. Name categorical colormaps after the dataset or variable "
-            "they describe to make the coupling explicit."
+            "Dataset-specific — its category values are checked against the product variable's CF "
+            "flag_values when a tile is rendered, and a mismatch is rejected. Name categorical colormaps "
+            "after the dataset or variable they describe to make the coupling explicit."
         ),
     )
     entries: list[list[int]] = Field(
@@ -39,15 +36,10 @@ class ColormapPayload(BaseModel):
             "Keys must match the exact integer values in the target dataset variable."
         ),
     )
-    product_id: str | None = Field(
-        default=None,
-        description=(
-            "Required for categorical mode: the product this colormap describes. The "
-            "category values must exactly match that product variable's CF flag_values."
-        ),
-    )
-    # Derived in build_lut from the categorical entry keys, so the route handler can
-    # validate them against the product's flag_values. Empty for ramp mode.
+    # Derived in build_lut from the categorical entry keys and persisted with the
+    # colormap, so request handlers can match it against a product's flag_values
+    # at render time (categorical colormaps are not bound to a product at
+    # registration). Empty for ramp mode.
     category_values: list[int] = Field(default_factory=list)
 
     @field_validator("name")
@@ -100,54 +92,8 @@ class ColormapPayload(BaseModel):
             normalized.append(rgba)
         return normalized if len(normalized) == 256 else interpolate_colormap(normalized)
 
-    @model_validator(mode="after")
-    def require_product_for_categorical(self) -> "ColormapPayload":
-        if self.mode == "categorical" and not self.product_id:
-            raise ValueError("product_id is required for categorical colormaps")
-        return self
-
     def to_tuples(self) -> list[tuple[int, int, int, int]]:
         return [(rgba[0], rgba[1], rgba[2], rgba[3]) for rgba in self.entries]
-
-
-def _validate_categorical_matches_product(payload: ColormapPayload) -> None:
-    """A categorical colormap is dataset-specific: its category values must exactly
-    match the bound product variable's CF flag_values, or the discrete render LUT
-    would map colours to the wrong codes (silently). Raises HTTPException on mismatch.
-    """
-    product = get_product(payload.product_id or "")
-    if product is None:
-        raise HTTPException(status_code=404, detail=f"Unknown product: {payload.product_id}")
-    if isinstance(product.variable, list):
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Product '{product.id}' has multiple variables; categorical colormaps "
-                f"target single-variable products only."
-            ),
-        )
-    try:
-        attrs = get_store(product.source_path)[product.variable].attrs
-    except FileNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
-    flag_values = attrs.get("flag_values")
-    if flag_values is None:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Product '{product.id}' variable '{product.variable}' is not categorical "
-                f"(no flag_values); a categorical colormap cannot be bound to it."
-            ),
-        )
-    expected = sorted(int(v) for v in flag_values)
-    if payload.category_values != expected:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Categorical colormap values {payload.category_values} do not match "
-                f"product '{product.id}' flag_values {expected}."
-            ),
-        )
 
 
 @router.post(
@@ -158,10 +104,10 @@ def _validate_categorical_matches_product(payload: ColormapPayload) -> None:
     response_model=ColormapCreatedResponse,
 )
 def add_colormap(payload: ColormapPayload):
-    if payload.mode == "categorical":
-        _validate_categorical_matches_product(payload)
     try:
-        register_colormap(payload.name, payload.to_tuples(), payload.mode)
+        register_colormap(
+            payload.name, payload.to_tuples(), payload.mode, values=payload.category_values
+        )
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
     except Exception as e:

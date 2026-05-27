@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 from unittest.mock import patch
 
 import numpy as np
@@ -6,10 +7,24 @@ import xarray as xr
 from starlette.testclient import TestClient
 
 from app.main import app
+from app.utils.colors import build_categorical_lut
 
 client = TestClient(app, raise_server_exceptions=True)
 
 _PNG = b"\x89PNG\r\n\x1a\n"
+
+
+@contextmanager
+def _registered_categorical(name: str, values: list[int]):
+    """Patch a categorical colormap with the given category values into the registry."""
+    cats = {v: [v, v, v, 0 if v == 0 else 255] for v in values}
+    lut = [tuple(c) for c in build_categorical_lut(cats, (float(min(values)), float(max(values))))]
+    with (
+        patch("app.services.colormap.registry._custom_colormaps", {name: lut}),
+        patch("app.services.colormap.registry._custom_colormap_modes", {name: "categorical"}),
+        patch("app.services.colormap.registry._custom_colormap_values", {name: sorted(values)}),
+    ):
+        yield
 
 
 def _make_ds() -> xr.Dataset:
@@ -114,7 +129,7 @@ def test_tile_webp_rejected_for_categorical_colormap():
         patch("app.services.colormap.registry._custom_colormap_modes", {"cat_map": "categorical"}),
     ):
         response = client.get(
-            "/visual_tiles/sea_level_anomaly/2024-01-01/5/0/0.webp?colormap=cat_map&rescale=1,4"
+            "/visual_tiles/sea_level_anomaly/2024-01-01/5/0/0.webp?colormap=cat_map"
         )
     assert response.status_code == 400
     assert "categorical" in response.json()["detail"].lower()
@@ -197,6 +212,69 @@ def test_categorical_tile_rejects_continuous_colormap(mcs_product):
         response = client.get("/visual_tiles/mcs/2024-01-01/0/0/0.png?colormap=plasma")
     assert response.status_code == 400
     assert "categorical" in response.json()["detail"].lower()
+
+
+def test_categorical_tile_matching_colormap_ok(mcs_product):
+    # Colormap values match the product's flag_values [0,1,2,3,4] → accepted.
+    # No rescale: categorical rendering is value-indexed and never consults it.
+    with (
+        _registered_categorical("mcs_match", [0, 1, 2, 3, 4]),
+        patch("app.routers.shared.get_store", return_value=_make_categorical_ds()),
+        patch("app.routers.shared.load_slice", return_value=_make_categorical_ds()),
+        patch("app.routers.public.visual_tiles.render_tile", return_value=_PNG),
+    ):
+        response = client.get("/visual_tiles/mcs/2024-01-01/0/0/0.png?colormap=mcs_match")
+    assert response.status_code == 200
+
+
+def test_categorical_tile_mismatched_colormap_rejected(mcs_product):
+    # Colormap covers {1,2,3} but the product's flag_values are {0,1,2,3,4}.
+    with (
+        _registered_categorical("mcs_tile_bad", [1, 2, 3]),
+        patch("app.routers.shared.get_store", return_value=_make_categorical_ds()),
+    ):
+        response = client.get("/visual_tiles/mcs/2024-01-01/0/0/0.png?colormap=mcs_tile_bad")
+    assert response.status_code == 400
+    assert "flag_values" in response.json()["detail"]
+
+
+def test_categorical_colormap_on_continuous_variable_rejected():
+    # A categorical colormap may only be applied to a categorical variable;
+    # sea_level_anomaly (GSLA) is continuous.
+    with (
+        _registered_categorical("cont_bad", [1, 2, 3, 4]),
+        patch("app.routers.shared.get_store", return_value=_make_ds()),
+    ):
+        response = client.get(
+            "/visual_tiles/sea_level_anomaly/2024-01-01/0/0/0.png?colormap=cont_bad"
+        )
+    assert response.status_code == 400
+    assert "continuous" in response.json()["detail"].lower()
+
+
+def test_categorical_bbox_mismatched_colormap_rejected(mcs_product):
+    with (
+        _registered_categorical("mcs_bbox_bad", [1, 2, 3]),
+        patch("app.routers.shared.get_store", return_value=_make_categorical_ds()),
+    ):
+        response = client.get("/visual_tiles/mcs/2024-01-01/bbox.png?colormap=mcs_bbox_bad")
+    assert response.status_code == 400
+    assert "flag_values" in response.json()["detail"]
+
+
+def test_categorical_animation_mismatched_colormap_rejected(mcs_product):
+    # Mismatch is caught before the per-frame fan-out, so get_available_dates is
+    # never reached and need not be patched.
+    with (
+        _registered_categorical("mcs_anim_bad", [1, 2, 3]),
+        patch("app.routers.shared.get_store", return_value=_make_categorical_ds()),
+    ):
+        response = client.get(
+            "/visual_tiles/mcs/2024-01-01/2024-01-03/animation.apng"
+            "?bbox=140,-40,150,-30&colormap=mcs_anim_bad"
+        )
+    assert response.status_code == 400
+    assert "flag_values" in response.json()["detail"]
 
 
 def test_categorical_legend_json(mcs_product):

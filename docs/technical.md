@@ -318,7 +318,10 @@ The manifest (data-tile pipeline only) is the interface between the server's coo
 | `lods[n].grid`                             | `u_lod_grids`               | cols × rows per LOD for chunk lookup              |
 | `valueRange`                               | `u_value_range`             | decode uint24 back to raw value (scalar products) |
 | `uRange` / `vRange`                        | `u_u_range` / `u_v_range`   | decode U/V bytes back to raw values (UV products) |
+| `flagValues` / `flagMeanings`              | —                           | discrete codes + labels (categorical variables)   |
 | `lods[n].chunkPx` / `storedPx` / `padding` | `u_uv_scale`, `u_uv_offset` | skip padding border in atlas UV                   |
+
+For a **categorical** variable (one declaring CF `flag_values`), the manifest additionally carries `flagValues` (the discrete integer codes) and, when present and aligned 1:1, `flagMeanings` (their labels). `valueRange` is still emitted. These let a client decode and label raw categorical tiles without a second request.
 
 ---
 
@@ -463,7 +466,7 @@ GET /visual_tiles/{product_id}/{from_date}/{to_date}/animation.{ext}
 | `bbox`      | dataset's native extent               | `minx,miny,maxx,maxy` in the CRS specified by `crs`. When omitted, the dataset's lat/lon bounds are used (clamped to ±180° lon for antimeridian-straddling grids; pass `bbox` explicitly to render the slice past 180°). |
 | `width`     | _(see "Resolution defaulting" below)_ | Output frame width in pixels (1–2048).                                                                                                                                                                                   |
 | `height`    | _(see "Resolution defaulting" below)_ | Output frame height in pixels (1–2048).                                                                                                                                                                                  |
-| `colormap`  | `viridis`                             | Colormap name. Categorical colormaps require `rescale`; animated WebP is rejected for categorical (use `.apng` or `.gif`).                                                                                               |
+| `colormap`  | `viridis`                             | Colormap name. A categorical colormap may only be applied to a categorical variable (one with CF flag_values) and is rejected as animated WebP (use `.apng` or `.gif`).                                                  |
 | `rescale`   | union of all frames                   | `min,max`. The default spans the union of every requested date so the colour ramp is stable frame-to-frame; auto-ranging per frame would flicker.                                                                        |
 | `crs`       | `EPSG:4326`                           | CRS of the explicit `bbox`. The default bbox is always returned in EPSG:4326 regardless of `crs`.                                                                                                                        |
 | `duration`  | `200`                                 | Milliseconds per frame (10–5000).                                                                                                                                                                                        |
@@ -705,17 +708,22 @@ _Categorical example_ — discrete class values 1–4:
 }
 ```
 
-For categorical colormaps, `rescale=min,max` is **required** at render time and must match the range of the integer keys (e.g. `?rescale=1,4`). Omitting `rescale` with a categorical colormap returns `400 Bad Request`. This is enforced because the renderer auto-rescales to the per-tile data range when `rescale` is absent, which would corrupt the LUT slot mapping.
+Categorical colormaps ignore `rescale`. They render only through the discrete, value-indexed path (nearest-neighbour resampling, a LUT keyed by the raw integer code), which is reached only for categorical variables — so the integer code maps straight to a colour with no scaling involved. (`rescale` is still honoured for continuous variables with a ramp colormap.)
 
 The data range for a categorical colormap is inferred from the key range (`min(keys)` → `max(keys)`) at registration time and used to place each value in the LUT. Values not covered by any key render as fully transparent.
 
 **Categorical colormaps are dataset-specific.** A categorical colormap is tightly coupled to a specific variable's integer encoding — equivalent to the CF convention `flag_values` + `flag_colors` pair that ncWMS reads from dataset attributes. The `entries` keys must exactly match the discrete integer values that appear in the dataset.
 
-The server does **not** validate this coupling. The colormap and product are registered independently, so applying a categorical colormap to a dataset with a different value encoding will render without error but produce silently wrong colours. For example, a colormap registered with keys `{1, 2, 3, 4}` applied to a dataset whose actual values are `{0, 1, 2, 3}` will shift every colour by one slot.
+Registration does **not** bind the colormap to a product — a categorical colormap registers standalone, and its sorted category values are persisted alongside the LUT. The coupling is instead checked at **render time** (tile / bbox / animation), where a categorical colormap is rejected with `400 Bad Request` unless:
+
+- the target variable is itself categorical (has CF `flag_values`) — applying a categorical colormap to a *continuous* variable is rejected, since it would otherwise fall through to the scale-dependent ramp path; and
+- the colormap's category values exactly equal the variable's `flag_values` — e.g. a colormap with keys `{1, 2, 3, 4}` on a variable whose `flag_values` are `{0, 1, 2, 3, 4}` is rejected rather than silently shifting every colour by one slot.
+
+(The converse — a *continuous* colormap on a categorical variable — is rejected by the renderer's own guard.)
 
 Practical rules:
 
-- One categorical colormap = one dataset variable encoding. Do not reuse a categorical colormap across products unless they share the exact same integer values.
+- One categorical colormap = one dataset variable encoding. A categorical colormap may be reused across products only if they share the exact same integer values; otherwise the request is rejected at render time.
 - Name categorical colormaps after the dataset or variable they describe (e.g. `land_cover_classes`, `ocean_current_flag`) to make the coupling explicit.
 - Ramp colormaps are dataset-agnostic; categorical colormaps are not.
 

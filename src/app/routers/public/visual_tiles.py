@@ -37,8 +37,8 @@ from ..shared import (
     get_product_or_404,
     load_slice_or_404,
     parse_rescale,
+    reject_categorical_colormap_mismatch,
     reject_webp_for_categorical,
-    require_rescale_if_categorical,
     resolve_colormap_or_error,
     single_variable_or_400,
     validate_date,
@@ -224,8 +224,8 @@ def get_tile(
         )
 
     rescale_range = parse_rescale(rescale)
-    require_rescale_if_categorical(colormap_name, rescale_range)
     reject_webp_for_categorical(colormap_name, ext)
+    reject_categorical_colormap_mismatch(colormap_name, product, variable)
 
     key = (product.source_path, date, variable, z, x, y, colormap_name, rescale_range, ext)
 
@@ -345,8 +345,8 @@ def get_bbox(
     bbox_tuple, crs = _parse_bbox_and_crs(bbox, crs, product.source_path)
 
     rescale_range = parse_rescale(rescale)
-    require_rescale_if_categorical(colormap_name, rescale_range)
     reject_webp_for_categorical(colormap_name, ext)
+    reject_categorical_colormap_mismatch(colormap_name, product, variable)
 
     key = (
         product.source_path,
@@ -471,8 +471,11 @@ async def get_animation(
     )
 
     rescale_range = parse_rescale(rescale)
-    require_rescale_if_categorical(colormap_name, rescale_range)
     reject_webp_for_categorical(colormap_name, ext, animated=True)
+    # Offloaded like the other store reads here: get_store can block on cold open_zarr.
+    await anyio.to_thread.run_sync(
+        reject_categorical_colormap_mismatch, colormap_name, product, variable
+    )
 
     available = await anyio.to_thread.run_sync(get_available_dates, product.source_path)
     if not available:

@@ -82,6 +82,22 @@ class CategoricalScheme:
         ]
 
 
+def parse_flag_values_and_meanings(
+    attrs: Mapping[str, Any],
+) -> tuple[tuple[int, ...], tuple[str, ...] | None]:
+    """Return ``(values, labels)`` straight from a categorical variable's attrs.
+
+    ``values`` are the CF ``flag_values`` coerced to ints; ``labels`` are the
+    matching ``flag_meanings`` aligned 1:1, or None when absent or misaligned.
+    Callers must gate on :func:`is_categorical_variable` first. Colour-free, so
+    the manifest can surface the raw categories without touching the colormap
+    registry.
+    """
+    values = tuple(_as_int_list(attrs.get("flag_values")))
+    labels = _parse_meanings(attrs.get("flag_meanings"), len(values))
+    return values, labels
+
+
 def resolve_scheme(attrs: Mapping[str, Any], colormap_name: str | None) -> CategoricalScheme:
     """Build a scheme for a categorical variable's attrs.
 
@@ -89,8 +105,7 @@ def resolve_scheme(attrs: Mapping[str, Any], colormap_name: str | None) -> Categ
     :func:`is_categorical_variable` first. Values and labels come from the data;
     colours follow the precedence documented in the module docstring.
     """
-    values = tuple(_as_int_list(attrs.get("flag_values")))
-    labels = _parse_meanings(attrs.get("flag_meanings"), len(values))
+    values, labels = parse_flag_values_and_meanings(attrs)
     colors = _resolve_colors(values, attrs, colormap_name)
     return CategoricalScheme(values=values, colors=colors, labels=labels)
 
@@ -102,9 +117,11 @@ def _resolve_colors(
 ) -> tuple[RGBA, ...]:
     n = len(values)
 
-    # Rule 1 (precedence) — explicit categorical colormap param wins. Registration
-    # guarantees its category values match the product's flag_values, so we read
-    # its colour at each value's slot directly.
+    # Rule 1 (precedence) — explicit categorical colormap param wins. Callers
+    # reject a categorical colormap whose values don't match the product's
+    # flag_values at request time (see [[routers.shared]]
+    # reject_categorical_colormap_mismatch), so by here the values align and we
+    # read its colour at each value's slot directly.
     if colormap_name and is_categorical(colormap_name):
         explicit = _registered_categorical_colors(colormap_name, values)
         if explicit:
@@ -125,9 +142,9 @@ def _registered_categorical_colors(name: str, values: tuple[int, ...]) -> list[R
     """Colour per category value from a registered categorical colormap's 256-LUT.
 
     Categorical colormaps are stored with each value's colour at the slot
-    ``categorical_slot(value, min, max)`` (see [[utils.colors]]). Registration
-    enforces that the colormap's values match the product's flag_values, so
-    indexing by that slot recovers the right colour for every value — including
+    ``categorical_slot(value, min, max)`` (see [[utils.colors]]). The request-time
+    match check enforces that the colormap's values equal the product's flag_values,
+    so indexing by that slot recovers the right colour for every value — including
     transparent ones, which a scan for "non-empty entries" would drop.
     """
     lut = get_colormap(name)

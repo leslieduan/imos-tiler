@@ -74,3 +74,43 @@ def test_render_manifest_uv_shape():
     manifest = render_manifest(UV_PRODUCT, _make_ds(["u", "v"]))
     assert set(manifest) >= {"bounds", "uRange", "vRange", "lods"}
     assert "valueRange" not in manifest
+
+
+def _make_categorical_ds(flag_meanings: str | None = "none moderate strong severe extreme"):
+    ds = _make_ds(["cat"])
+    ds["cat"].attrs["flag_values"] = [0, 1, 2, 3, 4]
+    if flag_meanings is not None:
+        ds["cat"].attrs["flag_meanings"] = flag_meanings
+    return ds
+
+
+CATEGORICAL_PRODUCT = Product(
+    id="test_cat",
+    source_path="",
+    variable="cat",
+    lod_grids={1: (1, 1)},
+    chunk_px=(8, 8),
+    padding=0,
+)
+
+
+def test_render_manifest_categorical_includes_flag_values_and_meanings():
+    manifest = render_manifest(CATEGORICAL_PRODUCT, _make_categorical_ds())
+    assert manifest["flagValues"] == [0, 1, 2, 3, 4]
+    assert manifest["flagMeanings"] == ["none", "moderate", "strong", "severe", "extreme"]
+    # The scalar value range is still emitted alongside the categorical fields.
+    assert len(manifest["valueRange"]) == 2
+
+
+def test_render_manifest_continuous_has_no_flag_fields():
+    manifest = render_manifest(SCALAR_PRODUCT, _make_ds(["sst"]))
+    assert "flagValues" not in manifest
+    assert "flagMeanings" not in manifest
+
+
+def test_render_manifest_categorical_omits_misaligned_meanings():
+    # 2 labels for 5 values → flag_meanings is dropped, flagValues still present.
+    ds = _make_categorical_ds(flag_meanings="only two")
+    manifest = render_manifest(CATEGORICAL_PRODUCT, ds)
+    assert manifest["flagValues"] == [0, 1, 2, 3, 4]
+    assert "flagMeanings" not in manifest
