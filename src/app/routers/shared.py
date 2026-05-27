@@ -83,20 +83,22 @@ def parse_rescale(rescale: str | None) -> tuple[float, float] | None:
 
 
 def require_rescale_if_categorical(
-    colormap_name: str, rescale_range: tuple[float, float] | None
+    colormap_name: str | None, rescale_range: tuple[float, float] | None
 ) -> None:
-    if is_categorical(colormap_name) and rescale_range is None:
+    if colormap_name and is_categorical(colormap_name) and rescale_range is None:
         raise HTTPException(
             status_code=400,
             detail=f"Colormap '{colormap_name}' is categorical — rescale=min,max is required.",
         )
 
 
-def reject_webp_for_categorical(colormap_name: str, fmt: str, *, animated: bool = False) -> None:
+def reject_webp_for_categorical(
+    colormap_name: str | None, fmt: str, *, animated: bool = False
+) -> None:
     # Lossy WebP introduces ringing/blocking around the hard colour boundaries
     # of a categorical colormap. PNG (or APNG/GIF for animations) is the only
     # safe choice — fail loud rather than serve a corrupted legend.
-    if fmt != "webp" or not is_categorical(colormap_name):
+    if fmt != "webp" or not colormap_name or not is_categorical(colormap_name):
         return
     kind = "animated WebP" if animated else "WebP"
     alternatives = "Use .apng or .gif." if animated else "Use .png."

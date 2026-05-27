@@ -7,6 +7,8 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.schemas.admin import ColormapCreatedResponse
 from app.services.colormap.registry import ColormapMode, register_colormap, remove_colormap
+from app.services.product.registry import get_product
+from app.services.store.registry import get_store
 from app.utils.colors import build_categorical_lut, interpolate_colormap, parse_color
 
 logger = logging.getLogger(__name__)
@@ -37,6 +39,16 @@ class ColormapPayload(BaseModel):
             "Keys must match the exact integer values in the target dataset variable."
         ),
     )
+    product_id: str | None = Field(
+        default=None,
+        description=(
+            "Required for categorical mode: the product this colormap describes. The "
+            "category values must exactly match that product variable's CF flag_values."
+        ),
+    )
+    # Derived in build_lut from the categorical entry keys, so the route handler can
+    # validate them against the product's flag_values. Empty for ramp mode.
+    category_values: list[int] = Field(default_factory=list)
 
     @field_validator("name")
     @classmethod
@@ -69,6 +81,7 @@ class ColormapPayload(BaseModel):
             categories[val] = parse_color(v, f"entries[{k!r}]")
         data_range = (float(min(categories)), float(max(categories)))
         data["entries"] = build_categorical_lut(categories, data_range)
+        data["category_values"] = sorted(categories)
         return data
 
     @field_validator("entries", mode="before")
@@ -87,8 +100,54 @@ class ColormapPayload(BaseModel):
             normalized.append(rgba)
         return normalized if len(normalized) == 256 else interpolate_colormap(normalized)
 
+    @model_validator(mode="after")
+    def require_product_for_categorical(self) -> "ColormapPayload":
+        if self.mode == "categorical" and not self.product_id:
+            raise ValueError("product_id is required for categorical colormaps")
+        return self
+
     def to_tuples(self) -> list[tuple[int, int, int, int]]:
         return [(rgba[0], rgba[1], rgba[2], rgba[3]) for rgba in self.entries]
+
+
+def _validate_categorical_matches_product(payload: ColormapPayload) -> None:
+    """A categorical colormap is dataset-specific: its category values must exactly
+    match the bound product variable's CF flag_values, or the discrete render LUT
+    would map colours to the wrong codes (silently). Raises HTTPException on mismatch.
+    """
+    product = get_product(payload.product_id or "")
+    if product is None:
+        raise HTTPException(status_code=404, detail=f"Unknown product: {payload.product_id}")
+    if isinstance(product.variable, list):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Product '{product.id}' has multiple variables; categorical colormaps "
+                f"target single-variable products only."
+            ),
+        )
+    try:
+        attrs = get_store(product.source_path)[product.variable].attrs
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    flag_values = attrs.get("flag_values")
+    if flag_values is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Product '{product.id}' variable '{product.variable}' is not categorical "
+                f"(no flag_values); a categorical colormap cannot be bound to it."
+            ),
+        )
+    expected = sorted(int(v) for v in flag_values)
+    if payload.category_values != expected:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Categorical colormap values {payload.category_values} do not match "
+                f"product '{product.id}' flag_values {expected}."
+            ),
+        )
 
 
 @router.post(
@@ -99,6 +158,8 @@ class ColormapPayload(BaseModel):
     response_model=ColormapCreatedResponse,
 )
 def add_colormap(payload: ColormapPayload):
+    if payload.mode == "categorical":
+        _validate_categorical_matches_product(payload)
     try:
         register_colormap(payload.name, payload.to_tuples(), payload.mode)
     except ValueError as e:

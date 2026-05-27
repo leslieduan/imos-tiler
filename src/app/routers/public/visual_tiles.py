@@ -7,16 +7,21 @@ from fastapi import APIRouter, HTTPException, Path, Query
 from fastapi.openapi.models import Example
 from fastapi.responses import Response
 
-from app.schemas.visual_tiles import ColormapListResponse
+from app.schemas.visual_tiles import (
+    CategoricalLegendResponse,
+    ColormapListResponse,
+    LegendCategory,
+)
 from app.services.caching.slice_cache import load_slice_uncached
-from app.services.colormap.legend import render_legend
+from app.services.colormap.categorical import is_categorical_variable, resolve_scheme
+from app.services.colormap.legend import render_categorical_legend, render_legend
 from app.services.colormap.registry import list_colormaps
 from app.services.rendering.visual_tiles import (
     render_bbox,
     render_bbox_animation,
     render_tile,
 )
-from app.services.store.registry import get_available_dates
+from app.services.store.registry import get_available_dates, get_store
 from app.services.store.spatial import (
     bbox_to_wgs84,
     default_bbox_from_store,
@@ -97,6 +102,79 @@ def get_legend(
     return Response(content=png, media_type="image/png", headers=IMMUTABLE_CACHE_HEADERS)
 
 
+def _categorical_scheme_or_400(product_id: str, colormap_name: str | None):
+    """Resolve a product's categorical scheme from its store attrs, or raise.
+
+    400 if the product's variable is continuous (no flag_values) — those use the
+    name-keyed /colormaps/{name}/legend instead. 404 if the store is unavailable.
+    """
+    product = get_product_or_404(product_id)
+    variable = single_variable_or_400(product, context="legend")
+    try:
+        attrs = get_store(product.source_path)[variable].attrs
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    if not is_categorical_variable(attrs):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Product '{product_id}' variable '{variable}' is not categorical "
+                f"(no flag_values). Use /visual_tiles/colormaps/{{name}}/legend instead."
+            ),
+        )
+    return variable, resolve_scheme(attrs, colormap_name)
+
+
+@router.get(
+    "/{product_id}/legend",
+    summary="Categorical legend (JSON)",
+    description=(
+        "Returns the discrete value→colour→label mapping for a categorical product "
+        "(a variable with CF flag_values). Colours follow the same precedence as the "
+        "tiles: an explicit categorical colormap param, then flag_colors, then the "
+        "product's default palette. Returns 400 for continuous products."
+    ),
+    response_model=CategoricalLegendResponse,
+)
+def get_product_legend(
+    response: Response,
+    product_id: str = Path(openapi_examples=PRODUCT_EX),
+    colormap_name: str | None = Query(None, alias="colormap"),
+):
+    variable, scheme = _categorical_scheme_or_400(product_id, colormap_name)
+    response.headers.update(IMMUTABLE_CACHE_HEADERS)
+    return CategoricalLegendResponse(
+        categorical=True,
+        variable=variable,
+        categories=[LegendCategory(**c) for c in scheme.as_categories()],
+    )
+
+
+@router.get(
+    "/{product_id}/legend.png",
+    summary="Categorical legend (PNG)",
+    description=(
+        "Renders the categorical legend as a labelled PNG: one row per category, a "
+        "colour swatch beside its flag_meanings label. Returns 400 for continuous products."
+    ),
+)
+def get_product_legend_png(
+    product_id: str = Path(openapi_examples=PRODUCT_EX),
+    colormap_name: str | None = Query(None, alias="colormap"),
+    width: int = Query(200, ge=40, le=1024, description="Image width in pixels."),
+    height: int | None = Query(
+        None, ge=10, le=2048, description="Image height in pixels. Defaults to fit the rows."
+    ),
+):
+    _variable, scheme = _categorical_scheme_or_400(product_id, colormap_name)
+    categories = tuple(
+        (scheme.labels[i] if scheme.labels else None, color)
+        for i, color in enumerate(scheme.colors)
+    )
+    png = render_categorical_legend(categories, width, height)
+    return Response(content=png, media_type="image/png", headers=IMMUTABLE_CACHE_HEADERS)
+
+
 @router.get(
     "/{product_id}/{date}/{z}/{x}/{y}.{ext}",
     summary="Visualisation raster tile",
@@ -117,17 +195,23 @@ def get_tile(
         pattern="^(png|webp)$",
         description="Output image format — 'png' (lossless) or 'webp' (lossy, ~50% smaller).",
     ),
-    colormap_name: str = Query(
-        "viridis",
+    colormap_name: str | None = Query(
+        None,
         alias="colormap",
-        description="Matplotlib or rio-tiler colormap name, e.g. viridis, plasma, RdBu_r.",
+        description=(
+            "Matplotlib or rio-tiler colormap name, e.g. viridis, plasma, RdBu_r. "
+            "Omit to use the default (viridis for continuous products, the categorical "
+            "palette for flag-valued products). Passing a continuous colormap to a "
+            "categorical product is rejected."
+        ),
     ),
     rescale: str | None = Query(
         None,
         description="Value range as 'min,max'. Defaults to the global data range for the date.",
     ),
 ):
-    resolve_colormap_or_error(colormap_name)
+    if colormap_name is not None:
+        resolve_colormap_or_error(colormap_name)
     product = get_product_or_404(product_id)
     validate_date(date)
     variable = single_variable_or_400(product, context="visual tiles")
@@ -237,14 +321,23 @@ def get_bbox(
     ),
     width: int = Query(256, ge=1, le=2048),
     height: int = Query(256, ge=1, le=2048),
-    colormap_name: str = Query("viridis", alias="colormap"),
+    colormap_name: str | None = Query(
+        None,
+        alias="colormap",
+        description=(
+            "Colormap name. Omit to use the default (viridis for continuous products, the "
+            "categorical palette for flag-valued products). A continuous colormap on a "
+            "categorical product is rejected."
+        ),
+    ),
     rescale: str | None = Query(None, description="Value range as 'min,max'."),
     crs: str = Query(
         "EPSG:4326",
         description="Coordinate reference system of the bbox. 'EPSG:4326' (default) for geographic degrees; 'EPSG:3857' for Web Mercator meters (Mapbox {bbox-epsg-3857}).",
     ),
 ):
-    resolve_colormap_or_error(colormap_name)
+    if colormap_name is not None:
+        resolve_colormap_or_error(colormap_name)
     product = get_product_or_404(product_id)
     validate_date(date)
     variable = single_variable_or_400(product, context="visual tiles")
@@ -338,7 +431,15 @@ async def get_animation(
             "height is derived from the bbox aspect ratio."
         ),
     ),
-    colormap_name: str = Query("viridis", alias="colormap"),
+    colormap_name: str | None = Query(
+        None,
+        alias="colormap",
+        description=(
+            "Colormap name. Omit to use the default (viridis for continuous products, the "
+            "categorical palette for flag-valued products). A continuous colormap on a "
+            "categorical product is rejected."
+        ),
+    ),
     rescale: str | None = Query(
         None,
         description="Value range as 'min,max'. Defaults to the union range across all frames so the colour ramp stays stable.",
@@ -358,7 +459,8 @@ async def get_animation(
             status_code=400, detail=f"from_date {from_date!r} is after to_date {to_date!r}."
         )
 
-    resolve_colormap_or_error(colormap_name)
+    if colormap_name is not None:
+        resolve_colormap_or_error(colormap_name)
     product = get_product_or_404(product_id)
     variable = single_variable_or_400(product, context="animation")
 

@@ -38,15 +38,25 @@ def interpolate_colormap(stops: list[list[int]]) -> list[list[int]]:
     return np.clip(interpolated, 0, 255).round().astype(int).tolist()  # type: ignore[no-any-return]
 
 
+def categorical_slot(value: float, lo: float, hi: float) -> int:
+    """LUT index for a categorical ``value`` over the range [lo, hi].
+
+    Single source of truth for the value→slot mapping, shared by
+    ``build_categorical_lut`` (registration) and the categorical render path
+    ([[colormap.categorical]]), so the two never drift apart.
+    """
+    span = hi - lo or 1.0
+    return round((value - lo) / span * 255)
+
+
 def build_categorical_lut(
     categories: dict[int, list[int]], data_range: tuple[float, float]
 ) -> list[list[int]]:
     """Map integer category values to a 256-entry RGBA LUT over the given data range."""
     lo, hi = data_range
-    span = hi - lo or 1.0
     lut = [[0, 0, 0, 0] for _ in range(256)]
     for val, color in categories.items():
-        slot = round((val - lo) / span * 255)
+        slot = categorical_slot(val, lo, hi)
         if 0 <= slot <= 255:
             lut[slot] = color
     return lut

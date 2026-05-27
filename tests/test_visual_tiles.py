@@ -1,6 +1,7 @@
 from unittest.mock import patch
 
 import numpy as np
+import pytest
 import xarray as xr
 from starlette.testclient import TestClient
 
@@ -145,6 +146,86 @@ def test_bbox_legacy_url_without_extension_returns_404():
 
 
 _APNG = b"\x89PNG\r\n\x1a\n"
+
+
+def _make_categorical_ds() -> xr.Dataset:
+    lat = np.linspace(-40, -30, 8)
+    lon = np.linspace(140, 150, 8)
+    data = (np.arange(64) % 5).reshape(8, 8).astype("float32")
+    da = xr.DataArray(data, dims=["lat", "lon"], coords={"lat": lat, "lon": lon})
+    da.attrs["flag_values"] = [0, 1, 2, 3, 4]
+    da.attrs["flag_meanings"] = "none moderate strong severe extreme"
+    return xr.Dataset({"MCS_category": da})
+
+
+@pytest.fixture
+def mcs_product():
+    """Register a categorical product for the duration of one test.
+
+    Kept out of the global conftest seed so tests that assert the exact seeded
+    product set stay valid.
+    """
+    from app.services.product.product import Product
+    from app.services.product.registry import PRODUCTS
+
+    PRODUCTS["mcs"] = Product(
+        id="mcs",
+        source_path="s3://test/mcs.zarr",
+        variable="MCS_category",
+    )
+    yield
+    PRODUCTS.pop("mcs", None)
+
+
+def test_categorical_tile_ok(mcs_product):
+    # render_tile is NOT mocked here — exercise the real discrete-lookup path.
+    with patch("app.routers.shared.load_slice", return_value=_make_categorical_ds()):
+        response = client.get("/visual_tiles/mcs/2024-01-01/0/0/0.png")
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/png"
+
+
+def test_categorical_tile_rejects_webp(mcs_product):
+    with patch("app.routers.shared.load_slice", return_value=_make_categorical_ds()):
+        response = client.get("/visual_tiles/mcs/2024-01-01/0/0/0.webp")
+    assert response.status_code == 400
+    assert "webp" in response.json()["detail"].lower()
+
+
+def test_categorical_tile_rejects_continuous_colormap(mcs_product):
+    with patch("app.routers.shared.load_slice", return_value=_make_categorical_ds()):
+        response = client.get("/visual_tiles/mcs/2024-01-01/0/0/0.png?colormap=plasma")
+    assert response.status_code == 400
+    assert "categorical" in response.json()["detail"].lower()
+
+
+def test_categorical_legend_json(mcs_product):
+    with patch("app.routers.public.visual_tiles.get_store", return_value=_make_categorical_ds()):
+        response = client.get("/visual_tiles/mcs/legend")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["categorical"] is True
+    assert body["variable"] == "MCS_category"
+    cats = body["categories"]
+    assert [c["value"] for c in cats] == [0, 1, 2, 3, 4]
+    assert cats[1]["label"] == "moderate"
+    assert cats[1]["color"] == [199, 236, 242, 255]
+    assert cats[0]["color"] == [0, 0, 0, 0]  # none transparent
+
+
+def test_legend_json_rejected_for_continuous_product():
+    with patch("app.routers.public.visual_tiles.get_store", return_value=_make_ds()):
+        response = client.get("/visual_tiles/sea_level_anomaly/legend")
+    assert response.status_code == 400
+    assert "not categorical" in response.json()["detail"].lower()
+
+
+def test_categorical_legend_png(mcs_product):
+    with patch("app.routers.public.visual_tiles.get_store", return_value=_make_categorical_ds()):
+        response = client.get("/visual_tiles/mcs/legend.png")
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/png"
+    assert response.content[:8] == _PNG
 
 
 def test_animation_ok_with_default_bbox():

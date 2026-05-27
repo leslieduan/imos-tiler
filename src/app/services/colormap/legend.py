@@ -64,6 +64,44 @@ def render_legend(
     return buf.getvalue()
 
 
+@lru_cache(maxsize=128)
+def render_categorical_legend(
+    categories: tuple[tuple[str | None, tuple[int, int, int, int]], ...],
+    width: int = 200,
+    height: int | None = None,
+) -> bytes:
+    """Render a labelled categorical legend PNG: one row per category, a colour
+    swatch beside its ``flag_meanings`` label.
+
+    Unlike `render_legend` (a name-keyed colour bar), this is product-aware — it
+    takes the resolved (label, colour) pairs so the labels come from the data. When
+    ``height`` is None it sizes to the row count; otherwise rows are packed to fit.
+    """
+    n = max(1, len(categories))
+    row_h = max(12, height // n) if height else 24
+    total_h = height or row_h * n
+    swatch = min(row_h - 6, 18)
+    pad = 6
+
+    img = Image.new("RGBA", (width, total_h), (255, 255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    font = ImageFont.load_default(size=12)
+    for i, (label, color) in enumerate(categories):
+        y0 = i * row_h
+        sy0 = y0 + (row_h - swatch) // 2
+        draw.rectangle(
+            [pad, sy0, pad + swatch, sy0 + swatch],
+            fill=tuple(color),
+            outline=(120, 120, 120, 255),
+        )
+        ty = y0 + (row_h - 12) // 2
+        draw.text((pad + swatch + pad, ty), label or "", fill=(0, 0, 0, 255), font=font)
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", optimize=False)
+    return buf.getvalue()
+
+
 def _build_colorbar(
     lut: np.ndarray,
     categorical: bool,
@@ -134,3 +172,4 @@ def _draw_v_labels(
 
 
 on_invalidate(render_legend.cache_clear)
+on_invalidate(render_categorical_legend.cache_clear)
