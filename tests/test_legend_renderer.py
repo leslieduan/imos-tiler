@@ -108,6 +108,26 @@ def test_categorical_renders_discrete_blocks(monkeypatch):
     assert img[10, 25, 0] == 255 and img[10, 25, 1] == 0
 
 
+def test_categorical_legend_rejects_rescale(monkeypatch):
+    """Tick labels at lo/mid/hi are meaningless for discrete categories — a categorical
+    colormap with rescale is a contradiction, so reject it instead of drawing bogus ticks."""
+    import app.services.colormap.registry as colormap_config
+
+    lut = [[0, 0, 0, 0] for _ in range(256)]
+    lut[0] = [255, 0, 0, 255]
+    lut[100] = [0, 255, 0, 255]
+    lut[200] = [0, 0, 255, 255]
+    monkeypatch.setitem(colormap_config._custom_colormaps, "_test_cats", lut)
+    monkeypatch.setitem(colormap_config._custom_colormap_modes, "_test_cats", "categorical")
+
+    import app.services.colormap.resolver as colormap_lookup
+
+    colormap_lookup.resolve_colormap.cache_clear()
+
+    with pytest.raises(ValueError, match="(?i)rescale"):
+        legend_renderer.render_legend("_test_cats", rescale=(0.0, 1.0), width=300, height=40)
+
+
 def test_horizontal_height_too_small_for_labels_does_not_crash():
     """Edge case: height < _LABEL_PX (20) leaves bar_h=1 — should still render."""
     png = legend_renderer.render_legend("viridis", rescale=(0.0, 1.0), width=100, height=10)
