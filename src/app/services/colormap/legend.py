@@ -30,8 +30,18 @@ def render_legend(
     height: int = 40,
     orientation: str = "horizontal",
 ) -> bytes:
-    """Render a linear color legend PNG for the given colormap."""
+    """Render a linear color legend PNG for the given colormap.
+
+    Raises ``ValueError`` (mapped to HTTP 400 by the router) when ``rescale`` is
+    given for a categorical colormap: lo/mid/hi tick labels describe a continuous
+    scale that discrete categories do not have, so the combination is incoherent.
+    """
     categorical = is_categorical(colormap_name)
+    if categorical and rescale is not None:
+        raise ValueError(
+            f"Colormap '{colormap_name}' is categorical; rescale does not apply "
+            f"(discrete categories have no continuous scale to label). Omit rescale."
+        )
     cm = resolve_colormap(colormap_name)
     lut = np.array([cm[i] for i in range(256)], dtype=np.uint8)
     has_labels = rescale is not None

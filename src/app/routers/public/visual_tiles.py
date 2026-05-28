@@ -79,7 +79,10 @@ def get_legend(
     name: str,
     rescale: str | None = Query(
         None,
-        description="Value range as 'min,max'. When provided, tick labels are drawn at lo, mid, and hi.",
+        description=(
+            "Value range as 'min,max'. When provided, tick labels are drawn at lo, mid, and hi. "
+            "Rejected for categorical colormaps, whose discrete blocks have no scale to label."
+        ),
     ),
     width: int = Query(256, ge=10, le=2048, description="Image width in pixels."),
     height: int = Query(40, ge=10, le=2048, description="Image height in pixels."),
@@ -91,7 +94,10 @@ def get_legend(
 ):
     resolve_colormap_or_error(name, status_code=404)
     rescale_range = parse_rescale(rescale)
-    png = render_legend(name, rescale_range, width, height, orientation)
+    try:
+        png = render_legend(name, rescale_range, width, height, orientation)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     return Response(content=png, media_type="image/png", headers=IMMUTABLE_CACHE_HEADERS)
 
 
@@ -127,7 +133,10 @@ def get_tile(
     ),
     rescale: str | None = Query(
         None,
-        description="Value range as 'min,max'. Defaults to the global data range for the date.",
+        description=(
+            "Value range as 'min,max'. Defaults to the global data range for the date. "
+            "Rejected for categorical products, which have no continuous scale to rescale."
+        ),
     ),
 ):
     if colormap_name is not None:
@@ -248,7 +257,13 @@ def get_bbox(
             "categorical product is rejected."
         ),
     ),
-    rescale: str | None = Query(None, description="Value range as 'min,max'."),
+    rescale: str | None = Query(
+        None,
+        description=(
+            "Value range as 'min,max'. Rejected for categorical products, which have no "
+            "continuous scale to rescale."
+        ),
+    ),
     crs: str = Query(
         "EPSG:4326",
         description="Coordinate reference system of the bbox. 'EPSG:4326' (default) for geographic degrees; 'EPSG:3857' for Web Mercator meters (Mapbox {bbox-epsg-3857}).",
@@ -358,7 +373,11 @@ async def get_animation(
     ),
     rescale: str | None = Query(
         None,
-        description="Value range as 'min,max'. Defaults to the union range across all frames so the colour ramp stays stable.",
+        description=(
+            "Value range as 'min,max'. Defaults to the union range across all frames so the "
+            "colour ramp stays stable. Rejected for categorical products, which have no "
+            "continuous scale to rescale."
+        ),
     ),
     crs: str = Query(
         "EPSG:4326",

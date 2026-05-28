@@ -237,6 +237,31 @@ def test_categorical_tile_mismatched_colormap_rejected(mcs_product):
     assert "flag_values" in response.json()["detail"]
 
 
+def test_categorical_tile_rejects_rescale(mcs_product):
+    # rescale has no effect on the discrete-lookup path; sending it is a client
+    # error, so reject with 400 rather than silently ignoring it.
+    with patch("app.routers.shared.load_slice", return_value=_make_categorical_ds()):
+        response = client.get("/visual_tiles/mcs/2024-01-01/0/0/0.png?rescale=0,4")
+    assert response.status_code == 400
+    assert "rescale" in response.json()["detail"].lower()
+
+
+def test_categorical_bbox_rejects_rescale(mcs_product):
+    with patch("app.routers.shared.load_slice", return_value=_make_categorical_ds()):
+        response = client.get("/visual_tiles/mcs/2024-01-01/bbox.png?rescale=0,4")
+    assert response.status_code == 400
+    assert "rescale" in response.json()["detail"].lower()
+
+
+def test_categorical_legend_rejects_rescale():
+    # A categorical colormap has no continuous scale, so rescale tick labels are
+    # meaningless — the legend endpoint rejects the combination with 400.
+    with _registered_categorical("legend_cat", [0, 1, 2, 3, 4]):
+        response = client.get("/visual_tiles/colormaps/legend_cat/legend?rescale=0,4")
+    assert response.status_code == 400
+    assert "rescale" in response.json()["detail"].lower()
+
+
 def test_categorical_colormap_on_continuous_variable_rejected():
     # A categorical colormap may only be applied to a categorical variable;
     # sea_level_anomaly (GSLA) is continuous.

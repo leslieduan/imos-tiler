@@ -16,7 +16,7 @@ from app.services.colormap.categorical import (
     is_categorical_variable,
     resolve_scheme,
 )
-from app.services.rendering.visual_tiles import render_tile
+from app.services.rendering.visual_tiles import render_bbox, render_tile
 from app.utils.colors import build_categorical_lut
 
 _MCS_COLORS = DEFAULT_CATEGORICAL_PALETTE
@@ -152,3 +152,23 @@ def test_categorical_tile_rejects_continuous_colormap():
         raise AssertionError("expected ValueError for continuous colormap on categorical")
     except ValueError as e:
         assert "categorical" in str(e).lower() and "plasma" in str(e)
+
+
+def test_categorical_tile_rejects_rescale():
+    """rescale is a continuous-scale concept; the discrete path ignores it, so a
+    client that sets it has a misconception — surface it rather than silently drop it."""
+    ds = _make_categorical_ds()
+    try:
+        render_tile(ds, "MCS_category", 0, 0, 0, rescale=(0.0, 4.0), fmt="png")
+        raise AssertionError("expected ValueError for rescale on categorical tile")
+    except ValueError as e:
+        assert "rescale" in str(e).lower() and "categorical" in str(e).lower()
+
+
+def test_categorical_bbox_rejects_rescale():
+    ds = _make_categorical_ds()
+    try:
+        render_bbox(ds, "MCS_category", (140, -40, 150, -30), 64, 64, rescale=(0.0, 4.0), fmt="png")
+        raise AssertionError("expected ValueError for rescale on categorical bbox")
+    except ValueError as e:
+        assert "rescale" in str(e).lower() and "categorical" in str(e).lower()

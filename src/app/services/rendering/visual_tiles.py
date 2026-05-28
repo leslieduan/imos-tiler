@@ -140,6 +140,7 @@ def _validate_categorical_request(
     colormap_name: str | None,
     fmt: str,
     *,
+    rescale: tuple[float, float] | None = None,
     animated: bool = False,
 ) -> None:
     """Single gate for every categorical request rule, run before rendering.
@@ -152,6 +153,9 @@ def _validate_categorical_request(
     Rules:
       * categorical variable → reject lossy (animated) WebP, which smears the hard
         category boundaries into spurious in-between colours;
+      * categorical variable + ``rescale`` → reject (the discrete-lookup path has no
+        continuous scale, so rescale silently does nothing — a client setting it has
+        a misconception worth surfacing);
       * categorical variable + an explicit *continuous* colormap → reject (pass a
         categorical colormap, or omit it for the default palette);
       * categorical variable + a categorical colormap whose values ≠ flag_values →
@@ -168,6 +172,12 @@ def _validate_categorical_request(
                 f"variable (one with CF flag_values); variable '{variable}' is continuous."
             )
         return
+
+    if rescale is not None:
+        raise ValueError(
+            f"Variable '{variable}' is categorical; rescale does not apply (categories are "
+            f"discrete codes, not a continuous scale). Omit rescale."
+        )
 
     if fmt == "webp":
         kind = "animated WebP" if animated else "WebP"
@@ -280,7 +290,7 @@ def render_tile(
     categorical palette).
     """
     attrs = ds[variable].attrs
-    _validate_categorical_request(variable, attrs, colormap_name, fmt)
+    _validate_categorical_request(variable, attrs, colormap_name, fmt, rescale=rescale)
     parts = _to_scalar_parts(ds, variable)
 
     if is_categorical_variable(attrs):
@@ -370,7 +380,7 @@ def render_bbox(
     variables take the discrete-lookup path (see [[colormap.categorical]] / `render_tile`).
     """
     attrs = ds[variable].attrs
-    _validate_categorical_request(variable, attrs, colormap_name, fmt)
+    _validate_categorical_request(variable, attrs, colormap_name, fmt, rescale=rescale)
     parts = _to_scalar_parts(ds, variable)
     bbox_wgs84 = bbox_to_wgs84(bbox, crs)
     lo, la_min, hi, la_max = bbox_wgs84
@@ -422,7 +432,9 @@ def render_bbox_animation(
         raise ValueError("render_bbox_animation requires at least one dataset")
 
     attrs = datasets[0][variable].attrs
-    _validate_categorical_request(variable, attrs, colormap_name, fmt, animated=True)
+    _validate_categorical_request(
+        variable, attrs, colormap_name, fmt, rescale=rescale, animated=True
+    )
 
     parts_per_frame = [_to_scalar_parts(ds, variable) for ds in datasets]
     bbox_wgs84 = bbox_to_wgs84(bbox, crs)
