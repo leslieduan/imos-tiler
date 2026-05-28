@@ -17,6 +17,8 @@ import time
 import numpy as np
 import xarray as xr
 
+from app.services.colormap.categorical import is_categorical_variable
+
 logger = logging.getLogger(__name__)
 
 
@@ -67,6 +69,32 @@ try:
                     top = a * (1.0 - dx) + b * dx
                     bot = c * (1.0 - dx) + d * dx
                     out[i, j] = top * (1.0 - dy) + bot * dy
+        return out
+
+    @njit(parallel=True, cache=True, fastmath=True)
+    def _numba_nearest(src: np.ndarray, total_h: int, total_w: int) -> np.ndarray:
+        """JIT nearest-neighbour resample on the same linspace(0, src-1, total)
+        mapping as `_numba_bilinear`, but picking the single closest source cell
+        instead of blending four.
+
+        Required for categorical (CF flag_values) variables: bilinear would average
+        adjacent integer codes into fabricated in-between categories, and coarser
+        LODs compound it. Nearest preserves the exact code (and NaN, since it copies
+        the source value verbatim). Ties (`sy` exactly on .5) round up.
+        """
+        src_h, src_w = src.shape
+        out = np.empty((total_h, total_w), dtype=np.float32)
+        sy_scale = (src_h - 1.0) / (total_h - 1.0) if total_h > 1 else 0.0
+        sx_scale = (src_w - 1.0) / (total_w - 1.0) if total_w > 1 else 0.0
+        for i in prange(total_h):
+            y = int(i * sy_scale + 0.5)
+            if y >= src_h:
+                y = src_h - 1
+            for j in range(total_w):
+                x = int(j * sx_scale + 0.5)
+                if x >= src_w:
+                    x = src_w - 1
+                out[i, j] = src[y, x]
         return out
 
     # Selective fastmath (no 'nnan') so np.isnan() works correctly inside the
@@ -148,16 +176,19 @@ except (
 def resample_variables_to_grid(
     ds: xr.Dataset, variables: list[str], total_w: int, total_h: int
 ) -> list[np.ndarray]:
-    """Bilinear-resample each named variable to a (total_h, total_w) grid.
+    """Resample each named variable to a (total_h, total_w) grid.
 
-    Output pixel positions follow np.linspace(0, src-1, total) on both axes — the
-    same mapping the WebGL shader assumes (see docs/technical.md §5.6). NaN propagates
-    where any of the 4 source neighbours is NaN, matching xr.interp(method='linear').
+    Continuous variables are bilinear-resampled; categorical variables (CF
+    flag_values) are nearest-resampled so their discrete integer codes are never
+    blended into fabricated categories. Output pixel positions follow
+    np.linspace(0, src-1, total) on both axes — the same mapping the WebGL shader
+    assumes (see docs/technical.md §5.6). NaN propagates where any contributing
+    source neighbour is NaN, matching xr.interp.
 
     Returns a list of float32 ndarrays in the same order as ``variables``, each
     oriented north→south.
     """
-    # Orient source north→south so index-based bilinear matches the shader's lat mapping.
+    # Orient source north→south so index-based resampling matches the shader's lat mapping.
     flip = float(ds.lat[0]) < float(ds.lat[-1])
 
     if _HAS_NUMBA:
@@ -166,18 +197,23 @@ def resample_variables_to_grid(
             arr = ds[v].values.astype(np.float32, copy=False).squeeze()
             if flip:
                 arr = np.ascontiguousarray(arr[::-1, :])
-            out.append(_numba_bilinear(arr, total_h, total_w))
+            kernel = _numba_nearest if is_categorical_variable(ds[v].attrs) else _numba_bilinear
+            out.append(kernel(arr, total_h, total_w))
         return out
 
-    # Fallback: xarray's bilinear interp on the same linspace mapping.
+    # Fallback: xarray's interp on the same linspace mapping, per-variable method.
     lon_min = float(ds.lon.min())
     lon_max = float(ds.lon.max())
     lat_min = float(ds.lat.min())
     lat_max = float(ds.lat.max())
     target_lons = np.linspace(lon_min, lon_max, total_w)
     target_lats = np.linspace(lat_max, lat_min, total_h)  # north → south
-    ds_r = ds[variables].interp(lon=target_lons, lat=target_lats, method="linear")
-    return [ds_r[v].values.squeeze().astype(np.float32, copy=False) for v in variables]
+    out = []
+    for v in variables:
+        method = "nearest" if is_categorical_variable(ds[v].attrs) else "linear"
+        r = ds[v].interp(lon=target_lons, lat=target_lats, method=method)
+        out.append(r.values.squeeze().astype(np.float32, copy=False))
+    return out
 
 
 def normalize_fallback(arr: np.ndarray, lo: float, hi: float, out_max: int) -> np.ndarray:
@@ -218,6 +254,7 @@ def warmup_resample() -> None:
     resample_variables_to_grid(ds, ["v"], 32, 32)
     if _HAS_NUMBA:
         sample = np.zeros((32, 32), dtype=np.float32)
+        _numba_nearest(sample, 32, 32)
         _numba_normalize_uint32(sample, 0.0, 1.0, 16777215)
         _numba_normalize_uint8(sample, 0.0, 1.0, 255)
     logger.debug(

@@ -22,10 +22,9 @@ class ColormapPayload(BaseModel):
         description=(
             "'ramp': evenly-spaced stops, linearly interpolated to 256 LUT entries. Dataset-agnostic. "
             "'categorical': discrete integer value→color mapping (equivalent to CF flag_values+flag_colors). "
-            "Dataset-specific — the entry keys must exactly match the integer values present in the dataset. "
-            "Applying a categorical colormap to a dataset with different values renders without error "
-            "but produces silently wrong colours. Name categorical colormaps after the dataset or variable "
-            "they describe to make the coupling explicit."
+            "Dataset-specific — its category values are checked against the product variable's CF "
+            "flag_values when a tile is rendered, and a mismatch is rejected. Name categorical colormaps "
+            "after the dataset or variable they describe to make the coupling explicit."
         ),
     )
     entries: list[list[int]] = Field(
@@ -37,6 +36,11 @@ class ColormapPayload(BaseModel):
             "Keys must match the exact integer values in the target dataset variable."
         ),
     )
+    # Derived in build_lut from the categorical entry keys and persisted with the
+    # colormap, so request handlers can match it against a product's flag_values
+    # at render time (categorical colormaps are not bound to a product at
+    # registration). Empty for ramp mode.
+    category_values: list[int] = Field(default_factory=list)
 
     @field_validator("name")
     @classmethod
@@ -69,6 +73,7 @@ class ColormapPayload(BaseModel):
             categories[val] = parse_color(v, f"entries[{k!r}]")
         data_range = (float(min(categories)), float(max(categories)))
         data["entries"] = build_categorical_lut(categories, data_range)
+        data["category_values"] = sorted(categories)
         return data
 
     @field_validator("entries", mode="before")
@@ -100,7 +105,9 @@ class ColormapPayload(BaseModel):
 )
 def add_colormap(payload: ColormapPayload):
     try:
-        register_colormap(payload.name, payload.to_tuples(), payload.mode)
+        register_colormap(
+            payload.name, payload.to_tuples(), payload.mode, values=payload.category_values
+        )
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
     except Exception as e:

@@ -6,6 +6,7 @@ import app.services.caching.processed_cache as processed_cache_module
 from app.services.product.manifest import render_manifest
 from app.services.product.product import Product
 from app.services.rendering.data_tiles import render_tile
+from app.services.rendering.kernels import resample_variables_to_grid
 
 
 def _make_ds(variables: list[str]) -> xr.Dataset:
@@ -74,3 +75,76 @@ def test_render_manifest_uv_shape():
     manifest = render_manifest(UV_PRODUCT, _make_ds(["u", "v"]))
     assert set(manifest) >= {"bounds", "uRange", "vRange", "lods"}
     assert "valueRange" not in manifest
+
+
+def _make_categorical_ds(flag_meanings: str | None = "none moderate strong severe extreme"):
+    ds = _make_ds(["cat"])
+    ds["cat"].attrs["flag_values"] = [0, 1, 2, 3, 4]
+    if flag_meanings is not None:
+        ds["cat"].attrs["flag_meanings"] = flag_meanings
+    return ds
+
+
+CATEGORICAL_PRODUCT = Product(
+    id="test_cat",
+    source_path="",
+    variable="cat",
+    lod_grids={1: (1, 1)},
+    chunk_px=(8, 8),
+    padding=0,
+)
+
+
+def test_render_manifest_categorical_includes_flag_values_and_meanings():
+    manifest = render_manifest(CATEGORICAL_PRODUCT, _make_categorical_ds())
+    assert manifest["flagValues"] == [0, 1, 2, 3, 4]
+    assert manifest["flagMeanings"] == ["none", "moderate", "strong", "severe", "extreme"]
+    # The scalar value range is still emitted alongside the categorical fields.
+    assert len(manifest["valueRange"]) == 2
+
+
+def test_render_manifest_continuous_has_no_flag_fields():
+    manifest = render_manifest(SCALAR_PRODUCT, _make_ds(["sst"]))
+    assert "flagValues" not in manifest
+    assert "flagMeanings" not in manifest
+
+
+def test_render_manifest_categorical_omits_misaligned_meanings():
+    # 2 labels for 5 values → flag_meanings is dropped, flagValues still present.
+    ds = _make_categorical_ds(flag_meanings="only two")
+    manifest = render_manifest(CATEGORICAL_PRODUCT, ds)
+    assert manifest["flagValues"] == [0, 1, 2, 3, 4]
+    assert "flagMeanings" not in manifest
+
+
+# --- resampling: categorical → nearest, continuous → bilinear ---------------
+
+
+def _two_by_two_ds(variable: str, flag_values: list[int] | None) -> xr.Dataset:
+    # Sharp 0/4 checkerboard so blended values (1/2/3) are unmistakable if they appear.
+    arr = np.array([[0.0, 4.0], [4.0, 0.0]], dtype="float32")
+    da = xr.DataArray(arr, dims=["lat", "lon"], coords={"lat": [1.0, 0.0], "lon": [0.0, 1.0]})
+    if flag_values is not None:
+        da.attrs["flag_values"] = flag_values
+    return xr.Dataset({variable: da})
+
+
+def test_resample_categorical_uses_nearest_no_blended_codes():
+    ds = _two_by_two_ds("cat", flag_values=[0, 4])
+    (out,) = resample_variables_to_grid(ds, ["cat"], 8, 8)
+    # Nearest must reproduce only the source codes — never an interpolated 1/2/3.
+    assert set(np.unique(out)).issubset({0.0, 4.0})
+
+
+def test_resample_continuous_uses_bilinear_blends():
+    ds = _two_by_two_ds("cont", flag_values=None)
+    (out,) = resample_variables_to_grid(ds, ["cont"], 8, 8)
+    # Bilinear must produce intermediate values absent from the source set.
+    assert not set(np.unique(out)).issubset({0.0, 4.0})
+
+
+def test_render_tile_categorical_is_valid_png():
+    # End-to-end data-tile render of a categorical product must not crash and
+    # must produce a valid PNG (resample is nearest under the hood).
+    png = render_tile(CATEGORICAL_PRODUCT, _make_categorical_ds, 1, 0, 0, "2024-01-01")
+    assert png[:8] == b"\x89PNG\r\n\x1a\n"

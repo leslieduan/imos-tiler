@@ -32,8 +32,6 @@ from ..shared import (
     get_product_or_404,
     load_slice_or_404,
     parse_rescale,
-    reject_webp_for_categorical,
-    require_rescale_if_categorical,
     resolve_colormap_or_error,
     single_variable_or_400,
     validate_date,
@@ -117,17 +115,23 @@ def get_tile(
         pattern="^(png|webp)$",
         description="Output image format — 'png' (lossless) or 'webp' (lossy, ~50% smaller).",
     ),
-    colormap_name: str = Query(
-        "viridis",
+    colormap_name: str | None = Query(
+        None,
         alias="colormap",
-        description="Matplotlib or rio-tiler colormap name, e.g. viridis, plasma, RdBu_r.",
+        description=(
+            "Matplotlib or rio-tiler colormap name, e.g. viridis, plasma, RdBu_r. "
+            "Omit to use the default (viridis for continuous products, the categorical "
+            "palette for flag-valued products). Passing a continuous colormap to a "
+            "categorical product is rejected."
+        ),
     ),
     rescale: str | None = Query(
         None,
         description="Value range as 'min,max'. Defaults to the global data range for the date.",
     ),
 ):
-    resolve_colormap_or_error(colormap_name)
+    if colormap_name is not None:
+        resolve_colormap_or_error(colormap_name)
     product = get_product_or_404(product_id)
     validate_date(date)
     variable = single_variable_or_400(product, context="visual tiles")
@@ -140,8 +144,6 @@ def get_tile(
         )
 
     rescale_range = parse_rescale(rescale)
-    require_rescale_if_categorical(colormap_name, rescale_range)
-    reject_webp_for_categorical(colormap_name, ext)
 
     key = (product.source_path, date, variable, z, x, y, colormap_name, rescale_range, ext)
 
@@ -237,14 +239,23 @@ def get_bbox(
     ),
     width: int = Query(256, ge=1, le=2048),
     height: int = Query(256, ge=1, le=2048),
-    colormap_name: str = Query("viridis", alias="colormap"),
+    colormap_name: str | None = Query(
+        None,
+        alias="colormap",
+        description=(
+            "Colormap name. Omit to use the default (viridis for continuous products, the "
+            "categorical palette for flag-valued products). A continuous colormap on a "
+            "categorical product is rejected."
+        ),
+    ),
     rescale: str | None = Query(None, description="Value range as 'min,max'."),
     crs: str = Query(
         "EPSG:4326",
         description="Coordinate reference system of the bbox. 'EPSG:4326' (default) for geographic degrees; 'EPSG:3857' for Web Mercator meters (Mapbox {bbox-epsg-3857}).",
     ),
 ):
-    resolve_colormap_or_error(colormap_name)
+    if colormap_name is not None:
+        resolve_colormap_or_error(colormap_name)
     product = get_product_or_404(product_id)
     validate_date(date)
     variable = single_variable_or_400(product, context="visual tiles")
@@ -252,8 +263,6 @@ def get_bbox(
     bbox_tuple, crs = _parse_bbox_and_crs(bbox, crs, product.source_path)
 
     rescale_range = parse_rescale(rescale)
-    require_rescale_if_categorical(colormap_name, rescale_range)
-    reject_webp_for_categorical(colormap_name, ext)
 
     key = (
         product.source_path,
@@ -338,7 +347,15 @@ async def get_animation(
             "height is derived from the bbox aspect ratio."
         ),
     ),
-    colormap_name: str = Query("viridis", alias="colormap"),
+    colormap_name: str | None = Query(
+        None,
+        alias="colormap",
+        description=(
+            "Colormap name. Omit to use the default (viridis for continuous products, the "
+            "categorical palette for flag-valued products). A continuous colormap on a "
+            "categorical product is rejected."
+        ),
+    ),
     rescale: str | None = Query(
         None,
         description="Value range as 'min,max'. Defaults to the union range across all frames so the colour ramp stays stable.",
@@ -358,7 +375,8 @@ async def get_animation(
             status_code=400, detail=f"from_date {from_date!r} is after to_date {to_date!r}."
         )
 
-    resolve_colormap_or_error(colormap_name)
+    if colormap_name is not None:
+        resolve_colormap_or_error(colormap_name)
     product = get_product_or_404(product_id)
     variable = single_variable_or_400(product, context="animation")
 
@@ -369,8 +387,9 @@ async def get_animation(
     )
 
     rescale_range = parse_rescale(rescale)
-    require_rescale_if_categorical(colormap_name, rescale_range)
-    reject_webp_for_categorical(colormap_name, ext, animated=True)
+    # Categorical validation (format, colormap↔variable fit) runs inside
+    # render_bbox_animation, where the loaded slice's attrs are available; a
+    # ValueError there is mapped to 400 below.
 
     available = await anyio.to_thread.run_sync(get_available_dates, product.source_path)
     if not available:

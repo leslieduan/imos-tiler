@@ -12,6 +12,10 @@ from typing import Any
 import xarray as xr
 
 from app.config.constants import LOD
+from app.services.colormap.categorical import (
+    is_categorical_variable,
+    parse_flag_values_and_meanings,
+)
 from app.services.product.product import Product
 from app.utils.geo import json_safe_float
 
@@ -51,7 +55,7 @@ def render_manifest(product: Product, ds: xr.Dataset) -> dict[str, Any]:
             ],
             "lods": lod_meta,
         }
-    return {
+    manifest: dict[str, Any] = {
         "bounds": bounds,
         "valueRange": [
             json_safe_float(ds[product.variable].min(skipna=True).values),
@@ -59,3 +63,14 @@ def render_manifest(product: Product, ds: xr.Dataset) -> dict[str, Any]:
         ],
         "lods": lod_meta,
     }
+    # Categorical (CF flag_values) variable: surface the discrete codes and their
+    # labels so the client can decode and label raw values without a second request.
+    # parse_flag_values_and_meanings drops flagMeanings when absent or misaligned
+    # with flagValues, so the key is simply omitted in that case.
+    attrs = ds[product.variable].attrs
+    if is_categorical_variable(attrs):
+        values, labels = parse_flag_values_and_meanings(attrs)
+        manifest["flagValues"] = list(values)
+        if labels is not None:
+            manifest["flagMeanings"] = list(labels)
+    return manifest

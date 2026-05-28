@@ -6,7 +6,6 @@ from fastapi import HTTPException
 from fastapi.openapi.models import Example
 
 from app.services.caching.slice_cache import load_slice
-from app.services.colormap.registry import is_categorical
 from app.services.colormap.resolver import resolve_colormap
 from app.services.product.product import Product
 from app.services.product.registry import get_product
@@ -80,30 +79,3 @@ def parse_rescale(rescale: str | None) -> tuple[float, float] | None:
         raise HTTPException(
             status_code=400, detail="rescale must be 'min,max', e.g. '-0.5,0.5'"
         ) from e
-
-
-def require_rescale_if_categorical(
-    colormap_name: str, rescale_range: tuple[float, float] | None
-) -> None:
-    if is_categorical(colormap_name) and rescale_range is None:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Colormap '{colormap_name}' is categorical — rescale=min,max is required.",
-        )
-
-
-def reject_webp_for_categorical(colormap_name: str, fmt: str, *, animated: bool = False) -> None:
-    # Lossy WebP introduces ringing/blocking around the hard colour boundaries
-    # of a categorical colormap. PNG (or APNG/GIF for animations) is the only
-    # safe choice — fail loud rather than serve a corrupted legend.
-    if fmt != "webp" or not is_categorical(colormap_name):
-        return
-    kind = "animated WebP" if animated else "WebP"
-    alternatives = "Use .apng or .gif." if animated else "Use .png."
-    raise HTTPException(
-        status_code=400,
-        detail=(
-            f"Colormap '{colormap_name}' is categorical and cannot be encoded as {kind} "
-            f"(lossy compression corrupts the discrete colour boundaries). {alternatives}"
-        ),
-    )

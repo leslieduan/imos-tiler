@@ -13,6 +13,11 @@ logger = logging.getLogger(__name__)
 _config_path = Path(COLORMAPS_CONFIG_PATH)
 _custom_colormaps: dict[str, list[tuple[int, int, int, int]]] = {}
 _custom_colormap_modes: dict[str, ColormapMode] = {}
+# Category values (sorted) for categorical colormaps. The 256-LUT alone can't
+# recover them — transparent categories look identical to unmapped slots — so we
+# store them explicitly to validate a colormap against a product's flag_values at
+# request time (see [[colormap.categorical]] callers).
+_custom_colormap_values: dict[str, list[int]] = {}
 
 # Callbacks invoked whenever the registry changes. Lets downstream modules
 # (e.g. colormap_lookup, legend_renderer) clear their LUT/legend LRU caches
@@ -38,6 +43,14 @@ def is_categorical(name: str) -> bool:
     return _custom_colormap_modes.get(name) == "categorical"
 
 
+def get_category_values(name: str) -> list[int] | None:
+    """Return the sorted category values of a categorical colormap, or None.
+
+    None means the name is unknown or was not registered as categorical.
+    """
+    return _custom_colormap_values.get(name)
+
+
 def load_colormaps() -> None:
     """Read colormaps.json from disk into the in-memory registry. Called once on startup."""
     if not _config_path.exists():
@@ -52,13 +65,24 @@ def load_colormaps() -> None:
 
 
 def register_colormap(
-    name: str, entries: list[tuple[int, int, int, int]], mode: ColormapMode = "ramp"
+    name: str,
+    entries: list[tuple[int, int, int, int]],
+    mode: ColormapMode = "ramp",
+    values: list[int] | None = None,
 ) -> None:
-    """Persist a new colormap. Raises ValueError if name already exists."""
+    """Persist a new colormap. Raises ValueError if name already exists.
+
+    ``values`` are the category values of a categorical colormap (ignored for
+    ramp mode); they are persisted so callers can match the colormap against a
+    product's flag_values at request time.
+    """
     if name in _custom_colormaps:
         raise ValueError(f"Colormap '{name}' already exists — use PUT to update")
     data = _read_file()
-    data[name] = entries if mode == "ramp" else {"entries": list(entries), "mode": mode}
+    if mode == "ramp":
+        data[name] = entries
+    else:
+        data[name] = {"entries": list(entries), "mode": mode, "values": sorted(values or [])}
     _write_file(data)
     _reload(data)
 
@@ -109,10 +133,12 @@ def _write_file(data: dict[str, list]) -> None:
 def _reload(data: dict[str, list | dict]) -> None:
     _custom_colormaps.clear()
     _custom_colormap_modes.clear()
+    _custom_colormap_values.clear()
     for name, value in data.items():
         if isinstance(value, dict):
             _custom_colormaps[name] = [tuple(rgba) for rgba in value["entries"]]  # type: ignore[misc]
             _custom_colormap_modes[name] = value["mode"]
+            _custom_colormap_values[name] = list(value.get("values", []))
         else:
             _custom_colormaps[name] = [tuple(rgba) for rgba in value]  # type: ignore[misc]
     for hook in _invalidation_hooks:

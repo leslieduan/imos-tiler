@@ -68,6 +68,8 @@ def test_add_ramp_colormap_mode_defaults_to_ramp():
 
 
 def test_add_categorical_colormap():
+    # No product binding at registration — the colormap is matched against a
+    # product's flag_values at render time, not here.
     payload = {
         "name": "land_cover",
         "mode": "categorical",
@@ -80,6 +82,8 @@ def test_add_categorical_colormap():
     _, lut, mode = mock_reg.call_args.args
     assert mode == "categorical"
     assert len(lut) == 256
+    # Sorted category values are forwarded for persistence (used in the request-time match).
+    assert mock_reg.call_args.kwargs["values"] == [1, 2, 3, 4]
 
 
 def test_add_categorical_colormap_rgba_values():
@@ -92,6 +96,20 @@ def test_add_categorical_colormap_rgba_values():
         response = client.post("/admin/colormaps", json=payload, headers=_HEADERS)
     assert response.status_code == 201
     mock_reg.assert_called_once()
+    assert mock_reg.call_args.kwargs["values"] == [1, 2]
+
+
+def test_add_categorical_colormap_no_product_id_required():
+    # product_id is gone: a categorical colormap registers standalone.
+    payload = {
+        "name": "no_product",
+        "mode": "categorical",
+        "entries": {"1": "#ffff00", "2": "#0000ff"},
+    }
+    with patch("app.routers.admin.colormaps.register_colormap") as mock_reg:
+        response = client.post("/admin/colormaps", json=payload, headers=_HEADERS)
+    assert response.status_code == 201
+    assert mock_reg.call_args.kwargs["values"] == [1, 2]
 
 
 # ---------------------------------------------------------------------------

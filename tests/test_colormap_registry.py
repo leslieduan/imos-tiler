@@ -22,14 +22,18 @@ def isolated_config(tmp_path, monkeypatch):
     saved = (
         dict(colormap_config._custom_colormaps),
         dict(colormap_config._custom_colormap_modes),
+        dict(colormap_config._custom_colormap_values),
     )
     colormap_config._custom_colormaps.clear()
     colormap_config._custom_colormap_modes.clear()
+    colormap_config._custom_colormap_values.clear()
     yield cfg
     colormap_config._custom_colormaps.clear()
     colormap_config._custom_colormap_modes.clear()
+    colormap_config._custom_colormap_values.clear()
     colormap_config._custom_colormaps.update(saved[0])
     colormap_config._custom_colormap_modes.update(saved[1])
+    colormap_config._custom_colormap_values.update(saved[2])
 
 
 def _entries():
@@ -68,6 +72,28 @@ def test_register_categorical_persists_mode(isolated_config):
     # Categorical stored as dict with explicit mode field.
     assert on_disk["cats"]["mode"] == "categorical"
     assert colormap_config.is_categorical("cats")
+
+
+def test_register_categorical_persists_sorted_values(isolated_config):
+    colormap_config.register_colormap("cats", _entries(), mode="categorical", values=[3, 1, 2])
+    # Stored sorted on disk so request-time comparison is order-independent.
+    on_disk = json.loads(isolated_config.read_text())
+    assert on_disk["cats"]["values"] == [1, 2, 3]
+    assert colormap_config.get_category_values("cats") == [1, 2, 3]
+
+    # Survives a reload from disk.
+    colormap_config._custom_colormaps.clear()
+    colormap_config._custom_colormap_modes.clear()
+    colormap_config._custom_colormap_values.clear()
+    colormap_config.load_colormaps()
+    assert colormap_config.get_category_values("cats") == [1, 2, 3]
+
+
+def test_get_category_values_none_for_ramp(isolated_config):
+    colormap_config.register_colormap("ramp", _entries(), mode="ramp")
+    # Ramp colormaps carry no category values.
+    assert colormap_config.get_category_values("ramp") is None
+    assert colormap_config.get_category_values("never_registered") is None
 
 
 def test_register_duplicate_raises(isolated_config):

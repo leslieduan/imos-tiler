@@ -24,3 +24,7 @@ class DataTileManifestResponse(BaseModel):
     valueRange: list[float] | None = None
     uRange: list[float] | None = None
     vRange: list[float] | None = None
+    # Categorical variables (CF flag_values) additionally populate flagValues, and
+    # flagMeanings when the labels align 1:1. Absent for continuous products.
+    flagValues: list[int] | None = None
+    flagMeanings: list[str] | None = None
