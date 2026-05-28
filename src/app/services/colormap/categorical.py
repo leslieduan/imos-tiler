@@ -70,17 +70,6 @@ class CategoricalScheme:
                 table[value] = color
         return table
 
-    def as_categories(self) -> list[dict[str, Any]]:
-        """JSON-friendly [{value, label, color: [r,g,b,a]}] for the legend endpoint."""
-        return [
-            {
-                "value": value,
-                "label": self.labels[i] if self.labels else None,
-                "color": list(color),
-            }
-            for i, (value, color) in enumerate(zip(self.values, self.colors, strict=False))
-        ]
-
 
 def parse_flag_values_and_meanings(
     attrs: Mapping[str, Any],
@@ -117,11 +106,11 @@ def _resolve_colors(
 ) -> tuple[RGBA, ...]:
     n = len(values)
 
-    # Rule 1 (precedence) — explicit categorical colormap param wins. Callers
-    # reject a categorical colormap whose values don't match the product's
-    # flag_values at request time (see [[routers.shared]]
-    # reject_categorical_colormap_mismatch), so by here the values align and we
-    # read its colour at each value's slot directly.
+    # Rule 1 (precedence) — explicit categorical colormap param wins. The render
+    # path rejects a categorical colormap whose values don't match the variable's
+    # flag_values before reaching here (see _validate_categorical_request in
+    # [[rendering.visual_tiles]]), so by here the values align and we read its
+    # colour at each value's slot directly.
     if colormap_name and is_categorical(colormap_name):
         explicit = _registered_categorical_colors(colormap_name, values)
         if explicit:

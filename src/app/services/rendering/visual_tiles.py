@@ -10,7 +10,8 @@ numpy arrays before the single image encode.
 
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from typing import Any
 
 import numpy as np
 import xarray as xr
@@ -21,7 +22,7 @@ from rio_tiler.models import ImageData
 from rioxarray.exceptions import NoDataInBounds
 
 from app.services.colormap.categorical import RGBA, is_categorical_variable, resolve_scheme
-from app.services.colormap.registry import is_categorical
+from app.services.colormap.registry import get_category_values, is_categorical
 from app.services.colormap.resolver import resolve_colormap
 from app.services.store.spatial import bbox_to_wgs84
 from app.utils.image import (
@@ -133,28 +134,64 @@ def _categorical_composite(
     return result
 
 
-def _reject_lossy_categorical(fmt: str) -> None:
-    """Categorical output must be lossless — lossy WebP smears the hard category
-    boundaries into spurious in-between colours. Raises ValueError (→ HTTP 400)."""
+def _validate_categorical_request(
+    variable: str,
+    attrs: Mapping[str, Any],
+    colormap_name: str | None,
+    fmt: str,
+    *,
+    animated: bool = False,
+) -> None:
+    """Single gate for every categorical request rule, run before rendering.
+
+    Lives here (not in the router) because the variable's ``attrs`` — the only way
+    to know whether it's categorical — are already loaded for the render dispatch,
+    so the checks cost no extra store read. Raises ``ValueError``; the router maps
+    that to HTTP 400.
+
+    Rules:
+      * categorical variable → reject lossy (animated) WebP, which smears the hard
+        category boundaries into spurious in-between colours;
+      * categorical variable + an explicit *continuous* colormap → reject (pass a
+        categorical colormap, or omit it for the default palette);
+      * categorical variable + a categorical colormap whose values ≠ flag_values →
+        reject (its colours would map to the wrong codes, silently);
+      * continuous variable + a categorical colormap → reject (its fixed colour
+        slots are meaningless on the scale-dependent ramp path).
+    """
+    colormap_is_categorical = bool(colormap_name) and is_categorical(colormap_name)
+
+    if not is_categorical_variable(attrs):
+        if colormap_is_categorical:
+            raise ValueError(
+                f"Categorical colormap '{colormap_name}' can only be applied to a categorical "
+                f"variable (one with CF flag_values); variable '{variable}' is continuous."
+            )
+        return
+
     if fmt == "webp":
+        kind = "animated WebP" if animated else "WebP"
+        alternatives = "Use .apng or .gif." if animated else "Use .png."
         raise ValueError(
-            "Categorical data cannot be encoded as WebP (lossy compression corrupts the "
-            "discrete category boundaries). Use PNG (or APNG/GIF for animations)."
+            f"Variable '{variable}' is categorical and cannot be encoded as {kind} "
+            f"(lossy compression corrupts the discrete category boundaries). {alternatives}"
         )
 
-
-def _reject_continuous_on_categorical(variable: str, colormap_name: str | None) -> None:
-    """A categorical variable must use a categorical colormap (or none → default palette).
-
-    Reject an explicitly-requested continuous colormap rather than silently ignoring the
-    caller's choice and rendering with the default palette. ``None`` means "unspecified" →
-    allowed. Raises ValueError (→ HTTP 400).
-    """
-    if colormap_name is not None and not is_categorical(colormap_name):
+    if colormap_name is not None and not colormap_is_categorical:
         raise ValueError(
             f"Variable '{variable}' is categorical; colormap '{colormap_name}' is a continuous "
             f"colormap. Pass a categorical colormap, or omit it to use the default palette."
         )
+
+    if colormap_is_categorical:
+        assert colormap_name is not None  # narrowed by colormap_is_categorical
+        expected = sorted(int(v) for v in attrs["flag_values"])
+        cmap_values = get_category_values(colormap_name)
+        if cmap_values != expected:
+            raise ValueError(
+                f"Categorical colormap '{colormap_name}' covers values {cmap_values}, which do "
+                f"not match variable '{variable}' flag_values {expected}."
+            )
 
 
 def _apply_crs(da: xr.DataArray) -> xr.DataArray:
@@ -243,11 +280,10 @@ def render_tile(
     categorical palette).
     """
     attrs = ds[variable].attrs
+    _validate_categorical_request(variable, attrs, colormap_name, fmt)
     parts = _to_scalar_parts(ds, variable)
 
     if is_categorical_variable(attrs):
-        _reject_continuous_on_categorical(variable, colormap_name)
-        _reject_lossy_categorical(fmt)
         scheme = resolve_scheme(attrs, colormap_name)
         result = _categorical_composite(
             parts, scheme.lut(), lambda r: r.tile(x, y, z, reproject_method="nearest")
@@ -334,13 +370,12 @@ def render_bbox(
     variables take the discrete-lookup path (see [[colormap.categorical]] / `render_tile`).
     """
     attrs = ds[variable].attrs
+    _validate_categorical_request(variable, attrs, colormap_name, fmt)
     parts = _to_scalar_parts(ds, variable)
     bbox_wgs84 = bbox_to_wgs84(bbox, crs)
     lo, la_min, hi, la_max = bbox_wgs84
 
     if is_categorical_variable(attrs):
-        _reject_continuous_on_categorical(variable, colormap_name)
-        _reject_lossy_categorical(fmt)
         scheme = resolve_scheme(attrs, colormap_name)
         result = _categorical_composite(
             parts,
@@ -386,13 +421,13 @@ def render_bbox_animation(
     if not datasets:
         raise ValueError("render_bbox_animation requires at least one dataset")
 
+    attrs = datasets[0][variable].attrs
+    _validate_categorical_request(variable, attrs, colormap_name, fmt, animated=True)
+
     parts_per_frame = [_to_scalar_parts(ds, variable) for ds in datasets]
     bbox_wgs84 = bbox_to_wgs84(bbox, crs)
 
-    attrs = datasets[0][variable].attrs
     if is_categorical_variable(attrs):
-        _reject_continuous_on_categorical(variable, colormap_name)
-        _reject_lossy_categorical(fmt)
         lut = resolve_scheme(attrs, colormap_name).lut()
         lo, la_min, hi, la_max = bbox_wgs84
 

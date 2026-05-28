@@ -217,11 +217,10 @@ def test_categorical_tile_rejects_continuous_colormap(mcs_product):
 def test_categorical_tile_matching_colormap_ok(mcs_product):
     # Colormap values match the product's flag_values [0,1,2,3,4] → accepted.
     # No rescale: categorical rendering is value-indexed and never consults it.
+    # render_tile is NOT mocked, so the real validate-then-render path runs.
     with (
         _registered_categorical("mcs_match", [0, 1, 2, 3, 4]),
-        patch("app.routers.shared.get_store", return_value=_make_categorical_ds()),
         patch("app.routers.shared.load_slice", return_value=_make_categorical_ds()),
-        patch("app.routers.public.visual_tiles.render_tile", return_value=_PNG),
     ):
         response = client.get("/visual_tiles/mcs/2024-01-01/0/0/0.png?colormap=mcs_match")
     assert response.status_code == 200
@@ -231,7 +230,7 @@ def test_categorical_tile_mismatched_colormap_rejected(mcs_product):
     # Colormap covers {1,2,3} but the product's flag_values are {0,1,2,3,4}.
     with (
         _registered_categorical("mcs_tile_bad", [1, 2, 3]),
-        patch("app.routers.shared.get_store", return_value=_make_categorical_ds()),
+        patch("app.routers.shared.load_slice", return_value=_make_categorical_ds()),
     ):
         response = client.get("/visual_tiles/mcs/2024-01-01/0/0/0.png?colormap=mcs_tile_bad")
     assert response.status_code == 400
@@ -243,7 +242,7 @@ def test_categorical_colormap_on_continuous_variable_rejected():
     # sea_level_anomaly (GSLA) is continuous.
     with (
         _registered_categorical("cont_bad", [1, 2, 3, 4]),
-        patch("app.routers.shared.get_store", return_value=_make_ds()),
+        patch("app.routers.shared.load_slice", return_value=_make_ds()),
     ):
         response = client.get(
             "/visual_tiles/sea_level_anomaly/2024-01-01/0/0/0.png?colormap=cont_bad"
@@ -255,7 +254,7 @@ def test_categorical_colormap_on_continuous_variable_rejected():
 def test_categorical_bbox_mismatched_colormap_rejected(mcs_product):
     with (
         _registered_categorical("mcs_bbox_bad", [1, 2, 3]),
-        patch("app.routers.shared.get_store", return_value=_make_categorical_ds()),
+        patch("app.routers.shared.load_slice", return_value=_make_categorical_ds()),
     ):
         response = client.get("/visual_tiles/mcs/2024-01-01/bbox.png?colormap=mcs_bbox_bad")
     assert response.status_code == 400
@@ -263,47 +262,26 @@ def test_categorical_bbox_mismatched_colormap_rejected(mcs_product):
 
 
 def test_categorical_animation_mismatched_colormap_rejected(mcs_product):
-    # Mismatch is caught before the per-frame fan-out, so get_available_dates is
-    # never reached and need not be patched.
+    # Validation now happens inside render_bbox_animation, so the frames are
+    # fanned out first; width/height are pinned to skip the native-resolution
+    # store read.
     with (
         _registered_categorical("mcs_anim_bad", [1, 2, 3]),
-        patch("app.routers.shared.get_store", return_value=_make_categorical_ds()),
+        patch(
+            "app.routers.public.visual_tiles.get_available_dates",
+            return_value=["2024-01-01", "2024-01-02", "2024-01-03"],
+        ),
+        patch(
+            "app.routers.public.visual_tiles.load_slice_uncached",
+            return_value=_make_categorical_ds(),
+        ),
     ):
         response = client.get(
             "/visual_tiles/mcs/2024-01-01/2024-01-03/animation.apng"
-            "?bbox=140,-40,150,-30&colormap=mcs_anim_bad"
+            "?bbox=140,-40,150,-30&width=64&height=64&colormap=mcs_anim_bad"
         )
     assert response.status_code == 400
     assert "flag_values" in response.json()["detail"]
-
-
-def test_categorical_legend_json(mcs_product):
-    with patch("app.routers.public.visual_tiles.get_store", return_value=_make_categorical_ds()):
-        response = client.get("/visual_tiles/mcs/legend")
-    assert response.status_code == 200
-    body = response.json()
-    assert body["categorical"] is True
-    assert body["variable"] == "MCS_category"
-    cats = body["categories"]
-    assert [c["value"] for c in cats] == [0, 1, 2, 3, 4]
-    assert cats[1]["label"] == "moderate"
-    assert cats[1]["color"] == [199, 236, 242, 255]
-    assert cats[0]["color"] == [0, 0, 0, 0]  # none transparent
-
-
-def test_legend_json_rejected_for_continuous_product():
-    with patch("app.routers.public.visual_tiles.get_store", return_value=_make_ds()):
-        response = client.get("/visual_tiles/sea_level_anomaly/legend")
-    assert response.status_code == 400
-    assert "not categorical" in response.json()["detail"].lower()
-
-
-def test_categorical_legend_png(mcs_product):
-    with patch("app.routers.public.visual_tiles.get_store", return_value=_make_categorical_ds()):
-        response = client.get("/visual_tiles/mcs/legend.png")
-    assert response.status_code == 200
-    assert response.headers["content-type"] == "image/png"
-    assert response.content[:8] == _PNG
 
 
 def test_animation_ok_with_default_bbox():

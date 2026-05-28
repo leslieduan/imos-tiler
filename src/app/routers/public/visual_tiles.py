@@ -7,21 +7,16 @@ from fastapi import APIRouter, HTTPException, Path, Query
 from fastapi.openapi.models import Example
 from fastapi.responses import Response
 
-from app.schemas.visual_tiles import (
-    CategoricalLegendResponse,
-    ColormapListResponse,
-    LegendCategory,
-)
+from app.schemas.visual_tiles import ColormapListResponse
 from app.services.caching.slice_cache import load_slice_uncached
-from app.services.colormap.categorical import is_categorical_variable, resolve_scheme
-from app.services.colormap.legend import render_categorical_legend, render_legend
+from app.services.colormap.legend import render_legend
 from app.services.colormap.registry import list_colormaps
 from app.services.rendering.visual_tiles import (
     render_bbox,
     render_bbox_animation,
     render_tile,
 )
-from app.services.store.registry import get_available_dates, get_store
+from app.services.store.registry import get_available_dates
 from app.services.store.spatial import (
     bbox_to_wgs84,
     default_bbox_from_store,
@@ -37,8 +32,6 @@ from ..shared import (
     get_product_or_404,
     load_slice_or_404,
     parse_rescale,
-    reject_categorical_colormap_mismatch,
-    reject_webp_for_categorical,
     resolve_colormap_or_error,
     single_variable_or_400,
     validate_date,
@@ -102,79 +95,6 @@ def get_legend(
     return Response(content=png, media_type="image/png", headers=IMMUTABLE_CACHE_HEADERS)
 
 
-def _categorical_scheme_or_400(product_id: str, colormap_name: str | None):
-    """Resolve a product's categorical scheme from its store attrs, or raise.
-
-    400 if the product's variable is continuous (no flag_values) — those use the
-    name-keyed /colormaps/{name}/legend instead. 404 if the store is unavailable.
-    """
-    product = get_product_or_404(product_id)
-    variable = single_variable_or_400(product, context="legend")
-    try:
-        attrs = get_store(product.source_path)[variable].attrs
-    except FileNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
-    if not is_categorical_variable(attrs):
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Product '{product_id}' variable '{variable}' is not categorical "
-                f"(no flag_values). Use /visual_tiles/colormaps/{{name}}/legend instead."
-            ),
-        )
-    return variable, resolve_scheme(attrs, colormap_name)
-
-
-@router.get(
-    "/{product_id}/legend",
-    summary="Categorical legend (JSON)",
-    description=(
-        "Returns the discrete value→colour→label mapping for a categorical product "
-        "(a variable with CF flag_values). Colours follow the same precedence as the "
-        "tiles: an explicit categorical colormap param, then flag_colors, then the "
-        "product's default palette. Returns 400 for continuous products."
-    ),
-    response_model=CategoricalLegendResponse,
-)
-def get_product_legend(
-    response: Response,
-    product_id: str = Path(openapi_examples=PRODUCT_EX),
-    colormap_name: str | None = Query(None, alias="colormap"),
-):
-    variable, scheme = _categorical_scheme_or_400(product_id, colormap_name)
-    response.headers.update(IMMUTABLE_CACHE_HEADERS)
-    return CategoricalLegendResponse(
-        categorical=True,
-        variable=variable,
-        categories=[LegendCategory(**c) for c in scheme.as_categories()],
-    )
-
-
-@router.get(
-    "/{product_id}/legend.png",
-    summary="Categorical legend (PNG)",
-    description=(
-        "Renders the categorical legend as a labelled PNG: one row per category, a "
-        "colour swatch beside its flag_meanings label. Returns 400 for continuous products."
-    ),
-)
-def get_product_legend_png(
-    product_id: str = Path(openapi_examples=PRODUCT_EX),
-    colormap_name: str | None = Query(None, alias="colormap"),
-    width: int = Query(200, ge=40, le=1024, description="Image width in pixels."),
-    height: int | None = Query(
-        None, ge=10, le=2048, description="Image height in pixels. Defaults to fit the rows."
-    ),
-):
-    _variable, scheme = _categorical_scheme_or_400(product_id, colormap_name)
-    categories = tuple(
-        (scheme.labels[i] if scheme.labels else None, color)
-        for i, color in enumerate(scheme.colors)
-    )
-    png = render_categorical_legend(categories, width, height)
-    return Response(content=png, media_type="image/png", headers=IMMUTABLE_CACHE_HEADERS)
-
-
 @router.get(
     "/{product_id}/{date}/{z}/{x}/{y}.{ext}",
     summary="Visualisation raster tile",
@@ -224,8 +144,6 @@ def get_tile(
         )
 
     rescale_range = parse_rescale(rescale)
-    reject_webp_for_categorical(colormap_name, ext)
-    reject_categorical_colormap_mismatch(colormap_name, product, variable)
 
     key = (product.source_path, date, variable, z, x, y, colormap_name, rescale_range, ext)
 
@@ -345,8 +263,6 @@ def get_bbox(
     bbox_tuple, crs = _parse_bbox_and_crs(bbox, crs, product.source_path)
 
     rescale_range = parse_rescale(rescale)
-    reject_webp_for_categorical(colormap_name, ext)
-    reject_categorical_colormap_mismatch(colormap_name, product, variable)
 
     key = (
         product.source_path,
@@ -471,11 +387,9 @@ async def get_animation(
     )
 
     rescale_range = parse_rescale(rescale)
-    reject_webp_for_categorical(colormap_name, ext, animated=True)
-    # Offloaded like the other store reads here: get_store can block on cold open_zarr.
-    await anyio.to_thread.run_sync(
-        reject_categorical_colormap_mismatch, colormap_name, product, variable
-    )
+    # Categorical validation (format, colormap↔variable fit) runs inside
+    # render_bbox_animation, where the loaded slice's attrs are available; a
+    # ValueError there is mapped to 400 below.
 
     available = await anyio.to_thread.run_sync(get_available_dates, product.source_path)
     if not available:

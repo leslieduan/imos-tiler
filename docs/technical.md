@@ -714,12 +714,12 @@ The data range for a categorical colormap is inferred from the key range (`min(k
 
 **Categorical colormaps are dataset-specific.** A categorical colormap is tightly coupled to a specific variable's integer encoding — equivalent to the CF convention `flag_values` + `flag_colors` pair that ncWMS reads from dataset attributes. The `entries` keys must exactly match the discrete integer values that appear in the dataset.
 
-Registration does **not** bind the colormap to a product — a categorical colormap registers standalone, and its sorted category values are persisted alongside the LUT. The coupling is instead checked at **render time** (tile / bbox / animation), where a categorical colormap is rejected with `400 Bad Request` unless:
+Registration does **not** bind the colormap to a product — a categorical colormap registers standalone, and its sorted category values are persisted alongside the LUT. The coupling is instead checked at **render time** (tile / bbox / animation) by a single gate, `_validate_categorical_request` in `services/rendering/visual_tiles.py`, which raises `ValueError` (mapped to `400 Bad Request`). It lives in the renderer rather than the router because the variable's `attrs` — the only way to tell whether the variable is categorical — are already loaded there for the render dispatch, so the checks cost no extra store read. The rules:
 
-- the target variable is itself categorical (has CF `flag_values`) — applying a categorical colormap to a *continuous* variable is rejected, since it would otherwise fall through to the scale-dependent ramp path; and
-- the colormap's category values exactly equal the variable's `flag_values` — e.g. a colormap with keys `{1, 2, 3, 4}` on a variable whose `flag_values` are `{0, 1, 2, 3, 4}` is rejected rather than silently shifting every colour by one slot.
-
-(The converse — a *continuous* colormap on a categorical variable — is rejected by the renderer's own guard.)
+- a categorical colormap requires a categorical variable (one with CF `flag_values`) — applied to a *continuous* variable it is rejected, since it would otherwise fall through to the scale-dependent ramp path;
+- a categorical colormap's category values must exactly equal the variable's `flag_values` — e.g. keys `{1, 2, 3, 4}` on a variable whose `flag_values` are `{0, 1, 2, 3, 4}` is rejected rather than silently shifting every colour by one slot;
+- a categorical variable rejects an explicit *continuous* colormap (pass a categorical one or omit it for the default palette); and
+- a categorical variable rejects lossy `.webp` / animated WebP output (see §8.4).
 
 Practical rules:
 
@@ -745,7 +745,7 @@ Why both formats:
 - **PNG** is lossless; the only safe choice for categorical colormaps (hard colour boundaries) and the default everywhere else for backward compatibility.
 - **WebP (lossy, q=85)** is typically 40–70% smaller than PNG for smooth colour ramps — the common visual-tile case. Encode time is comparable to PNG (lossy WebP is fast; lossless WebP is the slow one and is not exposed here). The visual quality difference is imperceptible for ocean-render output.
 
-**Categorical colormaps reject `.webp`** with HTTP 400. Lossy compression introduces ringing/blocking around the discrete colour transitions that define a categorical map, which would silently corrupt the rendered classes. The router uses `is_categorical(colormap_name)` to gate this in `_reject_webp_for_categorical`.
+**Categorical variables reject `.webp`** (and animated WebP) with HTTP 400. Lossy compression introduces ringing/blocking around the discrete colour transitions that define a categorical map, which would silently corrupt the rendered classes. The gate keys off the *variable* being categorical (CF `flag_values`), not the colormap, and lives in `_validate_categorical_request` (`services/rendering/visual_tiles.py`) alongside the other categorical-request checks.
 
 **Format choice is per-URL, not per-request.** Each `.{ext}` is a distinct path, so CDNs/browsers cache PNG and WebP independently with no `Vary` header gymnastics. Implementation lives in `utils/image.py` (`encode_rgba`, `empty_tile`, `media_type`) so adding another format (e.g. JXL) is one branch.
 

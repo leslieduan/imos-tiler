@@ -64,9 +64,9 @@ def render_manifest(product: Product, ds: xr.Dataset) -> dict[str, Any]:
         "lods": lod_meta,
     }
     # Categorical (CF flag_values) variable: surface the discrete codes and their
-    # labels so the client can decode raw values without a second request. Omit
-    # flagMeanings when absent or misaligned with flagValues, matching how the
-    # legend drops mispaired labels.
+    # labels so the client can decode and label raw values without a second request.
+    # parse_flag_values_and_meanings drops flagMeanings when absent or misaligned
+    # with flagValues, so the key is simply omitted in that case.
     attrs = ds[product.variable].attrs
     if is_categorical_variable(attrs):
         values, labels = parse_flag_values_and_meanings(attrs)

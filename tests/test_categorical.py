@@ -1,5 +1,4 @@
-"""Categorical (flag-valued) rendering: scheme resolution, discrete tile render,
-and the labelled legend renderer.
+"""Categorical (flag-valued) rendering: scheme resolution and discrete tile render.
 
 The MCS_category product is categorical (CF flag_values [0..4]) — these lock the
 contract that such variables render as discrete blocks via a value-indexed LUT
@@ -14,11 +13,9 @@ from PIL import Image
 
 from app.services.colormap.categorical import (
     DEFAULT_CATEGORICAL_PALETTE,
-    CategoricalScheme,
     is_categorical_variable,
     resolve_scheme,
 )
-from app.services.colormap.legend import render_categorical_legend
 from app.services.rendering.visual_tiles import render_tile
 from app.utils.colors import build_categorical_lut
 
@@ -155,24 +152,3 @@ def test_categorical_tile_rejects_continuous_colormap():
         raise AssertionError("expected ValueError for continuous colormap on categorical")
     except ValueError as e:
         assert "categorical" in str(e).lower() and "plasma" in str(e)
-
-
-# --- legend renderer ------------------------------------------------------
-
-
-def test_categorical_scheme_as_categories():
-    scheme = CategoricalScheme(
-        values=(0, 1), colors=((0, 0, 0, 0), (1, 2, 3, 255)), labels=("none", "moderate")
-    )
-    assert scheme.as_categories() == [
-        {"value": 0, "label": "none", "color": [0, 0, 0, 0]},
-        {"value": 1, "label": "moderate", "color": [1, 2, 3, 255]},
-    ]
-
-
-def test_render_categorical_legend_png():
-    categories = (("none", (0, 0, 0, 0)), ("moderate", (199, 236, 242, 255)))
-    png = render_categorical_legend(categories, 200, None)
-    assert png[:8] == b"\x89PNG\r\n\x1a\n"
-    img = Image.open(io.BytesIO(png))
-    assert img.width == 200 and img.height > 0
