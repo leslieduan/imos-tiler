@@ -73,7 +73,12 @@ def _etag_response(body: object, etag: str, if_none_match: str | None) -> Respon
     return JSONResponse(content=body, headers=headers)
 
 
-@router.get("/products", summary="List products", response_model=list[ProductConfig])
+@router.get(
+    "/products",
+    summary="List products",
+    response_model=list[ProductConfig],
+    response_model_exclude_none=True,
+)
 async def get_products():
     return [ProductConfig(**p) for p in list_products()]
 

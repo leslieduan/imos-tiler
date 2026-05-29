@@ -1,3 +1,4 @@
+import json
 from unittest.mock import patch
 
 import numpy as np
@@ -5,10 +6,36 @@ import pandas as pd
 import xarray as xr
 from starlette.testclient import TestClient
 
+import app.services.product.registry as registry
 from app.main import app
 from app.services.product.product import Product
 
 client = TestClient(app, raise_server_exceptions=True)
+
+
+def test_list_products_includes_coastal_fill_only_when_present(tmp_path, monkeypatch):
+    cfg = tmp_path / "products.json"
+    cfg.write_text(
+        json.dumps(
+            [
+                {
+                    "id": "sparse",
+                    "source_path": "s3://b/x.zarr",
+                    "variable": "GSLA",
+                    "coastal_fill": {"max_dist_px": 4},
+                },
+                {"id": "plain", "source_path": "s3://b/y.zarr", "variable": "V"},
+            ]
+        )
+    )
+    monkeypatch.setattr(registry, "_config_path", cfg)
+
+    r = client.get("/data_tiles/products")
+    assert r.status_code == 200
+    by_id = {p["id"]: p for p in r.json()}
+    assert by_id["sparse"]["coastal_fill"] == {"max_dist_px": 4}
+    assert "coastal_fill" not in by_id["plain"]  # omitted when not set
+
 
 _FAKE_PRODUCTS = {
     "product_a": Product(id="product_a", source_path="s3://bucket/a.zarr", variable="VAR"),

@@ -86,6 +86,22 @@ def test_add_product_multi_variable():
     assert r.status_code == 201
 
 
+def test_add_product_with_coastal_fill_passes_through():
+    payload = {
+        "id": "sparse",
+        "source_path": "s3://b/x.zarr",
+        "variable": "V",
+        "coastal_fill": {"max_dist_px": 4},
+    }
+    fake = Product(id="sparse", source_path="s3://b/x.zarr", variable="V")
+    with patch("app.routers.admin.products.register_product", return_value=fake) as reg:
+        r = client.post("/admin/products", json=payload, headers=_HEADERS)
+    assert r.status_code == 201
+    # The validated coastal_fill must survive into the dict handed to register_product,
+    # otherwise the feature can only be enabled by hand-editing products.json.
+    assert reg.call_args.args[0]["coastal_fill"] == {"max_dist_px": 4}
+
+
 # ---------------------------------------------------------------------------
 # POST /admin/products — validation
 # ---------------------------------------------------------------------------
@@ -130,6 +146,18 @@ def test_add_product_bad_chunk_px_rejected(chunk_px):
         "source_path": "s3://b/x.zarr",
         "variable": "V",
         "chunk_px": chunk_px,
+    }
+    r = client.post("/admin/products", json=payload, headers=_HEADERS)
+    assert r.status_code == 422
+
+
+@pytest.mark.parametrize("max_dist_px", [0, -1, "x", 1.5])
+def test_add_product_bad_coastal_fill_rejected(max_dist_px):
+    payload = {
+        "id": "p",
+        "source_path": "s3://b/x.zarr",
+        "variable": "V",
+        "coastal_fill": {"max_dist_px": max_dist_px},
     }
     r = client.post("/admin/products", json=payload, headers=_HEADERS)
     assert r.status_code == 422

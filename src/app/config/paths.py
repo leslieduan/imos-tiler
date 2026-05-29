@@ -12,3 +12,6 @@ path doesn't risk silently corrupting tile output.
 PRODUCTS_CONFIG_PATH = "data/products.json"
 COLORMAPS_CONFIG_PATH = "data/colormaps.json"
 DISK_CACHE_PATH = "slice_cache"
+# Committed global land-mask asset for coastal fill (see services/rendering/coastal.py).
+# Regenerate with scripts/build_land_mask.py.
+LAND_MASK_PATH = "data/land_mask.npz"

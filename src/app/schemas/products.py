@@ -3,10 +3,17 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 
+class CoastalFillConfig(BaseModel):
+    max_dist_px: int
+
+
 class ProductConfig(BaseModel):
     id: str
     source_path: str
     variable: str | list[str]
+    # Present in the response only when the product enables coastal fill (see
+    # §7.6); omitted otherwise via response_model_exclude_none on GET /products.
+    coastal_fill: CoastalFillConfig | None = None
 
 
 class DateRange(BaseModel):

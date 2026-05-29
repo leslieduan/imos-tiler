@@ -45,12 +45,26 @@ def _spawn_prewarm(product: Product) -> None:
     task.add_done_callback(_on_done)
 
 
+class CoastalFillPayload(BaseModel):
+    """Opt-in coastal fill (see services/rendering/coastal.py). Omit to disable."""
+
+    max_dist_px: int
+
+    @field_validator("max_dist_px")
+    @classmethod
+    def max_dist_px_positive(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError("must be a positive integer")
+        return v
+
+
 class ProductPayload(BaseModel):
     id: str
     source_path: str
     variable: str | list[str]
     chunk_px: list[int] = Field(default_factory=lambda: list(TILE.chunk_px))
     padding: int = TILE.padding
+    coastal_fill: CoastalFillPayload | None = None
 
     @field_validator("id")
     @classmethod

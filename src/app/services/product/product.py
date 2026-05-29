@@ -9,6 +9,18 @@ _lod_grids_lock = threading.Lock()
 
 
 @dataclass(frozen=True)
+class CoastalFill:
+    """Opt-in coastal-fill config for sparse products (see services/rendering/coastal.py).
+
+    ``max_dist_px`` caps how far (in LOD-grid pixels) the nearest-valid inpaint
+    reaches past the data edge before the coastline cut. Kept small so we never
+    fabricate values far from a real measurement.
+    """
+
+    max_dist_px: int
+
+
+@dataclass(frozen=True)
 class Product:
     id: str
     source_path: str
@@ -16,6 +28,7 @@ class Product:
     lod_grids: dict[int, tuple[int, int]] = field(default_factory=dict)
     chunk_px: tuple[int, int] = TILE.chunk_px
     padding: int = TILE.padding
+    coastal_fill: CoastalFill | None = None
 
     def __post_init__(self) -> None:
         if not self.variable:

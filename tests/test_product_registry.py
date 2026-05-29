@@ -75,6 +75,25 @@ def test_register_with_chunk_px_and_padding(isolated_products):
     assert p.padding == 4
 
 
+def test_register_with_coastal_fill(isolated_products):
+    registry.register_product(
+        {
+            "id": "sparse",
+            "source_path": "s3://bucket/x.zarr",
+            "variable": "V",
+            "coastal_fill": {"max_dist_px": 4},
+        }
+    )
+    p = PRODUCTS["sparse"]
+    assert p.coastal_fill is not None
+    assert p.coastal_fill.max_dist_px == 4
+
+
+def test_coastal_fill_absent_defaults_to_none(isolated_products):
+    registry.register_product({"id": "plain", "source_path": "s3://bucket/x.zarr", "variable": "V"})
+    assert PRODUCTS["plain"].coastal_fill is None
+
+
 def test_remove_product_persists_and_reflects_in_memory(isolated_products):
     registry.register_product(_entry("p1"))
     registry.register_product(_entry("p2", source="s3://bucket/y.zarr"))

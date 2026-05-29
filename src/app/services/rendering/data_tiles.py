@@ -21,6 +21,7 @@ import xarray as xr
 
 from app.services.caching.processed_cache import _processed_cache, processed_memo
 from app.services.product.product import Product
+from app.services.rendering.coastal import inpaint_nearest, land_mask_for_grid
 from app.services.rendering.kernels import normalize, resample_variables_to_grid
 from app.utils.image import encode_rgba
 
@@ -60,6 +61,10 @@ def _compute_processed(
 
     t0 = time.monotonic()
     raw = resample_variables_to_grid(ds, variables, total_w, total_h)
+    # Sparse products (e.g. GSLA): extend valid data toward the coast before
+    # normalising, so the filled cells register as valid in the per-variable mask.
+    if product.coastal_fill is not None:
+        raw = [inpaint_nearest(r, product.coastal_fill.max_dist_px) for r in raw]
     resample_ms = (time.monotonic() - t0) * 1000
 
     t0 = time.monotonic()
@@ -82,6 +87,19 @@ def _compute_processed(
         ocean = valid_masks[0].copy()
         for vm in valid_masks[1:]:
             ocean &= vm
+
+    # Cut the coastal fill (and any data that bled over land) back off using the
+    # real Natural Earth coastline, so we never paint fabricated values onto land.
+    if product.coastal_fill is not None:
+        land = land_mask_for_grid(
+            float(ds.lon.min()),
+            float(ds.lon.max()),
+            float(ds.lat.min()),
+            float(ds.lat.max()),
+            total_w,
+            total_h,
+        )
+        ocean = ocean & ~land
     normalize_ms = (time.monotonic() - t0) * 1000
 
     logger.debug(

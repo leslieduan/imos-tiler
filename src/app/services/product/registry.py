@@ -23,7 +23,7 @@ from pathlib import Path
 
 from app.config.constants import TILE
 from app.config.paths import PRODUCTS_CONFIG_PATH
-from app.services.product.product import Product
+from app.services.product.product import CoastalFill, Product
 
 logger = logging.getLogger(__name__)
 
@@ -139,10 +139,12 @@ def _write_file(entries: list[dict]) -> None:
 
 def _from_dict(entry: dict) -> Product:
     chunk_px = entry.get("chunk_px", list(TILE.chunk_px))
+    coastal_fill = entry.get("coastal_fill")
     return Product(
         id=entry["id"],
         source_path=entry["source_path"],
         variable=entry["variable"],
         chunk_px=tuple(chunk_px),  # type: ignore[arg-type]
         padding=entry.get("padding", TILE.padding),
+        coastal_fill=CoastalFill(**coastal_fill) if coastal_fill else None,
     )

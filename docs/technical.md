@@ -16,7 +16,7 @@
 
 **Part III — Tile generation internals**
 
-7. [Data-tile internals (LOD pyramid + resample + PNG encoding)](#7-data-tile-internals)
+7. [Data-tile internals (LOD pyramid + resample + PNG encoding + coastal fill)](#7-data-tile-internals)
 8. [Visual-tile internals (CRS guard, antimeridian, colormaps)](#8-visual-tile-internals)
 
 **Part IV — Data conventions**
@@ -618,6 +618,28 @@ Data tiles are RGBA PNGs (`optimize=False`). The byte layout is fixed and consum
 Normalisation ranges (`valueRange`, `uRange`/`vRange`) are computed from the full pre-resampled dataset and returned in `manifest.json`. All tiles for a date share the same ranges.
 
 Visual tiles do **not** use this contract — they return ordinary colourised PNGs after applying a colormap LUT.
+
+### 7.6 Coastal fill (sparse products)
+
+Opt-in per product. Disabled unless `coastal_fill` is set on the `Product` (see [§13.4](#134-optional-overrides)); when unset, the pipeline below is skipped and tile bytes are unchanged.
+
+**The problem.** Coarse-grid products leave a wide transparent strip between the rendered ocean and the coastline. GSLA (`model_sea_level_anomaly_gridded_realtime`) is the motivating case: its source grid is **0.2° ≈ 22 km/cell**, so the nearest valid value can sit 22–44 km offshore and there is no finer data to recover. This is a source-resolution problem, **not** kernel erosion — the bilinear NaN-propagation in `_numba_bilinear` accounts for only ~1.5 % of ocean at LOD 1, mostly at the outer domain edge rather than the coast.
+
+**The fix (`services/rendering/coastal.py`, applied in `_compute_processed`).** Two steps, both bounded so we never fabricate values far from a real measurement:
+
+1. **Inpaint** — `inpaint_nearest` extends each resampled variable toward the coast by copying the nearest valid value into NaN cells within `max_dist_px` (Euclidean, in **LOD-grid pixels**), via `scipy.ndimage.distance_transform_edt(return_indices=True)`. Cells farther than that stay NaN. Linear interpolation is the wrong tool here — the gap is at the *edge* of the data (extrapolation), not between points.
+2. **Coastline cut** — `land_mask_for_grid` samples a real coastline onto the LOD grid (same `linspace` mapping as resample, longitudes wrapped to `[−180, 180)` for antimeridian domains) and the result is ANDed into the ocean mask: `ocean &= ~land`. So fabricated values that fall on land are clipped back to transparent.
+
+Because the cut writes the existing ocean-mask channel (alpha for scalar, B for UV — see [§7.5](#75-png-encoding-contract)), there is **no shader change** and the LOD contract is untouched.
+
+**Land-mask asset.** The coastline is a committed, bit-packed global raster `data/land_mask.npz` (Natural Earth 1:10m land, 0.05° ≈ 5.5 km, ~3 MB), built once by `scripts/build_land_mask.py` (run with ephemeral deps: `uv run --with regionmask --with cartopy --with pooch python scripts/build_land_mask.py`). At runtime `coastal.py` needs only numpy + scipy — **no new runtime dependency**. `load_land_mask` unpacks it lazily and `land_mask_for_grid` is `@lru_cache`d (the mask is static per product grid).
+
+**Caveats.**
+
+- The filled band is **fabricated data** — copies of the nearest real value, least reliable exactly where the signal is least reliable. Treat it as cosmetic.
+- `max_dist_px` is in LOD-grid pixels, so its geographic reach depends on the product's grid resolution. For GSLA (~0.18°/px) `4` ≈ 0.7° ≈ ~80 km of reach before the coastline trims it.
+- Changing `max_dist_px` (or the asset) alters rendered bytes for an existing URL — bump `CACHE_VERSION` ([§7.5](#75-png-encoding-contract) note in `config/constants.py`).
+- **Visual tiles are not covered.** Mirroring this on the `/visual_tiles` (rio-tiler) pipeline by filling the *native* grid achieves almost nothing for GSLA, because its native grid already covers the ocean fully (its NaN cells are essentially land). The visible visual-tile gap is created downstream by rio-tiler's reprojection and would have to be filled at *output/tile resolution*; that is deliberately not implemented.
 
 ---
 
@@ -1411,11 +1433,12 @@ On deletion:
 
 `Product` fields can be customised per product if the defaults don't fit:
 
-| Field       | Default              | When to override                                          |
-| ----------- | -------------------- | --------------------------------------------------------- |
-| `chunk_px`  | `(240, 192)`         | Store has very small or very large spatial extent         |
-| `padding`   | `1`                  | Tile edge artefacts, or no padding needed                 |
-| `lod_grids` | `{}` (auto-computed) | Pre-set known grids to skip the first-request computation |
+| Field          | Default              | When to override                                                                          |
+| -------------- | -------------------- | ----------------------------------------------------------------------------------------- |
+| `chunk_px`     | `(240, 192)`         | Store has very small or very large spatial extent                                         |
+| `padding`      | `1`                  | Tile edge artefacts, or no padding needed                                                 |
+| `lod_grids`    | `{}` (auto-computed) | Pre-set known grids to skip the first-request computation                                 |
+| `coastal_fill` | `None` (off)         | Sparse/coarse products with a wide coastal transparency gap (e.g. GSLA); see [§7.6](#76-coastal-fill-sparse-products). Set `{"max_dist_px": N}` (positive int); validated by the admin API. Data tiles only. |
 
 ---
 

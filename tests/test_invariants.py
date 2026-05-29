@@ -42,7 +42,7 @@ def test_tile_geometry_matches_frontend_shader_contract():
 def test_cache_version_is_set():
     # Bumping is intentional; an unintended change to CACHE_VERSION invalidates
     # every CDN/browser-cached tile across all clients on next deploy.
-    assert CACHE_VERSION == "cv1"
+    assert CACHE_VERSION == "cv2"
 
 
 # --- Date / timezone round-trip ------------------------------------------
