@@ -161,6 +161,14 @@ def test_point_ok():
     assert "GSLA" in body["variables"]
 
 
+def test_point_out_of_bounds():
+    # Fixture grid covers lat -40..-30, lon 140..150. A point well south of that
+    # must 404 rather than silently snapping to the edge cell (method="nearest").
+    with patch("app.routers.shared.load_slice", return_value=_make_ds()):
+        response = client.get("/data_tiles/sea_level_anomaly/2024-01-01/point?lat=-55.46&lon=145")
+    assert response.status_code == 404
+
+
 # --- /{product}/timeseries ---
 
 
@@ -189,7 +197,13 @@ def test_timeseries_unknown_product():
 
 
 def test_timeseries_ok():
-    with patch("app.routers.public.products.load_point_series", return_value=_fake_point_series()):
+    with (
+        patch("app.routers.public.products.get_store", return_value=_make_ds()),
+        patch(
+            "app.routers.public.products.load_point_series",
+            return_value=_fake_point_series(),
+        ),
+    ):
         response = client.get(
             "/data_tiles/sea_level_anomaly/timeseries?lat=-35&lon=145&from=2024-01-01&to=2024-01-03"
         )
@@ -206,15 +220,27 @@ def test_timeseries_ok():
 
 
 def test_timeseries_empty_range():
-    with patch(
-        "app.routers.public.products.load_point_series",
-        return_value=(-35.0, 145.0, [], None),
+    with (
+        patch("app.routers.public.products.get_store", return_value=_make_ds()),
+        patch(
+            "app.routers.public.products.load_point_series",
+            return_value=(-35.0, 145.0, [], None),
+        ),
     ):
         response = client.get(
             "/data_tiles/sea_level_anomaly/timeseries?lat=-35&lon=145&from=2099-01-01&to=2099-12-31"
         )
     assert response.status_code == 200
     assert response.json()["series"] == []
+
+
+def test_timeseries_out_of_bounds():
+    # Out-of-bounds point must 404 before load_point_series runs, matching /point.
+    with patch("app.routers.public.products.get_store", return_value=_make_ds()):
+        response = client.get(
+            "/data_tiles/sea_level_anomaly/timeseries?lat=-55.46&lon=145&from=2024-01-01"
+        )
+    assert response.status_code == 404
 
 
 def test_timeseries_bad_date():

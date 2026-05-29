@@ -1,6 +1,7 @@
 import hashlib
 import math
 
+import xarray as xr
 from fastapi import APIRouter, Header, HTTPException, Path, Query, Response
 from fastapi.openapi.models import Example
 from fastapi.responses import JSONResponse
@@ -20,6 +21,7 @@ from app.services.product.inspect import inspect_product
 from app.services.product.registry import iter_product_items, list_products
 from app.services.store.registry import get_available_dates, get_store
 from app.utils.dates import three_months_ago
+from app.utils.geo import dataset_bounds
 
 from ..shared import (
     DATE_EX,
@@ -39,6 +41,24 @@ router = APIRouter()
 # Trade-off: a manifest change can be invisible for up to 5 minutes; acceptable because product/date
 # updates are not real-time-critical.
 _REVALIDATE_HEADERS = {"Cache-Control": "public, max-age=300, must-revalidate"}
+
+
+def _require_point_in_bounds(ds: xr.Dataset, lat: float, lon: float) -> None:
+    """Raise 404 if (lat, lon) falls outside the dataset's coverage.
+
+    sel(method="nearest") snaps unconditionally, so without this guard an
+    out-of-bounds request silently returns the edge cell. Bounds match those
+    advertised by /manifest.
+    """
+    lon_min, lon_max, lat_min, lat_max = dataset_bounds(ds)
+    if not (lat_min <= lat <= lat_max and lon_min <= lon <= lon_max):
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"Point ({lat}, {lon}) is outside the data bounds "
+                f"(lat {lat_min}..{lat_max}, lon {lon_min}..{lon_max})"
+            ),
+        )
 
 
 def _etag(fingerprint: str) -> str:
@@ -166,6 +186,7 @@ def get_point(
     variables = product.variables
     ds = load_slice_or_404(product.source_path, date, variables)
 
+    _require_point_in_bounds(ds, lat, lon)
     point = ds.sel(lat=lat, lon=lon, method="nearest")
 
     values: dict[str, VariableValue] = {}
@@ -221,6 +242,7 @@ def get_timeseries(
         validate_date(to_date)
 
     variables = product.variables
+    _require_point_in_bounds(get_store(product.source_path), lat, lon)
     actual_lat, actual_lon, dates, point_ds = load_point_series(
         product.source_path, variables, lat, lon, effective_from, to_date
     )
