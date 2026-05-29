@@ -61,6 +61,7 @@ def get_tile(
     return Response(content=png_bytes, media_type="image/png", headers=IMMUTABLE_CACHE_HEADERS)
 
 
+# TODO: investigate why response of satellite_austemp_sst_8day_sst is so slow, taking 5 seconds for cold hit.
 @router.get(
     "/{product_id}/{date}/manifest.json",
     summary="Data tile manifest",
