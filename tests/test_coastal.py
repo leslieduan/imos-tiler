@@ -1,7 +1,7 @@
 """Coastal-fill tests: nearest-valid inpaint, land-mask sampling, and the
 fill+cut integration through _compute_processed.
 
-These exercise the real committed land-mask asset (data/land_mask.npz), so the
+These exercise the real committed land-mask asset (src/app/assets/land_mask.npz), so the
 geographic assertions double as a smoke test that the asset is present and sane.
 """
 

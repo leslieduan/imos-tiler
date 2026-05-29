@@ -632,7 +632,7 @@ Opt-in per product. Disabled unless `coastal_fill` is set on the `Product` (see 
 
 Because the cut writes the existing ocean-mask channel (alpha for scalar, B for UV — see [§7.5](#75-png-encoding-contract)), there is **no shader change** and the LOD contract is untouched.
 
-**Land-mask asset.** The coastline is a committed, bit-packed global raster `data/land_mask.npz` (Natural Earth 1:10m land, 0.05° ≈ 5.5 km, ~3 MB), built once by `scripts/build_land_mask.py` (run with ephemeral deps: `uv run --with regionmask --with cartopy --with pooch python scripts/build_land_mask.py`). At runtime `coastal.py` needs only numpy + scipy — **no new runtime dependency**. `load_land_mask` unpacks it lazily and `land_mask_for_grid` is `@lru_cache`d (the mask is static per product grid).
+**Land-mask asset.** The coastline is a committed, bit-packed global raster `src/app/assets/land_mask.npz` (Natural Earth 1:10m land, 0.05° ≈ 5.5 km, ~3 MB), built once by `scripts/build_land_mask.py` (run with ephemeral deps: `uv run --with regionmask --with cartopy --with pooch python scripts/build_land_mask.py`). It ships **inside the package** (resolved relative to the package via `LAND_MASK_PATH`, CWD-independent) rather than in the runtime `data/` dir — `data/` may be owned/written by the service, which would otherwise block `git pull` of the asset. At runtime `coastal.py` needs only numpy + scipy — **no new runtime dependency**. `load_land_mask` unpacks it lazily and `land_mask_for_grid` is `@lru_cache`d (the mask is static per product grid).
 
 **Caveats.**
 

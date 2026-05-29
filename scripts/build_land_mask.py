@@ -1,4 +1,4 @@
-"""Build the committed land-mask asset used by coastal fill (data/land_mask.npz).
+"""Build the committed land-mask asset used by coastal fill (src/app/assets/land_mask.npz).
 
 Dev-only, run once (regenerate only if you change resolution or the coastline
 source). NOT part of the project's runtime/dev dependencies — invoke with uv's
@@ -16,13 +16,16 @@ Output: a global bit-packed boolean grid (True = land), north→south, covering
 costs little in git; the runtime unpacks it once in coastal.load_land_mask().
 """
 
+from pathlib import Path
+
 import numpy as np
 import regionmask
 
 RES = 0.05  # ~5.5 km cells — finer than any current render grid
 LON_MIN = -180.0
 LAT_MAX = 90.0
-OUT = "data/land_mask.npz"
+# Static package asset (see config/paths.LAND_MASK_PATH), not runtime data/.
+OUT = "src/app/assets/land_mask.npz"
 
 
 def main() -> None:
@@ -37,6 +40,7 @@ def main() -> None:
     land = mask.notnull().values  # bool, shape (lat, lon), True = land
 
     packed = np.packbits(land)  # flatten C-order + pack to bits
+    Path(OUT).parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
         OUT,
         packed=packed,

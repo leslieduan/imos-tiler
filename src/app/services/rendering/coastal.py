@@ -8,7 +8,7 @@ Two pieces, both opt-in per product via ``Product.coastal_fill``:
     it; nearest-valid fill can, while the distance cap keeps us from fabricating
     values far from any real measurement.
   * ``land_mask_for_grid`` — a boolean land mask sampled from the committed global
-    Natural Earth raster (data/land_mask.npz) onto a render grid, so the caller can
+    Natural Earth raster (src/app/assets/land_mask.npz) onto a render grid, so the caller can
     cut fabricated values back off the land. Reuses the exact lon/lat → pixel
     mapping the resample/shader assume (linspace over the grid bounds, north→south).
 
