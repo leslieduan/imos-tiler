@@ -10,7 +10,7 @@ _lod_grids_lock = threading.Lock()
 
 @dataclass(frozen=True)
 class CoastalFill:
-    """Opt-in coastal-fill config for sparse products (see services/rendering/coastal.py).
+    """Opt-in coastal-fill config for sparse products (see services/rendering/masks.py).
 
     ``max_dist_px`` caps how far (in LOD-grid pixels) the nearest-valid inpaint
     reaches past the data edge before the coastline cut. Kept small so we never

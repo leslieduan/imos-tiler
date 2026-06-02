@@ -217,13 +217,23 @@ imos-tiler/
     security.md                  ← admin endpoint protection (key + nginx + EC2 security group)
 ```
 
-All three runtime paths are hardcoded constants in `src/app/config/paths.py` — not env vars:
+These runtime paths are constants in `src/app/config/paths.py`. The product/colormap config paths are hardcoded; `DISK_CACHE_PATH` is overridable via the `DISK_CACHE_PATH` env var:
 
-| Constant                | Value                 | Notes                                                                                     |
+| Constant                | Default               | Notes                                                                                     |
 | ----------------------- | --------------------- | ----------------------------------------------------------------------------------------- |
 | `PRODUCTS_CONFIG_PATH`  | `data/products.json`  | Auto-created by `docker-entrypoint.sh` if absent; `./data` bind-mounted in Docker.        |
 | `COLORMAPS_CONFIG_PATH` | `data/colormaps.json` | Same as above.                                                                            |
-| `DISK_CACHE_PATH`       | `slice_cache`         | Relative to working directory (`/app` in Docker); `./slice_cache` bind-mounted in Docker. |
+| `DISK_CACHE_PATH`       | `slice_cache`         | Env-overridable. Relative to working directory (`/app` in Docker); `./slice_cache` bind-mounted in Docker. `docker-entrypoint.sh` pre-creates whatever this resolves to. |
+
+**Local dev — keep the L3 cache out of the git working tree.** The `slice_cache` default lives *inside* the repo, so any workspace-clean operation around a branch checkout — `git clean -fdx`, an IDE "discard untracked" / clean action, or a `git worktree` swap — silently wipes the (git-ignored) cache. To avoid losing warm slices, point the cache somewhere stable outside the tree, e.g. in `.env`:
+
+```bash
+DISK_CACHE_PATH=~/.cache/titiler-project/slice_cache
+```
+
+A leading `~` is expanded (`os.path.expanduser` in `paths.py`; python-dotenv does not expand it itself). The directory is created on first write — no manual `mkdir` needed.
+
+**Load-order note.** `paths.py` reads this var at **module-import** time, so `.env` must already be loaded by then. That is why `load_dotenv()` lives in `src/app/__init__.py` (which Python runs before any `app.*` submodule import) rather than in `main.py` — a `load_dotenv()` after `main.py`'s config imports would be too late, and the module would capture the `slice_cache` default. The same applies to other module-level env reads such as `caching/slice_cache.py`'s `SLICE_CACHE_SIZE`. A real environment variable (shell `export` / Docker `environment:`) still overrides `.env`, since `load_dotenv()` does not clobber existing vars. The default stays relative so Docker volume-mount deploys are unchanged.
 
 ---
 
@@ -625,14 +635,16 @@ Opt-in per product. Disabled unless `coastal_fill` is set on the `Product` (see 
 
 **The problem.** Coarse-grid products leave a wide transparent strip between the rendered ocean and the coastline. GSLA (`model_sea_level_anomaly_gridded_realtime`) is the motivating case: its source grid is **0.2° ≈ 22 km/cell**, so the nearest valid value can sit 22–44 km offshore and there is no finer data to recover. This is a source-resolution problem, **not** kernel erosion — the bilinear NaN-propagation in `_numba_bilinear` accounts for only ~1.5 % of ocean at LOD 1, mostly at the outer domain edge rather than the coast.
 
-**The fix (`services/rendering/coastal.py`, applied in `_compute_processed`).** Two steps, both bounded so we never fabricate values far from a real measurement:
+**The fix (`services/rendering/masks.py`, applied in `_compute_processed`).** Two steps, both bounded so we never fabricate values far from a real measurement:
 
 1. **Inpaint** — `inpaint_nearest` extends each resampled variable toward the coast by copying the nearest valid value into NaN cells within `max_dist_px` (Euclidean, in **LOD-grid pixels**), via `scipy.ndimage.distance_transform_edt(return_indices=True)`. Cells farther than that stay NaN. Linear interpolation is the wrong tool here — the gap is at the *edge* of the data (extrapolation), not between points.
 2. **Coastline cut** — `land_mask_for_grid` samples a real coastline onto the LOD grid (same `linspace` mapping as resample, longitudes wrapped to `[−180, 180)` for antimeridian domains) and the result is ANDed into the ocean mask: `ocean &= ~land`. So fabricated values that fall on land are clipped back to transparent.
 
 Because the cut writes the existing ocean-mask channel (alpha for scalar, B for UV — see [§7.5](#75-png-encoding-contract)), there is **no shader change** and the LOD contract is untouched.
 
-**Land-mask asset.** The coastline is a committed, bit-packed global raster `src/app/assets/land_mask.npz` (Natural Earth 1:10m land, 0.05° ≈ 5.5 km, ~3 MB), built once by `scripts/build_land_mask.py` (run with ephemeral deps: `uv run --with regionmask --with cartopy --with pooch python scripts/build_land_mask.py`). It ships **inside the package** (resolved relative to the package via `LAND_MASK_PATH`, CWD-independent) rather than in the runtime `data/` dir — `data/` may be owned/written by the service, which would otherwise block `git pull` of the asset. At runtime `coastal.py` needs only numpy + scipy — **no new runtime dependency**. `load_land_mask` unpacks it lazily and `land_mask_for_grid` is `@lru_cache`d (the mask is static per product grid).
+**Land-mask asset.** The coastline is a committed, bit-packed global raster `src/app/assets/land_mask.npz` (Natural Earth 1:10m land, 0.05° ≈ 5.5 km, ~3 MB), built once by `scripts/build_land_mask.py` (run with ephemeral deps: `uv run --with regionmask --with cartopy --with pooch python scripts/build_land_mask.py`). It ships **inside the package** (resolved relative to the package via `LAND_MASK_PATH`, CWD-independent) rather than in the runtime `data/` dir — `data/` may be owned/written by the service, which would otherwise block `git pull` of the asset. At runtime `masks.py` needs only numpy + scipy — **no new runtime dependency**. `load_land_mask` unpacks it lazily and `land_mask_for_grid` is `@lru_cache`d (the mask is static per product grid).
+
+**Ocean-validity mask.** A second committed mask, `src/app/assets/ocean_mask.npz`, is built by `scripts/build_ocean_mask.py` from `src/app/assets/OCmask.nc` (the model's valid-domain grid, lon 50–190°E, lat −60–10°, 1.0 = valid). `ocean_mask_for_grid` samples it onto the LOD grid the same way as the land mask and the result is ANDed into the ocean mask to cut anomalous points outside the valid model domain. Because it's tied to that specific source grid, it's applied **only** to products on the `model_sea_level_anomaly_gridded_realtime` store, listed by id in `data_tiles._OCEAN_MASKED_PRODUCT_IDS` (currently the UCUR/VCUR currents product) — it is not a `products.json` flag. Same no-runtime-dep / pre-baked-`.npz` rationale as the land mask.
 
 **Caveats.**
 
@@ -1712,7 +1724,7 @@ See `docker-compose.yml` for the production wiring of these variables, and [`doc
 
 ## 16. Logging
 
-All logging configuration lives in `log_config.py`. `main.py` calls `configure_logging()` once at startup (after `load_dotenv()`) and nothing else touches logging setup.
+All logging configuration lives in `log_config.py`. `main.py` calls `configure_logging()` once at startup; `.env` is already loaded by then because `load_dotenv()` runs in `src/app/__init__.py` before any submodule import (see [§4](#4-file-layout)). Nothing else touches logging setup.
 
 ### 16.1 Format selection
 

@@ -5,7 +5,6 @@ from contextlib import asynccontextmanager
 
 import anyio
 import starlette.middleware.gzip as _gzip_mw
-from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from starlette.middleware.cors import CORSMiddleware
@@ -28,7 +27,6 @@ from app.services.rendering.kernels import warmup_resample
 from app.services.rendering.visual_tiles import warmup_visual
 from app.services.store.registry import prewarm_stores
 
-load_dotenv()
 configure_logging()
 
 logger = logging.getLogger(__name__)

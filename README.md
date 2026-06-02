@@ -32,6 +32,14 @@ LOG_LEVEL=DEBUG uv run uvicorn app.main:app --reload
 
 Server available at `http://localhost:8000`. Interactive API docs at `http://localhost:8000/docs`.
 
+> **Tip — keep the disk cache out of the repo.** The L3 disk cache defaults to `./slice_cache`, *inside* the working tree, so a `git clean`, an IDE "discard untracked", or a worktree swap around a branch checkout silently wipes your warm slices. Point it elsewhere by adding `DISK_CACHE_PATH` to `.env` (a leading `~` is expanded):
+>
+> ```bash
+> DISK_CACHE_PATH=~/.cache/titiler-project/slice_cache
+> ```
+>
+> The directory is created automatically on first write. A real environment variable (shell `export` or Docker) overrides the `.env` value.
+
 ### Docker
 
 Create a `.env` file in the project root before starting:
