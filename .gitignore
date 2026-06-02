@@ -15,9 +15,6 @@ wheels/
 .env
 titiler-demo-key.pem
 
-# nginx TLS material (self-signed cert generated on the host; never commit the key)
-docker/certs/
-
 # Local Docker overrides (not for EC2)
 docker-compose.override.yml
 
