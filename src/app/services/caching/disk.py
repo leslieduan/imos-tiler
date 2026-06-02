@@ -14,6 +14,7 @@ import logging
 import os
 import pickle
 import shutil
+import tempfile
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
@@ -48,8 +49,34 @@ def read_slice_from_disk(cache_path: Path) -> xr.Dataset | None:
 
 
 def write_slice_to_disk(cache_path: Path, ds: xr.Dataset) -> None:
+    """Atomically write a slice to ``cache_path``.
+
+    The prewarmer/refresher write slices while request threads read the same
+    paths. A plain ``write_bytes`` truncates then refills the final file, so a
+    concurrent reader can observe a half-written (corrupt) file, and two writers
+    racing on the same date can interleave into a permanently corrupt one.
+
+    Writing to a unique temp file in the *same directory* and ``os.replace``-ing
+    it into place makes the swap atomic on POSIX: a reader sees either the old
+    complete file or the new complete file, never a partial one. The temp file is
+    named ``*.tmp`` so the ``*.pkl.lz4`` globs in eviction/stats never pick it up,
+    and is removed if anything before the rename fails. No fsync — this is a
+    rebuildable cache, so visibility (rename atomicity) matters, durability across
+    a power loss does not.
+    """
     cache_path.parent.mkdir(parents=True, exist_ok=True)
-    cache_path.write_bytes(lz4.frame.compress(pickle.dumps(ds)))
+    data = lz4.frame.compress(pickle.dumps(ds))
+    fd, tmp_name = tempfile.mkstemp(
+        dir=cache_path.parent, prefix=f".{cache_path.name}.", suffix=".tmp"
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        os.replace(tmp_path, cache_path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
 
 
 # Serialises disk-pressure evictions. Without this, concurrent prewarm workers

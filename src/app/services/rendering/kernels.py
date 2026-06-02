@@ -12,6 +12,7 @@ request doesn't pay the one-time init cost.
 """
 
 import logging
+import threading
 import time
 
 import numpy as np
@@ -20,6 +21,26 @@ import xarray as xr
 from app.services.colormap.categorical import is_categorical_variable
 
 logger = logging.getLogger(__name__)
+
+# Serialises entry into the parallel=True kernels below.
+#
+# Numba runs a parallel region through its threading layer. When neither TBB nor
+# OpenMP is installed, it falls back to `workqueue`, which is NOT threadsafe:
+# entering a parallel region from two Python threads at once corrupts its shared
+# scheduler state — silently garbling the output buffers (a tile comes back with
+# a full-range alpha channel instead of a 0/255 ocean mask) or aborting the
+# process on builds with the concurrency guard. Our sync tile handlers run in the
+# AnyIO thread pool, so a tile burst does exactly that.
+#
+# Holding this lock means only one parallel region is ever active at a time. Each
+# call still uses every core for its own prange loop — we only forbid two regions
+# overlapping. The guarded section (resample + normalize) is a few ms and dwarfed
+# by the S3 slice fetch, so the throughput cost is negligible. A lock is preferred
+# over forcing the TBB/OpenMP layer because that would make correctness depend on
+# an unpinned native lib being present on every deploy (silent fallback to
+# workqueue = the bug returns with no error). See the threading-layer docs:
+# https://numba.readthedocs.io/en/stable/user/threading-layer.html
+_PARALLEL_KERNEL_LOCK = threading.Lock()
 
 
 try:
@@ -198,7 +219,8 @@ def resample_variables_to_grid(
             if flip:
                 arr = np.ascontiguousarray(arr[::-1, :])
             kernel = _numba_nearest if is_categorical_variable(ds[v].attrs) else _numba_bilinear
-            out.append(kernel(arr, total_h, total_w))
+            with _PARALLEL_KERNEL_LOCK:
+                out.append(kernel(arr, total_h, total_w))
         return out
 
     # Fallback: xarray's interp on the same linspace mapping, per-variable method.
@@ -233,9 +255,10 @@ def normalize(arr: np.ndarray, lo: float, hi: float, out_max: int) -> tuple[np.n
     the numba/fallback branch and out_max → dtype selection.
     """
     if _HAS_NUMBA:
-        if out_max > 255:
-            return _numba_normalize_uint32(arr, lo, hi, out_max)
-        return _numba_normalize_uint8(arr, lo, hi, out_max)
+        with _PARALLEL_KERNEL_LOCK:
+            if out_max > 255:
+                return _numba_normalize_uint32(arr, lo, hi, out_max)
+            return _numba_normalize_uint8(arr, lo, hi, out_max)
     norm = normalize_fallback(arr, lo, hi, out_max)
     valid = (~np.isnan(arr)).astype(np.uint8)
     return norm, valid
@@ -253,6 +276,9 @@ def warmup_resample() -> None:
     )
     resample_variables_to_grid(ds, ["v"], 32, 32)
     if _HAS_NUMBA:
+        # Called once at startup before any request is served, so these direct
+        # kernel calls don't need _PARALLEL_KERNEL_LOCK — nothing else can be in a
+        # parallel region yet.
         sample = np.zeros((32, 32), dtype=np.float32)
         _numba_nearest(sample, 32, 32)
         _numba_normalize_uint32(sample, 0.0, 1.0, 16777215)
