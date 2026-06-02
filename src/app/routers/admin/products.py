@@ -46,7 +46,7 @@ def _spawn_prewarm(product: Product) -> None:
 
 
 class CoastalFillPayload(BaseModel):
-    """Opt-in coastal fill (see services/rendering/coastal.py). Omit to disable."""
+    """Opt-in coastal fill (see services/rendering/masks.py). Omit to disable."""
 
     max_dist_px: int
 

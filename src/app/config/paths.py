@@ -14,10 +14,14 @@ from pathlib import Path
 PRODUCTS_CONFIG_PATH = "data/products.json"
 COLORMAPS_CONFIG_PATH = "data/colormaps.json"
 DISK_CACHE_PATH = "slice_cache"
-# Committed global land-mask asset for coastal fill (see services/rendering/coastal.py).
+# Committed global land-mask asset for coastal fill (see services/rendering/masks.py).
 # Unlike the paths above, this is a *static* asset shipped with the package, not
 # runtime state — so it's resolved relative to the package (CWD-independent) and
 # lives outside the runtime `data/` dir, which the service may own/write (a
 # service-owned data/ would otherwise block `git pull` of the asset).
 # Regenerate with scripts/build_land_mask.py.
 LAND_MASK_PATH = str(Path(__file__).resolve().parents[1] / "assets" / "land_mask.npz")
+# Committed regional ocean-validity mask (see services/rendering/masks.py).
+# Same static-asset rationale as LAND_MASK_PATH. Regenerate with
+# scripts/build_ocean_mask.py from src/app/assets/OCmask.nc.
+OCEAN_MASK_PATH = str(Path(__file__).resolve().parents[1] / "assets" / "ocean_mask.npz")
