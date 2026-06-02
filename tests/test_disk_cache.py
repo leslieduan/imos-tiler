@@ -75,6 +75,51 @@ def test_write_and_read_slice_round_trip(cache_root):
     assert float(out["v"].values[0, 0]) == 42.0
 
 
+def test_write_leaves_no_temp_files(cache_root):
+    ds = _make_slice(value=7.0)
+    p = disk_cache.disk_cache_path("s3://b/x.zarr", "2024-01-01", ["v"])
+    disk_cache.write_slice_to_disk(p, ds)
+    # The atomic write goes via a *.tmp file that must be renamed away, leaving
+    # only the final slice behind.
+    assert sorted(f.name for f in p.parent.iterdir()) == [p.name]
+
+
+def test_write_failure_preserves_existing_file_and_cleans_temp(cache_root, monkeypatch):
+    """If the rename fails mid-write, the previous good slice must survive intact
+    and no temp turd may be left behind — the whole point of the atomic swap."""
+    p = disk_cache.disk_cache_path("s3://b/x.zarr", "2024-01-01", ["v"])
+    disk_cache.write_slice_to_disk(p, _make_slice(value=1.0))
+
+    def boom(*_a, **_k):
+        raise OSError("simulated rename failure")
+
+    monkeypatch.setattr(disk_cache.os, "replace", boom)
+    with pytest.raises(OSError, match="simulated rename failure"):
+        disk_cache.write_slice_to_disk(p, _make_slice(value=2.0))
+
+    # Old content intact (never truncated), and the failed write left no temp file.
+    out = disk_cache.read_slice_from_disk(p)
+    assert out is not None and float(out["v"].values[0, 0]) == 1.0
+    assert sorted(f.name for f in p.parent.iterdir()) == [p.name]
+
+
+def test_concurrent_writes_yield_one_valid_complete_file(cache_root):
+    """Many threads writing the same path concurrently must never produce a torn
+    file: the final slice reads back as exactly one writer's complete dataset."""
+    import concurrent.futures
+
+    p = disk_cache.disk_cache_path("s3://b/x.zarr", "2024-01-01", ["v"])
+    values = [float(i) for i in range(1, 33)]
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=16) as ex:
+        list(ex.map(lambda val: disk_cache.write_slice_to_disk(p, _make_slice(val)), values))
+
+    out = disk_cache.read_slice_from_disk(p)
+    assert out is not None
+    assert float(out["v"].values[0, 0]) in values  # a complete value, not a mix
+    assert sorted(f.name for f in p.parent.iterdir()) == [p.name]  # no temp leftovers
+
+
 def test_read_corrupt_file_returns_none(cache_root):
     """A truncated/corrupt pickle must NOT crash startup — just log + skip."""
     p = cache_root / "bad-cache" / "2024-01-01.pkl.lz4"
