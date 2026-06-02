@@ -104,6 +104,7 @@ def _compute_processed(
             ocean &= vm
 
     apply_ocean_mask = product.id in _OCEAN_MASKED_PRODUCT_IDS
+
     if product.coastal_fill is not None or apply_ocean_mask:
         lon_min, lon_max = float(ds.lon.min()), float(ds.lon.max())
         lat_min, lat_max = float(ds.lat.min()), float(ds.lat.max())

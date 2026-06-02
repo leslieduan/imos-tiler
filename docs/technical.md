@@ -217,13 +217,23 @@ imos-tiler/
     security.md                  ← admin endpoint protection (key + nginx + EC2 security group)
 ```
 
-All three runtime paths are hardcoded constants in `src/app/config/paths.py` — not env vars:
+These runtime paths are constants in `src/app/config/paths.py`. The product/colormap config paths are hardcoded; `DISK_CACHE_PATH` is overridable via the `DISK_CACHE_PATH` env var:
 
-| Constant                | Value                 | Notes                                                                                     |
+| Constant                | Default               | Notes                                                                                     |
 | ----------------------- | --------------------- | ----------------------------------------------------------------------------------------- |
 | `PRODUCTS_CONFIG_PATH`  | `data/products.json`  | Auto-created by `docker-entrypoint.sh` if absent; `./data` bind-mounted in Docker.        |
 | `COLORMAPS_CONFIG_PATH` | `data/colormaps.json` | Same as above.                                                                            |
-| `DISK_CACHE_PATH`       | `slice_cache`         | Relative to working directory (`/app` in Docker); `./slice_cache` bind-mounted in Docker. |
+| `DISK_CACHE_PATH`       | `slice_cache`         | Env-overridable. Relative to working directory (`/app` in Docker); `./slice_cache` bind-mounted in Docker. `docker-entrypoint.sh` pre-creates whatever this resolves to. |
+
+**Local dev — keep the L3 cache out of the git working tree.** The `slice_cache` default lives *inside* the repo, so any workspace-clean operation around a branch checkout — `git clean -fdx`, an IDE "discard untracked" / clean action, or a `git worktree` swap — silently wipes the (git-ignored) cache. To avoid losing warm slices, point the cache somewhere stable outside the tree, e.g. in `.env`:
+
+```bash
+DISK_CACHE_PATH=~/.cache/titiler-project/slice_cache
+```
+
+A leading `~` is expanded (`os.path.expanduser` in `paths.py`; python-dotenv does not expand it itself). The directory is created on first write — no manual `mkdir` needed.
+
+**Load-order note.** `paths.py` reads this var at **module-import** time, so `.env` must already be loaded by then. That is why `load_dotenv()` lives in `src/app/__init__.py` (which Python runs before any `app.*` submodule import) rather than in `main.py` — a `load_dotenv()` after `main.py`'s config imports would be too late, and the module would capture the `slice_cache` default. The same applies to other module-level env reads such as `caching/slice_cache.py`'s `SLICE_CACHE_SIZE`. A real environment variable (shell `export` / Docker `environment:`) still overrides `.env`, since `load_dotenv()` does not clobber existing vars. The default stays relative so Docker volume-mount deploys are unchanged.
 
 ---
 
@@ -1714,7 +1724,7 @@ See `docker-compose.yml` for the production wiring of these variables, and [`doc
 
 ## 16. Logging
 
-All logging configuration lives in `log_config.py`. `main.py` calls `configure_logging()` once at startup (after `load_dotenv()`) and nothing else touches logging setup.
+All logging configuration lives in `log_config.py`. `main.py` calls `configure_logging()` once at startup; `.env` is already loaded by then because `load_dotenv()` runs in `src/app/__init__.py` before any submodule import (see [§4](#4-file-layout)). Nothing else touches logging setup.
 
 ### 16.1 Format selection
 

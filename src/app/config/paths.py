@@ -9,11 +9,19 @@ because paths are operational config, not shader-coupled invariants. Changing a
 path doesn't risk silently corrupting tile output.
 """
 
+import os
 from pathlib import Path
 
 PRODUCTS_CONFIG_PATH = "data/products.json"
 COLORMAPS_CONFIG_PATH = "data/colormaps.json"
-DISK_CACHE_PATH = "slice_cache"
+# L3 disk cache root. Defaults to a working-dir-relative "slice_cache" for
+# Docker volume-mount deploys (see module docstring), but is overridable via
+# DISK_CACHE_PATH so local dev can point it *outside* the git working tree —
+# otherwise a `git clean -fdx`, an IDE clean, or a worktree swap around a branch
+# checkout silently wipes the (git-ignored) cache living next to the source.
+# expanduser so a leading "~" in .env resolves (python-dotenv does not expand it);
+# a relative default like "slice_cache" passes through unchanged.
+DISK_CACHE_PATH = os.path.expanduser(os.environ.get("DISK_CACHE_PATH", "slice_cache"))
 # Committed global land-mask asset for coastal fill (see services/rendering/masks.py).
 # Unlike the paths above, this is a *static* asset shipped with the package, not
 # runtime state — so it's resolved relative to the package (CWD-independent) and
