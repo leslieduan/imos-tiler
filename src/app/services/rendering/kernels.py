@@ -22,24 +22,43 @@ from app.services.colormap.categorical import is_categorical_variable
 
 logger = logging.getLogger(__name__)
 
-# Serialises entry into the parallel=True kernels below.
+# Serialises entry into the parallel=True kernels below: only one parallel region
+# may be open in the process at a time.
 #
-# Numba runs a parallel region through its threading layer. When neither TBB nor
-# OpenMP is installed, it falls back to `workqueue`, which is NOT threadsafe:
-# entering a parallel region from two Python threads at once corrupts its shared
-# scheduler state — silently garbling the output buffers (a tile comes back with
-# a full-range alpha channel instead of a 0/255 ocean mask) or aborting the
-# process on builds with the concurrency guard. Our sync tile handlers run in the
-# AnyIO thread pool, so a tile burst does exactly that.
+# Parallel region: one in-flight execution of a prange loop — it opens when the
+# loop starts (the threading layer wakes its workers and splits the iterations
+# across cores) and closes when all workers join. The hazard here is two regions
+# being open *simultaneously*, not two threads touching the same data.
 #
-# Holding this lock means only one parallel region is ever active at a time. Each
-# call still uses every core for its own prange loop — we only forbid two regions
-# overlapping. The guarded section (resample + normalize) is a few ms and dwarfed
-# by the S3 slice fetch, so the throughput cost is negligible. A lock is preferred
-# over forcing the TBB/OpenMP layer because that would make correctness depend on
-# an unpinned native lib being present on every deploy (silent fallback to
-# workqueue = the bug returns with no error). See the threading-layer docs:
-# https://numba.readthedocs.io/en/stable/user/threading-layer.html
+# The bug: Numba drives a parallel region through its threading layer. With neither
+# TBB nor OpenMP installed it falls back to `workqueue`, which is NOT threadsafe —
+# two threads entering parallel regions at once corrupt its shared scheduler state,
+# either silently garbling output buffers (a tile returns with a full-range alpha
+# channel instead of a 0/255 ocean mask) or aborting the process on builds with the
+# concurrency guard. Our sync tile handlers run in the AnyIO thread pool, so a burst
+# of tile requests triggers exactly this.
+#
+# Why data uniqueness doesn't save us (a natural point of confusion): each request
+# is unique (product/date/LOD) with its own `src` input and freshly-allocated `out`,
+# so there is no race on *our* data. But the corrupted state isn't ours — it's the
+# threading layer's process-global scheduler (the single workqueue), shared by every
+# parallel region regardless of the data it touches.
+#
+# Why a lock, not TBB/OpenMP: forcing a threadsafe layer would make correctness
+# depend on an unpinned native lib being present on every deploy — a silent fallback
+# to workqueue brings the bug back with no error. The lock is platform-independent,
+# and its cost is negligible: a region still uses every core for its own prange loop
+# (we only forbid two regions overlapping), and the guarded section (resample +
+# normalize) is a few ms, dwarfed by the S3 slice fetch.
+# Threading-layer docs: https://numba.readthedocs.io/en/stable/user/threading-layer.html
+#
+# Scope: one module-level lock guards *all four* parallel kernels (both resample +
+# both normalize) — any two overlapping regions are unsafe, so a thread in
+# _numba_bilinear must also block one entering _numba_normalize_uint32. It is held
+# per *kernel call*, not per request: the call sites wrap only the kernel(...)
+# invocation, so prep work (.astype/.squeeze/flip) runs unlocked and a multi-variable
+# resample acquires/releases once per variable. A waiting thread blocks only for the
+# current prange execution (a few ms), never a peer request's whole pipeline.
 _PARALLEL_KERNEL_LOCK = threading.Lock()
 
 
