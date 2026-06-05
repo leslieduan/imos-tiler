@@ -29,6 +29,13 @@ class Product:
     chunk_px: tuple[int, int] = TILE.chunk_px
     padding: int = TILE.padding
     coastal_fill: CoastalFill | None = None
+    # When True, anomalous values outside the model's valid ocean domain are
+    # nulled at slice-read time via the committed ocean-validity mask (see
+    # services/rendering/masks.apply_ocean_mask). The mask is built from the
+    # model_sea_level_anomaly_gridded_realtime grid, so only products on that
+    # store should set it. Applied at the source so every consumer — data tiles,
+    # visual tiles, and point lookups — inherits the cut.
+    ocean_masked: bool = False
 
     def __post_init__(self) -> None:
         if not self.variable:

@@ -196,7 +196,7 @@ imos-tiler/
         registry.py              ← Zarr store singleton (stale-while-revalidate) + per-URL date index + get_available_dates
         spatial.py               ← bbox_to_wgs84 + native_resolution_in_bbox + default_bbox_from_store
     utils/
-      dates.py                   ← LOCAL_TZ + ts_to_local_date + three_months_ago
+      dates.py                   ← LOCAL_TZ + ts_to_local_date
       geo.py                     ← dataset_bounds + json_safe_float
       colors.py                  ← hex parsing + ramp/categorical LUT builders
       memoizer.py                ← shared dedup+cache helper used by load_slice, processed cache, visual-tile dedup
@@ -339,7 +339,7 @@ For a **categorical** variable (one declaring CF `flag_values`), the manifest ad
 
 `z`/`x`/`y` mean different things in each tile API — see [§5](#5-tile-coordinate-systems-and-projection-pipeline).
 
-**Response compression.** A `GZipMiddleware` (`main.py`) gzips responses ≥ 1000 bytes when the client sends `Accept-Encoding: gzip` — this targets the JSON endpoints below (`/manifest`, `/products`, `/timeseries`, `/inspect`, tile `manifest.json`), where large date arrays compress well. Image tiles (PNG/GIF/WebP/APNG) are excluded: they are already compressed, so re-gzipping is pure CPU waste on the hot tile path. The exclusion is enforced by appending `image/` to Starlette's `DEFAULT_EXCLUDED_CONTENT_TYPES`; `test_main.py::test_gzip_skips_image_tiles` fails loudly if a Starlette upgrade drops it.
+**Response compression.** A `GZipMiddleware` (`main.py`) gzips responses ≥ 1000 bytes when the client sends `Accept-Encoding: gzip` — this targets the JSON endpoints below (`/manifest`, `/products`, `/inspect`, tile `manifest.json`), where large date arrays compress well. Image tiles (PNG/GIF/WebP/APNG) are excluded: they are already compressed, so re-gzipping is pure CPU waste on the hot tile path. The exclusion is enforced by appending `image/` to Starlette's `DEFAULT_EXCLUDED_CONTENT_TYPES`; `test_main.py::test_gzip_skips_image_tiles` fails loudly if a Starlette upgrade drops it.
 
 ### 6.1 Shared endpoints (mounted under both `/data_tiles` and `/visual_tiles`)
 
@@ -350,7 +350,6 @@ GET /{prefix}/products                                          → list all reg
 GET /{prefix}/manifest?from=YYYY-MM-DD&to=YYYY-MM-DD             → available dates for all products
 GET /{prefix}/{product_id}/inspect                               → store metadata: dimensions, per-variable dtype/shape/chunks, attrs
 GET /{prefix}/{product_id}/{date}/point?lat=&lon=                → variable value at one date
-GET /{prefix}/{product_id}/timeseries?lat=&lon=&from=&to=        → per-date variable values at one point
 ```
 
 `/manifest` parameters:
@@ -402,12 +401,6 @@ GET /{prefix}/{product_id}/timeseries?lat=&lon=&from=&to=        → per-date va
 ```
 
 **`/point` cache headers — immutable.** The single-date `/{product_id}/{date}/point` form uses `IMMUTABLE_CACHE_HEADERS` (`max-age=31536000, immutable`) because the date is in the **path** — once that date's data exists, the URL → bytes mapping is pinned forever.
-
-**`/timeseries` — point value per date over a range.** Returns each variable's value at the grid cell nearest `(lat, lon)` for every available date in `[from, to]` (`from` defaults to 3 months before today; `to` unbounded). Unlike `/point`, the date range is in the **query string** and the latest date grows as new data lands, so it uses the same revalidate headers as `/manifest` (`max-age=300, must-revalidate`) rather than immutable caching. This path reads directly from the Zarr store and **bypasses the L2/L3 caches by design** — see [§6.1.1](#611-timeseries-read-cost) before pointing it at multi-year ranges.
-
-#### 6.1.1 Timeseries read cost
-
-A point timeseries is the *orthogonal* access pattern to tiles: one grid cell, many dates. Because the stores are chunked fat-in-space / thin-in-time, Zarr must read a whole spatial slab per time-chunk just to extract one pixel — a 10⁵–10⁶× read amplification that makes long ranges slow (≈22 s for a ~6-year GSLA series, >60 s for a ~14-year satellite series) regardless of dask parallelism or same-region S3 bandwidth. The full analysis, the byte math, and the mitigation options live in [`docs/timeseries_performance.md`](timeseries_performance.md).
 
 ### 6.2 Data tiles (`/data_tiles`)
 
@@ -644,7 +637,7 @@ Because the cut writes the existing ocean-mask channel (alpha for scalar, B for 
 
 **Land-mask asset.** The coastline is a committed, bit-packed global raster `src/app/assets/land_mask.npz` (Natural Earth 1:10m land, 0.05° ≈ 5.5 km, ~3 MB), built once by `scripts/build_land_mask.py` (run with ephemeral deps: `uv run --with regionmask --with cartopy --with pooch python scripts/build_land_mask.py`). It ships **inside the package** (resolved relative to the package via `LAND_MASK_PATH`, CWD-independent) rather than in the runtime `data/` dir — `data/` may be owned/written by the service, which would otherwise block `git pull` of the asset. At runtime `masks.py` needs only numpy + scipy — **no new runtime dependency**. `load_land_mask` unpacks it lazily and `land_mask_for_grid` is `@lru_cache`d (the mask is static per product grid).
 
-**Ocean-validity mask.** A second committed mask, `src/app/assets/ocean_mask.npz`, is built by `scripts/build_ocean_mask.py` from `src/app/assets/OCmask.nc` (the model's valid-domain grid, lon 50–190°E, lat −60–10°, 1.0 = valid). `ocean_mask_for_grid` samples it onto the LOD grid the same way as the land mask and the result is ANDed into the ocean mask to cut anomalous points outside the valid model domain. Because it's tied to that specific source grid, it's applied **only** to products on the `model_sea_level_anomaly_gridded_realtime` store, listed by id in `data_tiles._OCEAN_MASKED_PRODUCT_IDS` (currently the UCUR/VCUR currents product) — it is not a `products.json` flag. Same no-runtime-dep / pre-baked-`.npz` rationale as the land mask.
+**Ocean-validity mask.** A second committed mask, `src/app/assets/ocean_mask.npz`, is built by `scripts/build_ocean_mask.py` from `src/app/assets/OCmask.nc` (the model's valid-domain grid, lon 50–190°E, lat −60–10°, 1.0 = valid). Unlike the land mask, this one is applied to the **raw slice at read time**, not on a render grid: `masks.apply_ocean_mask` samples the mask at the source grid's own lon/lat (nearest grid point) and sets cells outside the valid domain to NaN. Cutting the anomalies at the source — before bilinear resampling can bleed them into valid neighbours, and before point lookups read them — means **every** consumer (data tiles, visual tiles, point endpoint) inherits the cut for free, so `_compute_processed` no longer touches it. It's opt-in per product via the `ocean_masked` flag in `products.json` (currently the UCUR/VCUR currents product; build the mask from that store, so only products on it should set it). The L3 disk cache stores the **raw** slice — only the prewarmer writes L3 and it never sets the flag — so the cut is re-applied per compute and a rebuilt mask asset takes effect on restart without clearing L3. Same no-runtime-dep / pre-baked-`.npz` rationale as the land mask.
 
 **Caveats.**
 

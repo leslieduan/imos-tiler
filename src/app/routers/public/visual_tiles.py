@@ -157,7 +157,9 @@ def get_tile(
     key = (product.source_path, date, variable, z, x, y, colormap_name, rescale_range, ext)
 
     def _do_render() -> bytes:
-        ds = load_slice_or_404(product.source_path, date, [variable])
+        ds = load_slice_or_404(
+            product.source_path, date, [variable], ocean_masked=product.ocean_masked
+        )
         return render_tile(ds, variable, x, y, z, colormap_name, rescale_range, fmt=ext)
 
     try:
@@ -293,7 +295,9 @@ def get_bbox(
     )
 
     def _do_render() -> bytes:
-        ds = load_slice_or_404(product.source_path, date, [variable])
+        ds = load_slice_or_404(
+            product.source_path, date, [variable], ocean_masked=product.ocean_masked
+        )
         return render_bbox(
             ds,
             variable,
@@ -457,6 +461,7 @@ async def get_animation(
                 product.source_path,
                 d,
                 [variable],
+                product.ocean_masked,
                 limiter=_ANIMATION_LIMITER,
             )
             for d in dates

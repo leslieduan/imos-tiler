@@ -80,7 +80,6 @@ def test_date_from_manifest_is_accepted_by_tile_endpoint():
             return_value=list(_FAKE_PRODUCTS.items()),
         ),
         patch("app.routers.public.products.get_available_dates", return_value=available),
-        patch("app.routers.public.products.three_months_ago", return_value="2024-01-01"),
     ):
         manifest = client.get("/data_tiles/manifest")
     assert manifest.status_code == 200

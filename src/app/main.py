@@ -119,7 +119,7 @@ app.add_middleware(
 # GZipMiddleware's only content-type control is this module-level deny-list, which by
 # default excludes just text/event-stream. Extend it to skip image/* so already-compressed
 # PNG/GIF/WebP/APNG tiles aren't re-gzipped (pure CPU waste on the hot tile path) — JSON
-# responses (manifest, timeseries, listings) still compress. The deny-list is read by name
+# responses (manifest, listings) still compress. The deny-list is read by name
 # at request time, so a Starlette upgrade that renames/inlines it would silently disable
 # this exclusion; test_main.py::test_gzip_skips_image_tiles fails loudly if that happens.
 if "image/" not in _gzip_mw.DEFAULT_EXCLUDED_CONTENT_TYPES:

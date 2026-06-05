@@ -94,6 +94,33 @@ def test_coastal_fill_absent_defaults_to_none(isolated_products):
     assert PRODUCTS["plain"].coastal_fill is None
 
 
+def test_ocean_masked_absent_defaults_to_false(isolated_products):
+    registry.register_product({"id": "plain", "source_path": "s3://bucket/x.zarr", "variable": "V"})
+    assert PRODUCTS["plain"].ocean_masked is False
+
+
+def test_ocean_masked_defaults_true_for_listed_product(isolated_products):
+    # The currents product is masked by default even without the config flag.
+    pid = "model_sea_level_anomaly_gridded_realtime_vcur_ucur"
+    registry.register_product(
+        {"id": pid, "source_path": "s3://bucket/x.zarr", "variable": ["UCUR", "VCUR"]}
+    )
+    assert PRODUCTS[pid].ocean_masked is True
+
+
+def test_ocean_masked_explicit_false_overrides_default(isolated_products):
+    pid = "model_sea_level_anomaly_gridded_realtime_vcur_ucur"
+    registry.register_product(
+        {
+            "id": pid,
+            "source_path": "s3://bucket/x.zarr",
+            "variable": ["UCUR", "VCUR"],
+            "ocean_masked": False,
+        }
+    )
+    assert PRODUCTS[pid].ocean_masked is False
+
+
 def test_remove_product_persists_and_reflects_in_memory(isolated_products):
     registry.register_product(_entry("p1"))
     registry.register_product(_entry("p2", source="s3://bucket/y.zarr"))

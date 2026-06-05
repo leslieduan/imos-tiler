@@ -1,5 +1,5 @@
-"""Grid-mask tests: nearest-valid inpaint, land-mask and ocean-mask sampling, and
-the fill+cut integration through _compute_processed.
+"""Grid-mask tests: nearest-valid inpaint, land-mask sampling, the fill+land-cut
+integration through _compute_processed, and the source-grid ocean mask.
 
 These exercise the real committed mask assets (src/app/assets/land_mask.npz and
 ocean_mask.npz), so the geographic assertions double as a smoke test that the
@@ -12,11 +12,12 @@ import xarray as xr
 from app.services.product.product import CoastalFill, Product
 from app.services.rendering.data_tiles import _compute_processed
 from app.services.rendering.masks import (
+    apply_ocean_mask,
     inpaint_nearest,
     land_mask_for_grid,
     load_land_mask,
     load_ocean_mask,
-    ocean_mask_for_grid,
+    ocean_valid_for_coords,
 )
 
 # --- inpaint_nearest ------------------------------------------------------
@@ -73,18 +74,18 @@ def test_land_mask_antimeridian_wraps():
     assert 0.2 < float(land.mean()) < 0.5
 
 
-# --- ocean_mask_for_grid --------------------------------------------------
+# --- ocean mask sampling --------------------------------------------------
 
 
-def _ocean_valid_at(lon: float, lat: float) -> bool:
-    """Sample the ocean-validity mask at a single point via a 1x1 grid."""
-    return bool(ocean_mask_for_grid(lon, lon, lat, lat, 1, 1)[0, 0])
+def _ocean_valid_at(lat: float, lon: float) -> bool:
+    """Sample the ocean-validity mask at a single (lat, lon) via a 1x1 grid."""
+    return bool(ocean_valid_for_coords(np.array([lon]), np.array([lat]))[0, 0])
 
 
 def test_ocean_mask_known_points():
-    assert _ocean_valid_at(150.0, -40.0) is True  # open Southern Ocean, valid
-    assert _ocean_valid_at(110.4, -2.4) is False  # Borneo land, masked out
-    assert _ocean_valid_at(137.0, -6.4) is False  # New Guinea land, masked out
+    assert _ocean_valid_at(-40.0, 150.0) is True  # open Southern Ocean, valid
+    assert _ocean_valid_at(-2.4, 110.4) is False  # Borneo land, masked out
+    assert _ocean_valid_at(-6.4, 137.0) is False  # New Guinea land, masked out
     # Sanity: the regional mask is mostly valid ocean but not degenerate.
     mask, _ = load_ocean_mask()
     assert 0.9 < float(mask.mean()) < 1.0
@@ -93,8 +94,26 @@ def test_ocean_mask_known_points():
 def test_ocean_mask_out_of_domain_is_invalid():
     # The mask covers lon 50–190°E, lat −60–10°. Anything outside drops out,
     # matching the original reindex-nearest semantics.
-    assert _ocean_valid_at(200.0, -40.0) is False  # lon past the eastern edge
-    assert _ocean_valid_at(60.0, 30.0) is False  # lat north of the domain
+    assert _ocean_valid_at(-40.0, 200.0) is False  # lon past the eastern edge
+    assert _ocean_valid_at(30.0, 60.0) is False  # lat north of the domain
+
+
+def test_apply_ocean_mask_nulls_invalid_cells_only():
+    # 2x2 grid straddling the mask edge: open ocean vs New Guinea land.
+    lats = [-40.0, -6.4]
+    lons = [150.0, 137.0]
+    data = np.ones((2, 2), dtype=np.float32)
+    ds = xr.Dataset(
+        {"UCUR": xr.DataArray(data, dims=["lat", "lon"], coords={"lat": lats, "lon": lons})}
+    )
+
+    masked = apply_ocean_mask(ds, ["UCUR"])
+
+    # Open-ocean cell survives; the New Guinea land cell is nulled.
+    assert float(masked["UCUR"].sel(lat=-40.0, lon=150.0)) == 1.0
+    assert np.isnan(float(masked["UCUR"].sel(lat=-6.4, lon=137.0)))
+    # Input is not mutated.
+    assert not np.isnan(ds["UCUR"]).any()
 
 
 # --- integration through _compute_processed -------------------------------
@@ -147,20 +166,31 @@ def test_compute_cuts_land_when_enabled():
     assert ocean[~land].all()
 
 
-def test_compute_applies_ocean_mask_only_for_currents_product():
-    # Region over the Indonesian archipelago: spans valid ocean and masked-out
-    # land (per the committed ocean mask), all-valid data (no NaN to fill).
-    # The mask is hard-coded to the currents product id, not a config flag.
+def test_compute_no_longer_applies_ocean_mask_by_product_id():
+    # Ocean masking moved to the raw slice (masks.apply_ocean_mask, opt-in via
+    # Product.ocean_masked), so _compute_processed must NOT cut by product id any
+    # more: the currents id and any other id produce identical output. Region
+    # straddles the ocean-mask edge geographically to make the old behaviour visible
+    # if it ever regressed.
     ds = _ds_over(105, 140, 0, -12)
 
-    _, ocean_off = _compute_processed(_product(None, product_id="other"), ds, 1)
-    _, ocean_on = _compute_processed(
+    _, ocean_currents = _compute_processed(
         _product(None, product_id="model_sea_level_anomaly_gridded_realtime_vcur_ucur"), ds, 1
     )
+    _, ocean_other = _compute_processed(_product(None, product_id="other"), ds, 1)
 
-    assert ocean_off.all()  # no cut when the mask is off
-    grid_h, grid_w = ocean_on.shape
-    expected = ocean_mask_for_grid(105.0, 140.0, -12.0, 0.0, grid_w, grid_h)
-    assert expected.any() and not expected.all()  # the grid really straddles the mask edge
-    # With all-valid data, the cut validity is exactly the ocean mask.
-    np.testing.assert_array_equal(ocean_on, expected)
+    np.testing.assert_array_equal(ocean_currents, ocean_other)
+    assert ocean_other.all()  # all-valid input, no coastal_fill → nothing cut here
+
+
+def test_compute_propagates_premasked_nans_to_ocean_validity():
+    # By the time _compute_processed runs, anomalous cells are already NaN (nulled
+    # on the raw slice). Those NaNs must fall out of the ocean-validity mask — the
+    # cut is inherited from the source, not re-applied here.
+    ds = _ds_over(150, 160, -40, -45)
+    ds["GSLA"].values[8:12, 8:12] = np.nan  # stand in for cells nulled at the source
+
+    _, ocean = _compute_processed(_product(None), ds, 1)
+
+    assert not ocean.all()  # the pre-masked hole is transparent
+    assert ocean.any()  # valid data elsewhere remains

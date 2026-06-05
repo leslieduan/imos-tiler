@@ -22,6 +22,7 @@ from cachetools import TTLCache
 
 from app.services.caching.disk import disk_cache_path, read_slice_from_disk
 from app.services.product.product import Product
+from app.services.rendering.masks import apply_ocean_mask
 from app.services.store.registry import get_store, store_registry
 from app.utils.memoizer import Memoizer
 
@@ -38,13 +39,28 @@ _slice_cache: TTLCache = TTLCache(maxsize=_SLICE_CACHE_SIZE, ttl=_SLICE_CACHE_TT
 _slice_memo: Memoizer = Memoizer(_slice_cache)
 
 
-def _compute_slice_from_store(store_url: str, date: str, variables: list[str]) -> xr.Dataset:
+def _compute_slice_from_store(
+    store_url: str, date: str, variables: list[str], ocean_masked: bool = False
+) -> xr.Dataset:
     """Fetch a 2-D slice from L3 disk cache or fall through to the Zarr store.
 
     Read-only with respect to L3 — populating the disk cache is the prewarmer's
     job, not the request path's. Both `load_slice` and `load_slice_uncached`
     delegate here; they differ only in whether the result lands in L2.
+
+    When ``ocean_masked`` is set, anomalous values outside the model's valid ocean
+    domain are nulled here (masks.apply_ocean_mask) so every downstream consumer
+    inherits the cut. The disk cache stores the *raw* slice — only the prewarmer
+    writes L3 and it never sets the flag — so the cut is re-applied per compute and
+    a rebuilt mask asset takes effect on restart without clearing L3.
     """
+    result = _fetch_slice_from_store(store_url, date, variables)
+    if ocean_masked:
+        result = apply_ocean_mask(result, variables)
+    return result
+
+
+def _fetch_slice_from_store(store_url: str, date: str, variables: list[str]) -> xr.Dataset:
     cache_path = disk_cache_path(store_url, date, list(variables))
     if cache_path.exists():
         t0 = time.monotonic()
@@ -86,81 +102,39 @@ def _compute_slice_from_store(store_url: str, date: str, variables: list[str]) -
 # thread to miss runs the factory, the rest block on its Future. Errors propagate
 # to all waiters and the in-flight entry is cleared, so a failed request never
 # permanently blocks subsequent attempts for the same key.
-def load_slice(store_url: str, date: str, variables: list[str]) -> xr.Dataset:
+def load_slice(
+    store_url: str, date: str, variables: list[str], ocean_masked: bool = False
+) -> xr.Dataset:
     """
     Return a fully-computed 2D (lat × lon) slice for the given store, date, and variables.
     Uses nearest-match on time so callers don't need to ask exact timestamps.
     Coordinate names are already normalised by the store registry.
+
+    ``ocean_masked`` (from ``Product.ocean_masked``) nulls anomalous values outside
+    the valid model domain. It's a deterministic function of the cache key (a store
+    + variable set maps to one product), so it stays out of the key; the masked
+    slice is what L2 caches.
     """
     cache_key = (store_url, date, tuple(sorted(variables)))
     return _slice_memo.get_or_compute(
-        cache_key, lambda: _compute_slice_from_store(store_url, date, variables)
+        cache_key, lambda: _compute_slice_from_store(store_url, date, variables, ocean_masked)
     )
 
 
-def load_slice_uncached(store_url: str, date: str, variables: list[str]) -> xr.Dataset:
+def load_slice_uncached(
+    store_url: str, date: str, variables: list[str], ocean_masked: bool = False
+) -> xr.Dataset:
     """Return a 2-D slice without touching the L2 in-memory cache.
 
     Reads from the L3 disk cache if present, otherwise pulls directly from the
     Zarr store. Never writes to L3 — animation requests can span dates outside
     the prewarmed window, and we don't want a rare endpoint to pollute the
     shared disk cache or evict another product's hot slices.
+
+    The prewarmer calls this without ``ocean_masked`` so the slice it writes to L3
+    stays raw; request-path callers pass ``Product.ocean_masked`` to get the cut.
     """
-    return _compute_slice_from_store(store_url, date, variables)
-
-
-def load_point_series(
-    store_url: str,
-    variables: list[str],
-    lat: float,
-    lon: float,
-    from_date: str,
-    to_date: str | None,
-) -> tuple[float, float, list[str], xr.Dataset | None]:
-    """Return a point time series: ``(actual_lat, actual_lon, dates, point_ds)``.
-
-    Selects the grid cell nearest to ``(lat, lon)``, then every timestamp whose
-    *local* date falls in ``[from_date, to_date]`` (inclusive; ``to_date=None``
-    means unbounded), and computes a single 1-D-over-time slice in one shot.
-
-    Dates are resolved through the same store date index as [[load_slice]], so the
-    local-time API invariant holds: ``dates`` are the index's local-date keys, never
-    recomputed from the timestamps here. Selecting the point *before* compute keeps
-    the S3 read to the spatial chunk(s) covering the cell rather than full grids.
-
-    Bypasses the L2/L3 caches entirely — a series can span dates outside the
-    prewarmed window, and per-point reads shouldn't evict another product's hot
-    slices (same rationale as [[load_slice_uncached]]).
-
-    Returns ``dates == []`` and ``point_ds is None`` when no timestamp falls in
-    range (including a store with no time dimension); the nearest cell is still
-    resolved so the caller can report which point it snapped to.
-    """
-    store = get_store(store_url)
-    index = store_registry.date_index(store_url)
-    dates = sorted(d for d in index if d >= from_date and (to_date is None or d <= to_date))
-    point = store[variables].sel(lat=lat, lon=lon, method="nearest")
-    if not dates:
-        return float(point.lat), float(point.lon), [], None
-
-    timestamps = [index[d][0] for d in dates]
-    t0 = time.monotonic()
-    point = point.sel(time=timestamps).compute()
-    elapsed = time.monotonic() - t0
-    logger.debug(
-        "[timing] point series loaded from S3",
-        extra={
-            "store_url": store_url,
-            "points": len(dates),
-            "s3_fetch_ms": round(elapsed * 1000, 1),
-        },
-    )
-    if elapsed > _SLOW_FETCH_THRESHOLD:
-        logger.warning(
-            "Slow S3 fetch",
-            extra={"store_url": store_url, "points": len(dates), "seconds": elapsed},
-        )
-    return float(point.lat), float(point.lon), dates, point
+    return _compute_slice_from_store(store_url, date, variables, ocean_masked)
 
 
 def slice_memo_stats() -> dict:
