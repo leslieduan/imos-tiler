@@ -94,7 +94,6 @@ Raw RGBA tiles for WebGL shader consumption — pixel bytes encode scientific va
 | GET    | `/data_tiles/{product_id}/{date}/{z}/{x}/{y}.png`       | Raw value-encoded tile                                       |
 | GET    | `/data_tiles/{product_id}/{date}/manifest.json`         | Tile config (bounds, value ranges, LOD grid)                 |
 | GET    | `/data_tiles/{product_id}/{date}/point?lat=&lon=`       | Point value lookup (single date)                             |
-| GET    | `/data_tiles/{product_id}/timeseries?lat=&lon=&from=&to=` | Point value per date over a range. Slow for long ranges — see [timeseries performance](docs/timeseries_performance.md) |
 
 ### Visual tiles (`/visual_tiles`)
 
@@ -108,7 +107,7 @@ Colourised Web Mercator (XYZ) tiles — compatible with MapboxGL `raster` source
 | GET    | `/visual_tiles/colormaps`                                           | All supported colormap names grouped by source (custom, rio-tiler, matplotlib)                                    |
 | GET    | `/visual_tiles/colormaps/{name}/legend`                             | Color legend PNG for a colormap (gradient bar ± tick labels)                                                      |
 
-> The product-metadata endpoints `/products`, `/manifest`, `/{product_id}/{date}/point`, and `/{product_id}/timeseries` listed under **Data tiles** above are also served under `/visual_tiles/…` with identical behaviour — the same router backs both prefixes — so a visual-only client never needs to call `/data_tiles`.
+> The product-metadata endpoints `/products`, `/manifest`, and `/{product_id}/{date}/point` listed under **Data tiles** above are also served under `/visual_tiles/…` with identical behaviour — the same router backs both prefixes — so a visual-only client never needs to call `/data_tiles`.
 
 Query parameters for tile requests:
 
@@ -226,7 +225,6 @@ See [`docs/security.md`](docs/security.md) for how admin endpoints are secured i
 - [`docs/technical.md`](docs/technical.md) — architecture, tile coordinate systems, LOD algorithm, caching strategy, concurrency model, capacity planning, PNG encoding contract, logging
 - [`docs/cache_analysis.md`](docs/cache_analysis.md) — cache option analysis: why disk cache was chosen over Redis and EFS
 - [`docs/http_caching.md`](docs/http_caching.md) — HTTP caching design: Cache-Control headers, ETag revalidation on `/manifest`, CACHE_VERSION invalidation
-- [`docs/timeseries_performance.md`](docs/timeseries_performance.md) — why the `/timeseries` (pixel-drill) endpoint is slow for long ranges, and what to do about it
 - [`docs/dataset.md`](docs/dataset.md) — representative example Zarr stores (size classes, dimensions, chunking, variables) used as planning anchors
 - [`docs/security.md`](docs/security.md) — admin endpoint security, API key setup, nginx, EC2 configuration
 - [`docs/png-vs-webp-vs-bin.md`](docs/png-vs-webp-vs-bin.md) — tile format evaluation

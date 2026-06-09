@@ -122,57 +122,40 @@ def test_load_slice_warns_on_multiple_timestamps_per_date(monkeypatch):
     assert any("Multiple timestamps" in str(args[0]) for args in debug_calls)
 
 
-# --- load_point_series ---
+# --- ocean_masked flag ---
 
-# 2024-01-15/16/17 at 13:00 UTC → Sydney (UTC+11) local dates 2024-01-16/17/18.
-_SERIES_TIMES = ["2024-01-15T13:00:00", "2024-01-16T13:00:00", "2024-01-17T13:00:00"]
-_SERIES_DATES = ["2024-01-16", "2024-01-17", "2024-01-18"]
+# Geographic cells relative to the committed ocean mask (lon 50–190°E, lat −60–10°):
+# (-40, 150) is open Southern Ocean (valid); (-6.4, 137) is over New Guinea (masked).
 
 
-def test_load_point_series_returns_series_for_full_range(monkeypatch):
-    ds = _ds_with_time(_SERIES_TIMES)
-    monkeypatch.setattr(xr, "open_zarr", lambda *_, **__: ds)
-
-    # lat=0.4,lon=0.6 → nearest cell (lat=0, lon=1). In _ds_with_time the value at
-    # time index t for that cell is 4*t + 1.
-    lat0, lon0, dates, point_ds = loader.load_point_series(
-        "s3://b/x.zarr", ["v"], 0.4, 0.6, "2024-01-16", "2024-01-18"
+def _ds_ocean(times: list[str], lats: list[float], lons: list[float]) -> xr.Dataset:
+    t = pd.to_datetime(times)
+    data = np.ones((len(times), len(lats), len(lons)), dtype=np.float32)
+    return xr.Dataset(
+        {
+            "v": xr.DataArray(
+                data, dims=["time", "lat", "lon"], coords={"time": t, "lat": lats, "lon": lons}
+            )
+        }
     )
-    assert (lat0, lon0) == (0.0, 1.0)
-    assert dates == _SERIES_DATES
-    assert point_ds["v"].sizes["time"] == 3
-    assert [float(point_ds["v"].isel(time=i)) for i in range(3)] == [1.0, 5.0, 9.0]
 
 
-def test_load_point_series_filters_to_subrange(monkeypatch):
-    ds = _ds_with_time(_SERIES_TIMES)
+def test_load_slice_ocean_masked_nulls_invalid_cells(monkeypatch):
+    ds = _ds_ocean(["2024-01-15T13:00:00"], [-40.0, -6.4], [150.0, 137.0])
     monkeypatch.setattr(xr, "open_zarr", lambda *_, **__: ds)
 
-    _, _, dates, point_ds = loader.load_point_series(
-        "s3://b/x.zarr", ["v"], 0.0, 0.0, "2024-01-17", "2024-01-17"
-    )
-    assert dates == ["2024-01-17"]
-    assert point_ds["v"].sizes["time"] == 1
+    result = loader.load_slice("s3://b/x.zarr", "2024-01-16", ["v"], ocean_masked=True)
+    # Open-ocean cell survives; the New Guinea land cell is nulled.
+    assert float(result["v"].sel(lat=-40.0, lon=150.0)) == 1.0
+    assert np.isnan(float(result["v"].sel(lat=-6.4, lon=137.0)))
 
 
-def test_load_point_series_unbounded_to(monkeypatch):
-    ds = _ds_with_time(_SERIES_TIMES)
+def test_load_slice_without_ocean_masked_keeps_all_cells(monkeypatch):
+    ds = _ds_ocean(["2024-01-15T13:00:00"], [-40.0, -6.4], [150.0, 137.0])
     monkeypatch.setattr(xr, "open_zarr", lambda *_, **__: ds)
 
-    _, _, dates, _ = loader.load_point_series("s3://b/x.zarr", ["v"], 0.0, 0.0, "2024-01-17", None)
-    assert dates == ["2024-01-17", "2024-01-18"]
-
-
-def test_load_point_series_empty_range_resolves_cell_but_no_data(monkeypatch):
-    ds = _ds_with_time(_SERIES_TIMES)
-    monkeypatch.setattr(xr, "open_zarr", lambda *_, **__: ds)
-
-    lat0, lon0, dates, point_ds = loader.load_point_series(
-        "s3://b/x.zarr", ["v"], 0.0, 0.0, "2099-01-01", "2099-12-31"
-    )
-    assert dates == []
-    assert point_ds is None
-    assert (lat0, lon0) == (0.0, 0.0)
+    result = loader.load_slice("s3://b/x.zarr", "2024-01-16", ["v"])  # flag defaults off
+    assert not np.isnan(result["v"]).any()
 
 
 def test_evict_product_cache_clears_l2_and_disk(monkeypatch, tmp_path):

@@ -1,4 +1,4 @@
-"""Grid masks and coastal fill for data-tile products, applied in ``_compute_processed``.
+"""Grid masks and coastal fill for data-tile products.
 
   * ``inpaint_nearest`` — coastal fill (opt-in via ``Product.coastal_fill``) for
     sparse products (e.g. GSLA at 0.2° ≈ 22 km/cell): extends valid data toward
@@ -6,16 +6,20 @@
     ``max_dist_px``. The coastal gap is at the *edge* of the data (extrapolation),
     so plain interpolation can't close it; nearest-valid fill can, while the
     distance cap keeps us from fabricating values far from any real measurement.
+    Applied in ``data_tiles._compute_processed``.
   * ``land_mask_for_grid`` — a boolean land mask sampled from the committed global
     Natural Earth raster (src/app/assets/land_mask.npz) onto a render grid, so the
     caller can cut fabricated values back off the land. Reuses the exact lon/lat →
     pixel mapping the resample/shader assume (linspace over the grid bounds,
-    north→south).
-  * ``ocean_mask_for_grid`` — a regional ocean-validity mask
-    (src/app/assets/ocean_mask.npz) sampled onto a render grid the same way, used
-    to cut anomalous values outside the valid model domain. Built from the
-    model_sea_level_anomaly_gridded_realtime grid, so it's applied only to products
-    on that store (see ``data_tiles._OCEAN_MASKED_PRODUCT_IDS``).
+    north→south). Applied in ``data_tiles._compute_processed``.
+  * ``apply_ocean_mask`` — a regional ocean-validity mask
+    (src/app/assets/ocean_mask.npz) used to null anomalous values outside the valid
+    model domain. Unlike the two above this is applied to the *raw slice* at read
+    time (opt-in via ``Product.ocean_masked``), not on a render grid: cutting the
+    anomalies at the source — before resampling can bleed them into valid
+    neighbours, and before point lookups read them — means every consumer inherits
+    the cut for free. Built from the model_sea_level_anomaly_gridded_realtime grid,
+    so only products on that store should opt in.
 
 No new runtime deps: numpy + scipy only (scipy already required). The .npz assets
 are pre-baked by scripts (no netCDF engine at runtime).
@@ -26,6 +30,7 @@ from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
+import xarray as xr
 from scipy.ndimage import distance_transform_edt
 
 from app.config.paths import LAND_MASK_PATH, OCEAN_MASK_PATH
@@ -136,27 +141,23 @@ def load_ocean_mask() -> tuple[np.ndarray, dict[str, float]]:
     return _ocean_mask, _ocean_meta
 
 
-@lru_cache(maxsize=64)
-def ocean_mask_for_grid(
-    lon_min: float, lon_max: float, lat_min: float, lat_max: float, total_w: int, total_h: int
-) -> np.ndarray:
-    """Boolean ocean-validity mask (True = valid) on a (total_h, total_w) render grid.
+def ocean_valid_for_coords(lons: np.ndarray, lats: np.ndarray) -> np.ndarray:
+    """Boolean ocean-validity mask (True = valid) for an explicit lon/lat grid.
 
-    Mirrors ``land_mask_for_grid``'s target mapping (``linspace`` over the grid
-    bounds, north→south) so the cut lines up with rendered pixels. The source is a
-    *regional* grid of grid-point samples (not global cell coverage), so we take
-    the nearest grid point (round) and mark any target pixel falling outside the
-    mask domain as invalid — matching the original ``reindex nearest`` semantics
-    where out-of-domain points dropped out.
+    Samples the committed regional mask at each ``(lat, lon)`` via nearest grid
+    point (round), marking any point outside the mask domain invalid — matching
+    the original ``reindex nearest`` semantics where out-of-domain points dropped
+    out. Returns a ``(len(lats), len(lons))`` bool array oriented to the inputs.
 
-    Result is cached: static per (product grid), independent of date/data.
+    Takes the *source* grid's own coordinates rather than a render-grid linspace,
+    because the cut now happens on the raw slice (see ``apply_ocean_mask``) before
+    any resampling.
     """
     mask, meta = load_ocean_mask()
     h_src, w_src = mask.shape
     res = meta["res"]
-
-    lons = np.linspace(lon_min, lon_max, total_w)
-    lats = np.linspace(lat_max, lat_min, total_h)  # north → south
+    lons = np.asarray(lons, dtype=float)
+    lats = np.asarray(lats, dtype=float)
 
     cols = np.round((lons - meta["lon_min"]) / res).astype(np.intp)
     rows = np.round((meta["lat_max"] - lats) / res).astype(np.intp)
@@ -169,6 +170,22 @@ def ocean_mask_for_grid(
     # Anything sampled from outside the mask domain is not "valid ocean".
     valid &= in_bounds_r[:, None] & in_bounds_c[None, :]
     return valid
+
+
+def apply_ocean_mask(ds: xr.Dataset, variables: list[str]) -> xr.Dataset:
+    """Return ``ds`` with cells outside the committed ocean-validity mask set to
+    NaN, for each named variable.
+
+    Used by the slice layer for products with ``Product.ocean_masked``: the model
+    emits anomalous values outside its valid domain, so we null them at the source
+    — before resampling/point selection — rather than cutting per render grid.
+    """
+    valid = ocean_valid_for_coords(ds.lon.values, ds.lat.values)  # (lat, lon)
+    valid_da = xr.DataArray(valid, dims=("lat", "lon"), coords={"lat": ds.lat, "lon": ds.lon})
+    out = ds.copy()
+    for v in variables:
+        out[v] = ds[v].where(valid_da)
+    return out
 
 
 def inpaint_nearest(arr: np.ndarray, max_dist_px: int) -> np.ndarray:

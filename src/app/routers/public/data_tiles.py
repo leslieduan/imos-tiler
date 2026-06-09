@@ -52,7 +52,9 @@ def get_tile(
     variables = product.variables
     png_bytes = render_tile(
         product,
-        lambda: load_slice_or_404(product.source_path, date, variables),
+        lambda: load_slice_or_404(
+            product.source_path, date, variables, ocean_masked=product.ocean_masked
+        ),
         z,
         x,
         y,
@@ -91,6 +93,6 @@ def get_manifest(
     validate_date(date)
     get_lod_grids(product)
     variables = product.variables
-    ds = load_slice_or_404(product.source_path, date, variables)
+    ds = load_slice_or_404(product.source_path, date, variables, ocean_masked=product.ocean_masked)
     response.headers.update(IMMUTABLE_CACHE_HEADERS)
     return DataTileManifestResponse(**render_manifest(product, ds))

@@ -30,6 +30,16 @@ logger = logging.getLogger(__name__)
 _config_path = Path(PRODUCTS_CONFIG_PATH)
 _lock = threading.Lock()
 
+# Products that are ocean-masked unless products.json says otherwise. The committed
+# ocean mask is built from this store's grid, so masking is the safe default for it
+# and shouldn't depend on the config flag being remembered. An explicit
+# "ocean_masked": false in products.json still wins.
+_OCEAN_MASKED_BY_DEFAULT = frozenset(
+    {
+        "model_sea_level_anomaly_gridded_realtime_vcur_ucur",
+    }
+)
+
 # Canonical registered-product state. Exposed (rather than wrapped behind a
 # class) because the dict identity is load-bearing for test fixtures and for
 # the prewarm race-guard ``PRODUCTS.get(p.id) is not p`` check — both rely on
@@ -147,4 +157,5 @@ def _from_dict(entry: dict) -> Product:
         chunk_px=tuple(chunk_px),  # type: ignore[arg-type]
         padding=entry.get("padding", TILE.padding),
         coastal_fill=CoastalFill(**coastal_fill) if coastal_fill else None,
+        ocean_masked=entry.get("ocean_masked", entry["id"] in _OCEAN_MASKED_BY_DEFAULT),
     )

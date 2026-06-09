@@ -25,22 +25,10 @@ from app.services.rendering.kernels import normalize, resample_variables_to_grid
 from app.services.rendering.masks import (
     inpaint_nearest,
     land_mask_for_grid,
-    ocean_mask_for_grid,
 )
 from app.utils.image import encode_rgba
 
 logger = logging.getLogger(__name__)
-
-# The committed ocean-validity mask (src/app/assets/ocean_mask.npz) is built from
-# the model_sea_level_anomaly_gridded_realtime.zarr grid, so it only applies to
-# products backed by that store. Listed by product id (not a products.json flag)
-# on purpose — the mask is tied to that specific source grid, not a general product
-# capability. Add the GSLA product id here too if it should be masked.
-_OCEAN_MASKED_PRODUCT_IDS = frozenset(
-    {
-        "model_sea_level_anomaly_gridded_realtime_vcur_ucur",
-    }
-)
 
 
 def _var_range(ds: xr.Dataset, var: str) -> tuple[float, float]:
@@ -103,21 +91,17 @@ def _compute_processed(
         for vm in valid_masks[1:]:
             ocean &= vm
 
-    apply_ocean_mask = product.id in _OCEAN_MASKED_PRODUCT_IDS
-
-    if product.coastal_fill is not None or apply_ocean_mask:
+    # Anomalous values outside the model's valid ocean domain (Product.ocean_masked)
+    # are already nulled on the raw slice (masks.apply_ocean_mask), so they arrive
+    # here as NaN and fall out of the per-variable valid masks above — nothing to do.
+    if product.coastal_fill is not None:
         lon_min, lon_max = float(ds.lon.min()), float(ds.lon.max())
         lat_min, lat_max = float(ds.lat.min()), float(ds.lat.max())
         # Cut the coastal fill (and any data that bled over land) back off using
         # the real Natural Earth coastline, so we never paint fabricated values
         # onto land.
-        if product.coastal_fill is not None:
-            land = land_mask_for_grid(lon_min, lon_max, lat_min, lat_max, total_w, total_h)
-            ocean = ocean & ~land
-        # Cut anomalous values outside the committed model ocean-validity mask.
-        if apply_ocean_mask:
-            valid = ocean_mask_for_grid(lon_min, lon_max, lat_min, lat_max, total_w, total_h)
-            ocean = ocean & valid
+        land = land_mask_for_grid(lon_min, lon_max, lat_min, lat_max, total_w, total_h)
+        ocean = ocean & ~land
     normalize_ms = (time.monotonic() - t0) * 1000
 
     logger.debug(
