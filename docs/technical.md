@@ -78,11 +78,6 @@ Zarr eliminates this: metadata is one `.zmetadata` HTTP request, and variable ch
                                       │ HTTP
                                       ▼
 ┌────────────────────────────────────────────────────────────────────────────┐
-│                          Nginx  (reverse proxy)                            │
-└────────────────────────────────────────────────────────────────────────────┘
-                                      │
-                                      ▼
-┌────────────────────────────────────────────────────────────────────────────┐
 │                            FastAPI  (main.py)                              │
 │             event loop  +  anyio thread pool (THREAD_POOL_SIZE)            │
 └──────────────────────────────────┬─────────────────────────────────────────┘
@@ -186,7 +181,6 @@ imos-tiler/
       image.py                   ← encode_rgba(arr, fmt) + empty_tile(fmt) + media_type(fmt) — PNG/WebP encoders shared by both renderers
   docker/
     Dockerfile
-    nginx.conf
   tests/
   docs/
     technical.md                 ← this file
@@ -1152,7 +1146,7 @@ Burst columns scale linearly because they're arithmetic ceilings, not physical o
 
 **When to raise the pool size:**
 
-- Nginx access logs show request latency spikes correlated with concurrent-request count → the pool is exhausted, raise it.
+- App access logs show request latency spikes correlated with concurrent-request count → the pool is exhausted, raise it.
 - Steady-state CPU is **< 70 %** on all cores while you observe queueing → the pool, not the CPU, is the bottleneck.
 - CPU is pegged at **100 %** across all cores → CPU is the bottleneck; raising the pool just adds context-switching overhead. Provision more vCPU or scale out horizontally instead.
 
