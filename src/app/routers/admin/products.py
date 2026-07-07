@@ -1,6 +1,5 @@
 """Admin CRUD for product registrations."""
 
-import asyncio
 import logging
 
 import anyio
@@ -9,40 +8,13 @@ from pydantic import BaseModel, Field, field_validator
 
 from app.config.constants import TILE
 from app.schemas.admin import ProductCreatedResponse
-from app.services.caching.lifecycle import evict_product_cache, prewarm_disk_slices
-from app.services.product.product import Product
+from app.services.caching.lifecycle import evict_product_cache
 from app.services.product.registry import get_product, register_product, remove_product
 from app.services.store.registry import get_store
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-# Strong refs to background prewarm tasks. asyncio only holds a weak reference to
-# tasks created via create_task, so a task with no other reference can be
-# garbage-collected mid-run. Keeping it in a module-level set anchors it for the
-# lifetime of the prewarm; the done callback removes it once finished.
-_background_tasks: set[asyncio.Task] = set()
-
-
-def _spawn_prewarm(product: Product) -> None:
-    task = asyncio.create_task(prewarm_disk_slices([product]))
-    _background_tasks.add(task)
-
-    def _on_done(t: asyncio.Task) -> None:
-        _background_tasks.discard(t)
-        if t.cancelled():
-            logger.info("Prewarm cancelled", extra={"product_id": product.id})
-            return
-        exc = t.exception()
-        if exc is not None:
-            logger.exception(
-                "Prewarm failed",
-                extra={"product_id": product.id},
-                exc_info=(type(exc), exc, exc.__traceback__),
-            )
-
-    task.add_done_callback(_on_done)
 
 
 class CoastalFillPayload(BaseModel):
@@ -117,18 +89,16 @@ def _validate_store(payload: ProductPayload) -> None:
     status_code=201,
     summary="Register a product",
     description=(
-        "Registers a new product from a Zarr store and triggers a background cache prewarm. "
+        "Registers a new product from a Zarr store. "
         "The store must expose `lat`, `lon`, and `time` coordinates. Returns 409 if the product ID already exists."
     ),
     response_model=ProductCreatedResponse,
 )
 async def add_product(payload: ProductPayload):
     # Test-open the store before persisting so a bad URL or missing variable
-    # surfaces here as 400, not as a silent failure in the background prewarm.
+    # surfaces here as 400, not as a silent failure later.
     await anyio.to_thread.run_sync(_validate_store, payload)
-    # Offload the sync read+write+reload of products.json so the event loop
-    # stays free; the handler itself must remain async because _spawn_prewarm
-    # calls asyncio.create_task, which requires a running loop in this thread.
+    # Offload the sync read+write+reload of products.json so the event loop stays free.
     try:
         product = await anyio.to_thread.run_sync(register_product, payload.model_dump())
     except ValueError as e:
@@ -140,7 +110,6 @@ async def add_product(payload: ProductPayload):
         "Product registered",
         extra={"product_id": product.id, "source_path": product.source_path},
     )
-    _spawn_prewarm(product)
     return ProductCreatedResponse(id=product.id, source_path=product.source_path)
 
 

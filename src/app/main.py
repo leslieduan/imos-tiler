@@ -11,17 +11,10 @@ from starlette.middleware.cors import CORSMiddleware
 from starlette.middleware.gzip import GZipMiddleware
 
 from app.config.log_config import configure_logging
-from app.config.paths import DISK_CACHE_PATH
 from app.routers.admin import admin_router
 from app.routers.public.data_tiles import router as data_tiles_router
 from app.routers.public.visual_tiles import router as visual_tiles_router
-from app.services.caching.lifecycle import (
-    evict_stale_and_orphans,
-    prewarm_disk_slices,
-    refresh_disk_cache,
-)
 from app.services.colormap.registry import load_colormaps
-from app.services.product.product import Product
 from app.services.product.registry import iter_products, load_products
 from app.services.rendering.kernels import warmup_resample
 from app.services.rendering.visual_tiles import warmup_visual
@@ -32,31 +25,6 @@ configure_logging()
 logger = logging.getLogger(__name__)
 
 
-async def _startup_cache_sync(products: list[Product]) -> None:
-    # Evict stale dates and orphan product dirs first so the cache reflects the current
-    # product/date state from the moment the server starts serving, then prewarm in
-    # parallel. Eviction is a sync function and must be offloaded; prewarm is async
-    # and does its own offloading internally via anyio.to_thread.run_sync.
-    try:
-        await anyio.to_thread.run_sync(evict_stale_and_orphans, products)
-    except Exception:
-        logger.exception("Startup cache eviction failed; continuing to prewarm")
-    await prewarm_disk_slices(products)
-
-
-async def _cache_refresh_loop(interval: int) -> None:
-    while True:
-        # yields to event loop — other tasks/requests run freely during the wait
-        await asyncio.sleep(interval)
-        # Re-read PRODUCTS each cycle so products added/removed via the admin API are reflected.
-        # Catch broadly: an unhandled exception here would kill the loop for the lifetime
-        # of the process, silently disabling all future refreshes.
-        try:
-            await refresh_disk_cache(iter_products())
-        except Exception:
-            logger.exception("Cache refresh cycle failed; will retry next interval")
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     limiter = anyio.to_thread.current_default_thread_limiter()
@@ -64,15 +32,6 @@ async def lifespan(app: FastAPI):
     logger.info("Thread pool size set", extra={"thread_pool_size": limiter.total_tokens})
     load_products()
     load_colormaps()
-    logger.info(
-        "Disk cache enabled",
-        extra={
-            "path": DISK_CACHE_PATH,
-            "limit_gb": int(os.environ.get("DISK_CACHE_LIMIT_GB", 20)),
-            "days": int(os.environ.get("CACHE_DAYS", 30)),
-            "workers": int(os.environ.get("PREWARM_WORKERS", 8)),
-        },
-    )
     logger.info(
         "Memory cache configured",
         extra={
@@ -86,20 +45,15 @@ async def lifespan(app: FastAPI):
     await anyio.to_thread.run_sync(warmup_visual)
     store_urls = list({p.source_path for p in iter_products()})
     store_prewarm_task = asyncio.create_task(prewarm_stores(store_urls))
-    prewarm_task = asyncio.create_task(_startup_cache_sync(iter_products()))
-    interval = int(os.environ.get("CACHE_REFRESH_INTERVAL_SECONDS", 14400))
-    logger.info("Cache refresh interval set", extra={"interval_seconds": interval})
-    refresh_task = asyncio.create_task(_cache_refresh_loop(interval))
     yield
     logger.info("Shutting down")
-    for task in (store_prewarm_task, prewarm_task, refresh_task):
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-        except Exception:
-            logger.exception("Background task exited with error")
+    store_prewarm_task.cancel()
+    try:
+        await store_prewarm_task
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        logger.exception("Background task exited with error")
 
 
 app = FastAPI(

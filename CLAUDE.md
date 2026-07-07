@@ -24,7 +24,7 @@ Two tile systems with different coordinate conventions — do not mix them up:
 Non-obvious wiring:
 
 - Routers split into `src/app/routers/public/` and `src/app/routers/admin/`. `public/products.py` is `include_router`'d into both `data_tiles` and `visual_tiles`, so its handlers are exposed under both prefixes.
-- Cache hierarchy in `src/app/services/caching/`: **L1** `processed_cache` (processed grids) → **L2** `slice_cache` (in-memory slices) → **L3** disk (managed via `services/store/registry.py`).
+- Cache hierarchy in `src/app/services/caching/`: **L1** `processed_cache` (processed grids) → **L2** `slice_cache` (in-memory slices). There is no on-disk cache layer — a miss on both falls straight through to the Zarr store (`services/store/registry.py`).
 
 See `docs/technical.md` for full architecture, caching strategy, LOD algorithm, and PNG encoding contract.
 
@@ -44,7 +44,7 @@ API dates are **`TILE_TIMEZONE` local time** (default `Australia/Sydney`), not U
 
 ### Background tasks must offload heavy work
 
-The lifespan in `src/app/main.py` schedules cache prewarm and refresh as `asyncio.create_task`s. Any CPU- or IO-heavy work inside them must go through `asyncio.to_thread`, or the event loop freezes and all in-flight requests stall.
+The lifespan in `src/app/main.py` schedules startup work (e.g. store prewarm) as `asyncio.create_task`s. Any CPU- or IO-heavy work inside them must go through `asyncio.to_thread`, or the event loop freezes and all in-flight requests stall.
 
 ## Testing
 

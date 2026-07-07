@@ -22,13 +22,6 @@ class MemoryCacheSizeStats(BaseModel):
 
 
 class ProductCacheStats(BaseModel):
-    file_count: int
-    total_bytes: int
-    oldest_date: str | None
-    newest_date: str | None
-    last_write_at: str | None
-    files: list[str]
-    cache_dir: str
     slice_in_flight: int
     processed_in_flight: int
 
@@ -43,35 +36,7 @@ class MemoryCacheSizes(BaseModel):
     processed: MemoryCacheSizeStats
 
 
-class PrewarmStatus(BaseModel):
-    running: bool
-
-
-class RefreshStatus(BaseModel):
-    status: str
-    last_started_at: str | None
-    last_completed_at: str | None
-    last_error: str | None
-    interval_seconds: int
-
-
-class DiskWritesStatus(BaseModel):
-    prewarm: PrewarmStatus
-    refresh: RefreshStatus
-
-
-class GlobalDiskStats(BaseModel):
-    base_path: str
-    total_bytes: int
-    limit_bytes: int
-    eviction_threshold_bytes: int
-    utilization_pct: float
-    over_eviction_threshold: bool
-
-
 class CacheStateResponse(BaseModel):
-    disk: GlobalDiskStats
-    disk_writes: DiskWritesStatus
     in_flight: InFlightStats
     memory_cache: MemoryCacheSizes
     products: dict[str, ProductCacheStats]
@@ -80,8 +45,3 @@ class CacheStateResponse(BaseModel):
 class MemoryClearedResponse(BaseModel):
     slice: int
     processed: int
-
-
-class DiskClearedResponse(BaseModel):
-    files: int
-    directories: int

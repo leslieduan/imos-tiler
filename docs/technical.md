@@ -115,12 +115,6 @@ Zarr eliminates this: metadata is one `.zmetadata` HTTP request, and variable ch
                                       │ L2 miss
                                       ▼
 ┌────────────────────────────────────────────────────────────────────────────┐
-│                           L3  Disk cache                                   │
-│       caching/disk.py  ·  .pkl.lz4 per date  ·  DISK_CACHE_PATH            │
-└────────────────────────────────────────────────────────────────────────────┘
-                                      │ L3 miss
-                                      ▼
-┌────────────────────────────────────────────────────────────────────────────┐
 │                              AWS  S3                                       │
 │                            Zarr stores                                     │
 └────────────────────────────────────────────────────────────────────────────┘
@@ -135,7 +129,6 @@ Zarr eliminates this: metadata is one `.zmetadata` HTTP request, and variable ch
 ```
 processed warm → get_lod_grids (already set) → _get_processed (cache hit)                            → _extract_chunk → PNG encode
 slice warm     → get_lod_grids (already set) → _get_processed miss → load_slice (L2 hit, <1ms)       → resample → cache → _extract_chunk → PNG encode
-disk warm      → get_lod_grids (already set) → _get_processed miss → load_slice (disk read, ~30ms)   → resample → cache → _extract_chunk → PNG encode
 S3 cold        → get_lod_grids (already set) → _get_processed miss → load_slice (S3 .compute(), ~2s) → resample → cache → _extract_chunk → PNG encode
 ```
 
@@ -145,7 +138,6 @@ No L1 cache. Every request calls `load_slice`, then `XarrayReader` reprojects to
 
 ```
 mem warm  → load_slice (L2 hit, <1ms)        → _to_scalar_parts (antimeridian split if needed) → XarrayReader.tile/part → colormap + PNG encode
-disk warm → load_slice (disk read, ~30ms)    → _to_scalar_parts → XarrayReader.tile/part → colormap + PNG encode
 S3 cold   → load_slice (S3 .compute(), ~2s)  → _to_scalar_parts → XarrayReader.tile/part → colormap + PNG encode
 ```
 
@@ -159,7 +151,7 @@ imos-tiler/
     main.py                      ← mounts all routers, CORS middleware, lifespan startup
     config/
       constants.py               ← LOD/LODConfig + TILE/TileConfig (server-shader contract), CACHE_VERSION, COORD_NAMES
-      paths.py                   ← PRODUCTS_CONFIG_PATH, COLORMAPS_CONFIG_PATH, DISK_CACHE_PATH
+      paths.py                   ← PRODUCTS_CONFIG_PATH, COLORMAPS_CONFIG_PATH, LAND_MASK_PATH, OCEAN_MASK_PATH
       log_config.py              ← logging setup (JSON in Docker, coloured text locally)
     routers/
       shared.py                  ← shared router helpers (PRODUCT_EX/DATE_EX examples, get_product_or_404, load_slice_or_404)
@@ -172,13 +164,12 @@ imos-tiler/
         auth.py                  ← X-Admin-Key dependency
         products.py              ← POST/DELETE /admin/products
         colormaps.py             ← POST/DELETE /admin/colormaps
-        cache.py                 ← GET /admin/cache (state snapshot) + DELETE /admin/cache/memory (clear L1+L2) + DELETE /admin/cache/disk (clear L3)
+        cache.py                 ← GET /admin/cache (state snapshot) + DELETE /admin/cache/memory (clear L1+L2)
     services/
       caching/
-        lifecycle.py             ← cross-layer orchestration: prewarm, refresh, stale eviction, evict_product_cache fan-out
+        lifecycle.py             ← evict_product_cache(product) — fans out eviction across L1 (processed_cache) and L2 (slice_cache) on product delete
         slice_cache.py           ← L2 LRU + load_slice + evict_slice_cache_for_product
         processed_cache.py       ← L1 processed-grid cache + memoizer + per-product eviction
-        disk.py                  ← L3 disk IO + per-file/dir eviction: path, read/write, pressure eviction, clear, stats
       colormap/
         registry.py              ← colormaps.json read/write + in-memory colormap registry + ColormapMode + invalidation hooks
         resolver.py              ← resolve_colormap() — custom→rio-tiler→matplotlib fallback chain
@@ -217,23 +208,16 @@ imos-tiler/
     security.md                  ← admin endpoint protection (key + nginx + EC2 security group)
 ```
 
-These runtime paths are constants in `src/app/config/paths.py`. The product/colormap config paths are hardcoded; `DISK_CACHE_PATH` is overridable via the `DISK_CACHE_PATH` env var:
+These runtime paths are constants in `src/app/config/paths.py`. All are hardcoded — there is no env-var override for any of them (the on-disk slice cache and its `DISK_CACHE_PATH` override have been removed; see [§10](#10-caching-strategy)):
 
-| Constant                | Default               | Notes                                                                                     |
-| ----------------------- | --------------------- | ----------------------------------------------------------------------------------------- |
-| `PRODUCTS_CONFIG_PATH`  | `data/products.json`  | Auto-created by `docker-entrypoint.sh` if absent; `./data` bind-mounted in Docker.        |
-| `COLORMAPS_CONFIG_PATH` | `data/colormaps.json` | Same as above.                                                                            |
-| `DISK_CACHE_PATH`       | `slice_cache`         | Env-overridable. Relative to working directory (`/app` in Docker); `./slice_cache` bind-mounted in Docker. `docker-entrypoint.sh` pre-creates whatever this resolves to. |
+| Constant                | Default               | Notes                                                                                       |
+| ----------------------- | --------------------- | -------------------------------------------------------------------------------------------- |
+| `PRODUCTS_CONFIG_PATH`  | `data/products.json`  | Auto-created by `docker-entrypoint.sh` if absent; `./data` bind-mounted in Docker.          |
+| `COLORMAPS_CONFIG_PATH` | `data/colormaps.json` | Same as above.                                                                               |
+| `LAND_MASK_PATH`        | packaged asset        | Committed coastline raster used by coastal fill; see [§7.6](#76-coastal-fill-sparse-products). |
+| `OCEAN_MASK_PATH`       | packaged asset        | Committed valid-domain raster used by the ocean-validity mask; see [§7.6](#76-coastal-fill-sparse-products). |
 
-**Local dev — keep the L3 cache out of the git working tree.** The `slice_cache` default lives *inside* the repo, so any workspace-clean operation around a branch checkout — `git clean -fdx`, an IDE "discard untracked" / clean action, or a `git worktree` swap — silently wipes the (git-ignored) cache. To avoid losing warm slices, point the cache somewhere stable outside the tree, e.g. in `.env`:
-
-```bash
-DISK_CACHE_PATH=~/.cache/titiler-project/slice_cache
-```
-
-A leading `~` is expanded (`os.path.expanduser` in `paths.py`; python-dotenv does not expand it itself). The directory is created on first write — no manual `mkdir` needed.
-
-**Load-order note.** `paths.py` reads this var at **module-import** time, so `.env` must already be loaded by then. That is why `load_dotenv()` lives in `src/app/__init__.py` (which Python runs before any `app.*` submodule import) rather than in `main.py` — a `load_dotenv()` after `main.py`'s config imports would be too late, and the module would capture the `slice_cache` default. The same applies to other module-level env reads such as `caching/slice_cache.py`'s `SLICE_CACHE_SIZE`. A real environment variable (shell `export` / Docker `environment:`) still overrides `.env`, since `load_dotenv()` does not clobber existing vars. The default stays relative so Docker volume-mount deploys are unchanged.
+**Load-order note.** Module-level env reads (e.g. `caching/slice_cache.py`'s `SLICE_CACHE_SIZE`) are captured at **module-import** time, so `.env` must already be loaded by then. That is why `load_dotenv()` lives in `src/app/__init__.py` (which Python runs before any `app.*` submodule import) rather than in `main.py` — a `load_dotenv()` after `main.py`'s config imports would be too late and the module would capture the compiled-in default. A real environment variable (shell `export` / Docker `environment:`) still overrides `.env`, since `load_dotenv()` does not clobber existing vars.
 
 ---
 
@@ -486,13 +470,12 @@ GET /visual_tiles/{product_id}/{from_date}/{to_date}/animation.{ext}
 
 **Caching design** — this endpoint deliberately differs from the other tile endpoints:
 
-| Layer                      | Behaviour                                                                                                                                                                                                                                                                            |
-| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| In-memory slice cache (L2) | **Bypassed.** Animations call `load_slice_uncached` (`services/caching/slice_cache.py`) which never touches the LRU. A rare 30-frame request can therefore not evict hot slices serving the static `/visual_tiles` and `/data_tiles` endpoints.                                                   |
-| Disk cache (L3)            | **Read-through.** If the prewarmed disk slice exists it is reused; otherwise the slice is fetched directly from the Zarr store. Animations never **write** to L3 — they may request dates outside the prewarmed window and we don't want to pollute L3 or trigger an eviction cycle. |
-| HTTP cache headers         | **None.** No `Cache-Control` set. CloudFront/CDN configurations should treat this path as no-cache; otherwise rare requests would still incur full origin cost while occupying CDN storage.                                                                                          |
+| Layer                      | Behaviour                                                                                                                                                                                                                                          |
+| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| In-memory slice cache (L2) | **Bypassed.** Animations call `load_slice_uncached` (`services/caching/slice_cache.py`) which never touches the LRU and fetches straight from the Zarr store. A rare 30-frame request can therefore not evict hot slices serving the static `/visual_tiles` and `/data_tiles` endpoints. |
+| HTTP cache headers         | **None.** No `Cache-Control` set. CloudFront/CDN configurations should treat this path as no-cache; otherwise rare requests would still incur full origin cost while occupying CDN storage.                                                        |
 
-**Frame loading** — the handler is `async def`. Per-frame `load_slice_uncached` calls are dispatched in parallel via `asyncio.gather(*(anyio.to_thread.run_sync(..., limiter=_ANIMATION_LIMITER) for ...))`, so a cold N-frame request blocks on roughly the slowest single-frame S3 read rather than the serial sum. Frame order is preserved because `gather` returns results in input order. The work runs on the shared anyio pool but under `_ANIMATION_LIMITER` (`ANIMATION_WORKERS`, default 10), a budget independent of the default tile-handler budget — a 30-frame fan-out can't starve tile-handler slots. See [§12.6](#126-one-pool-three-named-budgets).
+**Frame loading** — the handler is `async def`. Per-frame `load_slice_uncached` calls are dispatched in parallel via `asyncio.gather(*(anyio.to_thread.run_sync(..., limiter=_ANIMATION_LIMITER) for ...))`, so a cold N-frame request blocks on roughly the slowest single-frame S3 read rather than the serial sum. Frame order is preserved because `gather` returns results in input order. The work runs on the shared anyio pool but under `_ANIMATION_LIMITER` (`ANIMATION_WORKERS`, default 10), a budget independent of the default tile-handler budget — a 30-frame fan-out can't starve tile-handler slots. See [§12.6](#126-one-pool-two-named-budgets).
 
 The store-touching prelude (`get_available_dates`, `_default_bbox_from_store`, native-resolution lookup) is also offloaded via `anyio.to_thread.run_sync` so the event loop never blocks on `get_store` if a cold open or TTL-driven re-open is in progress.
 
@@ -509,9 +492,8 @@ DELETE /admin/products/{product_id} → remove a product
 POST   /admin/colormaps             → register a custom colormap
 DELETE /admin/colormaps/{name}      → remove a custom colormap
 
-GET    /admin/cache                 → cache-state snapshot (see §10.6)
-DELETE /admin/cache/memory          → clear all in-memory caches (L1 + L2); disk untouched (see §10.7)
-DELETE /admin/cache/disk            → delete every slice file from the L3 disk cache; memory untouched (see §10.8)
+GET    /admin/cache                 → cache-state snapshot (see §10.5)
+DELETE /admin/cache/memory          → clear all in-memory caches (L1 + L2) (see §10.6)
 ```
 
 ---
@@ -637,7 +619,7 @@ Because the cut writes the existing ocean-mask channel (alpha for scalar, B for 
 
 **Land-mask asset.** The coastline is a committed, bit-packed global raster `src/app/assets/land_mask.npz` (Natural Earth 1:10m land, 0.05° ≈ 5.5 km, ~3 MB), built once by `scripts/build_land_mask.py` (run with ephemeral deps: `uv run --with regionmask --with cartopy --with pooch python scripts/build_land_mask.py`). It ships **inside the package** (resolved relative to the package via `LAND_MASK_PATH`, CWD-independent) rather than in the runtime `data/` dir — `data/` may be owned/written by the service, which would otherwise block `git pull` of the asset. At runtime `masks.py` needs only numpy + scipy — **no new runtime dependency**. `load_land_mask` unpacks it lazily and `land_mask_for_grid` is `@lru_cache`d (the mask is static per product grid).
 
-**Ocean-validity mask.** A second committed mask, `src/app/assets/ocean_mask.npz`, is built by `scripts/build_ocean_mask.py` from `src/app/assets/OCmask.nc` (the model's valid-domain grid, lon 50–190°E, lat −60–10°, 1.0 = valid). Unlike the land mask, this one is applied to the **raw slice at read time**, not on a render grid: `masks.apply_ocean_mask` samples the mask at the source grid's own lon/lat (nearest grid point) and sets cells outside the valid domain to NaN. Cutting the anomalies at the source — before bilinear resampling can bleed them into valid neighbours, and before point lookups read them — means **every** consumer (data tiles, visual tiles, point endpoint) inherits the cut for free, so `_compute_processed` no longer touches it. It's opt-in per product via the `ocean_masked` flag in `products.json` (currently the UCUR/VCUR currents product; build the mask from that store, so only products on it should set it). The L3 disk cache stores the **raw** slice — only the prewarmer writes L3 and it never sets the flag — so the cut is re-applied per compute and a rebuilt mask asset takes effect on restart without clearing L3. Same no-runtime-dep / pre-baked-`.npz` rationale as the land mask.
+**Ocean-validity mask.** A second committed mask, `src/app/assets/ocean_mask.npz`, is built by `scripts/build_ocean_mask.py` from `src/app/assets/OCmask.nc` (the model's valid-domain grid, lon 50–190°E, lat −60–10°, 1.0 = valid). Unlike the land mask, this one is applied to the **raw slice at read time**, not on a render grid: `masks.apply_ocean_mask` samples the mask at the source grid's own lon/lat (nearest grid point) and sets cells outside the valid domain to NaN. Cutting the anomalies at the source — before bilinear resampling can bleed them into valid neighbours, and before point lookups read them — means **every** consumer (data tiles, visual tiles, point endpoint) inherits the cut for free, so `_compute_processed` no longer touches it. It's opt-in per product via the `ocean_masked` flag in `products.json` (currently the UCUR/VCUR currents product; build the mask from that store, so only products on it should set it). The mask is applied every time a slice is read from the Zarr store (L2 miss), so a rebuilt mask asset takes effect immediately on restart — there is no on-disk copy of the raw slice to invalidate. Same no-runtime-dep / pre-baked-`.npz` rationale as the land mask.
 
 **Caveats.**
 
@@ -844,9 +826,9 @@ If `lat`/`lon` are still missing after renaming, `_open_store` raises `ValueErro
 
 This section covers the **server-side cache stack** (tile → S3). For **HTTP caching** (Cache-Control headers, ETag revalidation, CACHE_VERSION invalidation through browsers and CloudFront), see [`docs/http_caching.md`](http_caching.md) — a separate concern with its own design.
 
-Three-tier cache stack ordered tiles → S3: **L1 (in-memory processed grid, LRU) → L2 (in-memory slice, LRU) → L3 (disk) → S3**. Both in-memory tiers use `cachetools.LRUCache` — when the cache reaches its configured maximum size, the **least-recently-accessed entry is evicted** to make room. Visual tiles have no L1 — requests hit L2 first. Cold S3 reads (~2 s) are absorbed by disk (L3, ~30 ms) and the in-memory LRUs (L2 / L1, < 1 ms). The disk cache is the primary mechanism for eliminating cold origin hits — it persists across server restarts and is pre-populated at startup.
+Two-tier cache stack ordered tiles → S3: **L1 (in-memory processed grid, LRU) → L2 (in-memory slice, LRU) → S3**. Both tiers use `cachetools.TTLCache` (LRU-at-capacity plus a TTL) — when the cache reaches its configured maximum size, the **least-recently-accessed entry is evicted** to make room, and entries also expire after their configured TTL regardless of capacity pressure. Visual tiles have no L1 — requests hit L2 first. There is **no on-disk cache layer** — an L2 miss falls straight through to a live Zarr read on S3 (`.compute()`, ~2 s for a satellite-class slice). Nothing persists across a server restart: every restart starts fully cold, and every L2 miss (whether right after startup or hours into steady state) pays the same full S3 fetch cost. `store_prewarm_task` ([§11](#11-background-tasks)) only warms Zarr store *metadata* at startup — it does not populate L2 with slice data.
 
-> Full design rationale (why disk over Redis / EFS / Fargate ephemeral): [`docs/cache_analysis.md`](cache_analysis.md).
+> An on-disk L3 tier existed in an earlier version of this server; the design rationale for it (disk vs Redis vs EFS vs Fargate ephemeral) is preserved as a historical record in [`docs/cache_analysis.md`](cache_analysis.md), which documents the era before it was removed.
 
 ### 10.1 Store singleton (`services/store/registry.py`, `StoreRegistry`)
 
@@ -865,7 +847,7 @@ Alongside the dataset, the registry builds a per-URL `{local_date: [timestamps]}
 
 ### 10.2 L1 — Processed grid cache (`services/caching/processed_cache.py`, `_processed_cache`)
 
-Keyed `(source_path, date, str(variable), lod)`. Stores the resampled + normalised numpy arrays for the **full LOD grid**, not per-tile. A hit reduces per-tile work to `_extract_chunk` + PNG encode only — no S3 I/O, no resampling. The key is semantic (not object identity), so cache hits survive L2 slice evictions and disk-reloaded slices.
+Keyed `(source_path, date, str(variable), lod)`. Stores the resampled + normalised numpy arrays for the **full LOD grid**, not per-tile. A hit reduces per-tile work to `_extract_chunk` + PNG encode only — no S3 I/O, no resampling. The key is semantic (not object identity), so cache hits survive an L2 slice eviction as long as this entry hasn't itself been evicted.
 
 Entry sizes for the satellite heatwave product (2000×3900): LOD 1 ~1.4 MB, LOD 2 ~3.3 MB, LOD 3 ~12 MB, LOD 4 ~41 MB. GSLA-class products have only 1 LOD level at ~1.4 MB.
 
@@ -874,7 +856,7 @@ Entry sizes for the satellite heatwave product (2000×3900): LOD 1 ~1.4 MB, LOD 
 - **LRU at capacity.** When full, the least-recently-accessed `(product, date, lod)` entry is evicted. Active dates stay warm; cold ones get pushed out first.
 - **TTL after insertion.** Each entry expires `PROCESSED_CACHE_TTL_SECONDS` after insertion (default 600 s / 10 min). Idle RAM returns to baseline after the user moves on; an unusually long stationary session pays one re-resample (~10–50 ms) when the entry first expires.
 
-After eviction, the next request for that key recomputes the processed grid from the L2 slice (~tens of ms) or from L2 → disk → S3 if L2 has also evicted it.
+After eviction, the next request for that key recomputes the processed grid from the L2 slice (~tens of ms) or, if L2 has also evicted it, from a fresh S3 fetch (~2 s for a satellite-class slice).
 
 Size is controlled by `PROCESSED_CACHE_SIZE` (default `50`). Sized as `SLICE_CACHE_SIZE × LOD.max_lods` with headroom: `10 × 4 = 40`, rounded to 50. This keeps all LOD levels warm for every date in the L2 slice cache.
 
@@ -891,47 +873,15 @@ Keyed `(store_url, date, variables_tuple)`. Stores a fully-computed (`.compute()
 - **LRU at capacity.** When the cache is full, the least-recently-accessed `(store_url, date, variables)` slice is evicted on the next insert. This is what bounds peak RAM under burst pressure (e.g. many concurrent map views on different `(product, date)` pairs).
 - **TTL after insertion.** Each entry expires `SLICE_CACHE_TTL_SECONDS` after insertion (default 600 s / 10 min). This is what bounds idle RAM: after a user moves on from a date, the slice expires automatically instead of squatting in the LRU until something newer pushes it out.
 
-Why this shape: L2's real job is to absorb the trailing tiles of a single map view. MapboxGL fires ~50–200 tile requests for the same `(product, date)` in a burst; in-flight dedup (`_slice_memo`) coalesces the simultaneous ones into a single L3 load, and L2 then serves the trailing arrivals over the next few seconds. After the user navigates away, the slice has no further reuse — TTL evicts it; LRU would keep it indefinitely.
+Why this shape: L2's real job is to absorb the trailing tiles of a single map view. MapboxGL fires ~50–200 tile requests for the same `(product, date)` in a burst; in-flight dedup (`_slice_memo`) coalesces the simultaneous ones into a single S3 load, and L2 then serves the trailing arrivals over the next few seconds. After the user navigates away, the slice has no further reuse — TTL evicts it; LRU would keep it indefinitely.
 
-L2 eviction (either path) does not invalidate the on-disk L3 copy. A subsequent request reloads from disk in ~30 ms via `pickle.loads(lz4.frame.decompress(...))`. The "thrash" cost of an undersized L2 is therefore a one-time ~30 ms disk-warm hit per re-request, not a full ~2 s cold S3 fetch.
+An L2 eviction (either path) has no on-disk fallback to catch it — there is no L3. A subsequent request for the same key pays a full cold S3 fetch (`.compute()`, ~2 s for a satellite-class slice), identical to a first-ever cold request. The "thrash" cost of an undersized L2 is therefore a full cold S3 fetch per re-request, not a cheap disk-warm hit — see [§14.3](#143-why-the-default-slice_cache_size10-is-too-small-for-production) for why this makes L2 sizing more consequential than it was when a disk tier existed to absorb the miss.
 
 Size is controlled by `SLICE_CACHE_SIZE` (default `10`). Entry size varies significantly by product: ~2 MB for a GSLA-class slice (351×641), ~61 MB for a satellite-class slice (2000×3900 float64).
 
 Primary consumers are **visual_tiles** (no L1 above it — every tile request calls `load_slice`) and **data_tiles manifest/point** (always need `ds` directly). For data_tiles tile requests, the slice is only loaded on an L1 miss; once the processed grid is warm, L2 is bypassed entirely.
 
-### 10.4 L3 — Slice cache, disk (`DISK_CACHE_PATH` directory)
-
-Persists fully-computed slices as lz4-compressed pickles to survive server restarts. On an L2 miss, `load_slice` checks disk before going to S3. A disk hit (~30 ms read + decompress) is ~60× faster than a cold S3 fetch.
-
-**Why lz4 + pickle?**
-
-- **Pickle** is used because slices are `xr.Dataset` objects — preserving the full structure (coords, attrs, dtypes) on round-trip is the point, and pickle is the only stdlib option that handles xarray's nested numpy + dict-of-attrs layout without custom (de)serialisation code.
-- **lz4** is chosen for **speed over ratio**: compress and decompress at ~500 MB/s on a single core, with ~3–4× compression on float64 ocean arrays. Contiguous NaN bit patterns in land masks compress especially well — for some products effective ratios are higher.
-
-The (de)compression overhead is dwarfed by the size savings. A typical 18 MB compressed satellite slice decompresses to 61 MB in ~25 ms — all of which still fits inside the ~30 ms disk-hit budget that is ~60× faster than the ~2 s cold S3 fetch it replaces. Trade-offs avoided by this choice:
-
-| If we used…                            | Cost                                                                                              |
-| -------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| Raw pickle, no compression             | ~3.4× more disk per product (60 GB instead of 18 GB for 10 satellite × 90 days), no read speed-up |
-| gzip / zstd-max instead of lz4         | Better ratio (~1.5×) but compress/decompress ~5–10× slower — disk-hit budget exceeds cold S3      |
-| Custom binary format instead of pickle | Loses xarray metadata or requires per-slice serialisation glue; no measurable compression win     |
-
-Per-product compression ratios, lz4-vs-zstd-vs-snappy measurements, and the disk-vs-Redis-vs-EFS decision live in [`docs/cache_analysis.md`](cache_analysis.md).
-
-File layout: `{DISK_CACHE_PATH}/{store_name}-{var_str}/{date}.pkl.lz4`.
-
-Always enabled; path is the hardcoded constant `DISK_CACHE_PATH = "slice_cache"` (relative to the working directory — resolves to `/app/slice_cache` in Docker).
-
-**Eviction:**
-
-- _Stale dates_ — `evict_stale_and_orphans` (and the refresh cycle) deletes `.pkl.lz4` files whose dates are no longer in the `CACHE_DAYS` window for any registered product.
-- _Orphan product directories_ — `evict_stale_and_orphans` removes any sub-directory under `DISK_CACHE_PATH` whose name does not correspond to a currently-registered product. This is what makes runtime product deletion safe: leftover disk slices from removed products are cleaned up automatically on the next refresh (and at startup).
-- _Disk pressure_ — `evict_if_over_threshold` in `services/caching/disk.py` (run at the start of each refresh cycle) removes files when total usage exceeds `DISK_EVICTION_THRESHOLD × DISK_CACHE_LIMIT_GB`. Files are sorted `(size ascending, date ascending)` — small + old files are evicted first, keeping the large satellite slices that would be most expensive to re-fetch.
-- _Explicit product deletion_ — `evict_product_cache` in `services/caching/lifecycle.py` (called by `DELETE /admin/products/{id}`) removes the product's disk directory via `shutil.rmtree` and purges matching entries from the L2 in-memory cache immediately.
-
-Disk eviction never invalidates L2 in-memory entries — the in-memory data is still valid and serves requests until it falls out of the LRU naturally.
-
-### 10.5 Stampede protection
+### 10.4 Stampede protection
 
 All three layers use `concurrent.futures.Future` to deduplicate concurrent misses on the same key. The slice and processed-grid layers use the shared `Memoizer` helper (`utils/memoizer.py`), which packages the "check cache → create Future → wait → publish → cleanup" pattern in one place. The store layer keeps its own per-URL Future map inside `StoreRegistry` because it layers TTL + stale-while-revalidate on top of dedup, which the generic helper deliberately does not model.
 
@@ -942,41 +892,29 @@ All three layers use `concurrent.futures.Future` to deduplicate concurrent misse
 
 The first thread to miss the cache creates the Future and does the work; all other threads arriving for the same key block on `future.result()` and receive the same result when the single computation completes. Errors propagate to all waiting threads so a failed request does not permanently block future attempts for the same key. See [§12.8](#128-per-request-capacity-origin-server-ec2ecs-in-region) for capacity implications.
 
-### 10.6 Cache-state visibility (`GET /admin/cache`)
+### 10.5 Cache-state visibility (`GET /admin/cache`)
 
-A single read-only admin endpoint surfaces everything a production debugger usually wants to know about the cache. It returns five sections:
+A single read-only admin endpoint surfaces everything a production debugger usually wants to know about the cache. It returns three top-level sections:
 
-- **`disk`** — global L3 footprint: total bytes, configured limit (`DISK_CACHE_LIMIT_GB`), eviction threshold, utilisation %, and an `over_eviction_threshold` flag so pressure is visible at a glance.
-- **`disk_writes`** — live state of the two background disk writers: `prewarm.running` (boolean) and `refresh` (status `never_run`/`running`/`ok`/`error`, start + completion timestamps, last error message, configured interval). Useful for spotting a stalled refresh or a prewarm still in progress after startup.
 - **`in_flight`** — instantaneous count of computations currently mid-flight in each Memoizer (`current`), high-water mark since process start (`peak`), and total computes started since startup (`total_computes`). Slice and processed-grid memoizers reported separately. **Not** a rolling window — values reflect the moment of the request and drop to 0 when nothing is running.
 - **`memory_cache`** — current size and max for the slice and processed-grid LRUs.
-- **`products`** — per-product breakdown: disk file count, total bytes, oldest/newest cached date, most recent write mtime, and in-flight counts attributed by `(source_path, sorted_variables)` so two products sharing a Zarr don't collide.
+- **`products`** — per-product breakdown: `slice_in_flight` and `processed_in_flight`, attributed by `(source_path, sorted_variables)` so two products sharing a Zarr don't collide.
 
-The handler is a sync `def` (FastAPI dispatches it to the anyio pool automatically) and the filesystem walk is single-pass — every cache file is stat'd once, then attributed to a product via parent-dir-name lookup in `services/caching/disk.collect_disk_stats` — so a thousand-file cache costs at most a few milliseconds of thread-pool time and never blocks tile requests. Peak/total counters are bumped under the Memoizer's existing lock; ambient cost on the tile-serving path is two integer ops per cache miss.
+The handler is a sync `def` (FastAPI dispatches it to the anyio pool automatically). There is no filesystem walk to perform — with no on-disk tier, the entire response is assembled from in-memory counters, so the cost is a handful of dict reads regardless of cache size. Peak/total counters are bumped under the Memoizer's existing lock; ambient cost on the tile-serving path is two integer ops per cache miss.
 
-### 10.7 In-memory cache flush (`DELETE /admin/cache/memory`)
+### 10.6 In-memory cache flush (`DELETE /admin/cache/memory`)
 
-Drops every entry from both in-memory tiers — `_processed_cache` (L1) and `_slice_cache` (L2) — and returns the counts cleared as `{"cleared": {"slice": N, "processed": M}}`. Disk (L3) is untouched, so the next request for any flushed key still hits disk in ~30 ms instead of re-fetching from S3.
+Drops every entry from both in-memory tiers — `_processed_cache` (L1) and `_slice_cache` (L2) — and returns the counts cleared as `{"cleared": {"slice": N, "processed": M}}`. Since there is no on-disk tier, the next request for any flushed key falls straight through to a cold S3 fetch.
 
 Implemented as `Memoizer.evict_matching(lambda _: True)` in both `services/caching/slice_cache.clear_slice_cache` and `services/caching/processed_cache.clear_processed_cache`. Per-product fan-out for a specific deleted product is `evict_product_cache` in `services/caching/lifecycle.py`. The eviction runs under the Memoizer's existing lock — concurrent `get_or_compute` calls block briefly while keys are removed. Any **in-flight** compute is not cancelled: it finishes and re-publishes into the (now-empty) cache when it completes, so a flush during heavy load may leave a handful of partially-refilled entries from work that was already running. Callers that arrived before the flush and are still `await`ing a shared Future receive the original result, not a re-computed one — there is no torn state.
 
 Use cases: forcing a re-read after a Zarr store has been updated out-of-band, recovering from a poisoned cache entry, or freeing memory during an interactive debugging session without restarting the process.
 
-### 10.8 Disk cache flush (`DELETE /admin/cache/disk`)
-
-Deletes every `.pkl.lz4` slice file from the L3 disk cache directory and returns the count removed as `{"cleared": {"disk": N}}`. Memory caches (L1, L2) are untouched.
-
-If `prewarm_disk_slices` or `refresh_disk_cache` is currently running the endpoint returns **409 Conflict** immediately without touching the disk — both operations write slice files, so clearing during either is pointless. Wait for the operation to complete before retrying.
-
-Implemented in `services/caching/disk.clear_disk_cache` — iterates the per-product subdirectories under `DISK_CACHE_PATH` and removes each with `shutil.rmtree`, leaving the base directory itself intact. The handler is a sync `def`, so FastAPI dispatches it to the anyio pool automatically and the event loop stays free. In-flight computes are not cancelled — they may re-populate the disk cache on completion.
-
-Use cases: forcing a full cold repopulation from S3 (e.g. after the underlying Zarr data has been rewritten), recovering disk space during debugging, or resetting a corrupted cache state without restarting the server. After a flush, the next request for any date will fall through to S3 (~2 s) and the disk cache will be repopulated gradually — or trigger `prewarm_disk_slices` via a server restart to repopulate in bulk.
-
 ---
 
 ## 11. Background tasks
 
-The server runs two long-lived background tasks scheduled on the event loop at startup, plus several ad-hoc background actions. None of them block request handling — see [§12](#12-concurrency-event-loop-and-threading) for why.
+The server runs one long-lived background task scheduled on the event loop at startup (`store_prewarm_task`), plus several ad-hoc background actions. None of them block request handling — see [§12](#12-concurrency-event-loop-and-threading) for why. There is no periodic background task in this server: with no on-disk slice cache to refresh or evict, the only startup work is warming Zarr *store* metadata, which is a one-shot.
 
 ### 11.1 Lifespan overview (`main.py`)
 
@@ -988,92 +926,47 @@ async def lifespan(app: FastAPI):
 
     load_products()                      # sync: read products.json into PRODUCTS dict
     load_colormaps()                     # sync: read colormaps.json into the colormap registry
+    logger.info("Memory cache configured", extra={...})  # slice/processed cache sizes, store TTL — see §16.4
+
+    warmup_resample()                    # numba JIT warmup for the resample/normalize kernels, see §7.4
+    warmup_visual()                      # rio-tiler warmup
 
     store_urls = list({p.source_path for p in PRODUCTS.values()})
     store_prewarm_task = asyncio.create_task(prewarm_stores(store_urls))   # anyio pool, gated by _STORE_PREWARM_LIMITER
 
-    prewarm_task = asyncio.create_task(_startup_cache_sync(list(PRODUCTS.values())))
-    interval = int(os.environ.get("CACHE_REFRESH_INTERVAL_SECONDS", 14400))
-    refresh_task = asyncio.create_task(_cache_refresh_loop(interval))
-
     yield  # ← server handles requests here
 
-    for task in (store_prewarm_task, prewarm_task, refresh_task):
-        task.cancel()
-        try: await task
-        except asyncio.CancelledError: pass
+    store_prewarm_task.cancel()
+    try: await store_prewarm_task
+    except asyncio.CancelledError: pass
 ```
 
-Everything before `yield` runs on startup; everything after runs on shutdown. **The server begins handling requests immediately at `yield`** — it does not wait for prewarm or refresh to finish. Both background tasks pause at `await` points so the event loop is free for incoming requests.
+Everything before `yield` runs on startup; everything after runs on shutdown. **The server begins handling requests immediately at `yield`** — it does not wait for the store prewarm to finish. `store_prewarm_task` pauses at `await` points so the event loop is free for incoming requests. Note that `store_prewarm_task` only opens each unique Zarr store's *metadata* (`xr.open_zarr`, no data chunks) via `services/store/registry.py` — it does not populate the L2 slice cache with any actual data, so every date's first slice read still pays the full S3 fetch regardless of when it happens in the process's life.
 
-### 11.2 `prewarm_task` — startup cache sync (one-shot)
-
-Wraps `_startup_cache_sync(products)`, which does two sequential phases:
-
-1. **`evict_stale_and_orphans(products)`** — a sync function called via `await anyio.to_thread.run_sync(evict_stale_and_orphans, products)`, so the filesystem walk runs off the event loop. It removes
-   - any cached `.pkl.lz4` files for dates outside the `CACHE_DAYS` window for each product, **and**
-   - any cache sub-directory whose name doesn't match a currently registered product (orphans left over after a product was removed in a previous run).
-
-   This ensures the disk cache reflects the current product/date state from the moment the server starts serving, not just after the first refresh cycle.
-
-2. **`prewarm_disk_slices(products)`** — itself `async def`; awaited directly, it manages its own offload. For each `(product, date)` pair in the last `CACHE_DAYS` dates, calls `_prewarm_one` (sync). Pairs are fanned out via `anyio.create_task_group` where the spawn loop acquires `_PREWARM_SEM` (`anyio.Semaphore(PREWARM_WORKERS)`, default 8) _before_ `tg.start_soon`, so at most N tasks exist at once — bounding both S3 fan-out and the pending-coroutine count when product × date is large. Disk-cached pairs return instantly; missing ones are fetched from S3 and written to disk. The task group exits only once every job has finished. The trailing `evict_if_over_threshold` runs inside the same `try` so `is_prewarm_running()` stays `True` through the unlink pass and `DELETE /admin/cache/disk` cannot race it.
-
-If eviction fails for any reason it is logged and prewarm proceeds anyway — partial cache is better than no cache.
-
-The task completes once; it is not periodic.
-
-### 11.3 `refresh_task` — periodic cache refresh (long-running)
-
-`_cache_refresh_loop(interval)` runs in an infinite `while True` loop:
-
-```python
-async def _cache_refresh_loop(interval: int) -> None:
-    while True:
-        await asyncio.sleep(interval)
-        try:
-            await refresh_disk_cache(list(PRODUCTS.values()))
-        except Exception:
-            logger.exception("Cache refresh cycle failed; will retry next interval")
-```
-
-Key properties:
-
-- **Re-reads `PRODUCTS` every cycle** — products added or removed via the admin API are picked up automatically on the next tick; no restart required.
-- **Broad exception handling** — an unhandled exception inside the loop would kill it for the lifetime of the process and silently disable all future refreshes. The broad `except` keeps the loop alive across transient failures.
-- **`asyncio.sleep` yields to the event loop** — other tasks and requests run freely during the wait.
-- **`refresh_disk_cache` is `async def` and offloads internally** — its sync work (eviction, S3 fetches, `.compute()` calls) is wrapped in `anyio.to_thread.run_sync` per phase, so the event loop stays free without the caller needing a `to_thread` wrapper.
-
-`refresh_disk_cache` itself:
-
-1. Calls `evict_stale_and_orphans(products)` first — drops files outside the date window and removes orphan product directories.
-2. For each product, computes the target window (`get_available_dates[-CACHE_DAYS:]`) and writes any missing date's slice to disk via `load_slice` + `lz4.frame.compress(pickle.dumps(ds))`.
-
-Default interval is `CACHE_REFRESH_INTERVAL_SECONDS = 14400` (4 hours). In steady state on IMOS daily data this adds ~1 new date per product per cycle and evicts ~1 stale date.
-
-### 11.4 Other background actions
+### 11.2 Other background actions
 
 | Trigger                     | Action                                                                                       | Mechanism                                                                                                                                             |
 | --------------------------- | -------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `prewarm_stores` at startup | Open each unique Zarr store URL (metadata only) so first requests don't pay the cost         | `asyncio.Task` fanning out on the anyio pool, gated by `_STORE_PREWARM_LIMITER` (`STORE_PREWARM_WORKERS`, default 8); tracked + cancelled at shutdown |
 | Store TTL expiry            | Re-open Zarr store in the background to pick up new timestamps; stale store served meanwhile | `StoreRegistry._refresh_background` via `threading.Thread`                                                                                            |
-| `POST /admin/products`      | Prewarm the disk cache for the newly registered product                                      | `asyncio.create_task(prewarm_disk_slices([product]))` — `prewarm_disk_slices` is `async def` and offloads internally                                  |
-| `DELETE /admin/products`    | Evict the product's in-memory L1/L2 entries and remove its disk directory                    | Synchronous on the request thread (fast — file delete + dict pop)                                                                                     |
+| `POST /admin/products`      | None beyond validating the store and persisting the product — no background warming fires    | Synchronous on the request thread; the first tile request for the new product pays the normal cold-store / cold-slice cost                           |
+| `DELETE /admin/products`    | Evict the product's in-memory L1/L2 entries                                                  | Synchronous on the request thread (fast — dict pop, no filesystem work)                                                                               |
 
-### 11.5 Graceful shutdown
+### 11.3 Graceful shutdown
 
 On shutdown (Uvicorn signal handler), the lifespan `finally` block:
 
-- `cancel()`s `store_prewarm_task`, `prewarm_task`, and `refresh_task`.
-- `await`s each one to handle `asyncio.CancelledError` cleanly.
+- `cancel()`s `store_prewarm_task`.
+- `await`s it to handle `asyncio.CancelledError` cleanly.
 - Logs any other exception that escaped.
 
-`task.cancel()` aborts the _await_ — any `xr.open_zarr` or `_prewarm_one` already running in an anyio worker thread runs to completion (CPython threads are uncancellable). Anyio worker threads themselves are released back to the shared pool when their job returns; there is no separate pool to drain. Daemon threads used by store TTL refresh (`StoreRegistry._refresh_background`) do not need explicit cleanup — they exit with the process.
+`task.cancel()` aborts the _await_ — any `xr.open_zarr` already running in an anyio worker thread runs to completion (CPython threads are uncancellable). Anyio worker threads themselves are released back to the shared pool when their job returns; there is no separate pool to drain. Daemon threads used by store TTL refresh (`StoreRegistry._refresh_background`) do not need explicit cleanup — they exit with the process.
 
 ---
 
 ## 12. Concurrency: event loop and threading
 
-The server combines an **asyncio event loop** (for FastAPI/Uvicorn request multiplexing and the lifespan's background tasks) with a **single bounded thread pool** (anyio's, for all CPU- and I/O-heavy work). Three named budgets carve that one pool into independent slices — one for each background fan-out (`_PREWARM_SEM`, `_ANIMATION_LIMITER`, `_STORE_PREWARM_LIMITER`) — so background work cannot starve request serving. Understanding which work runs where is essential when reasoning about latency, throughput, and capacity.
+The server combines an **asyncio event loop** (for FastAPI/Uvicorn request multiplexing and the lifespan's background task) with a **single bounded thread pool** (anyio's, for all CPU- and I/O-heavy work). Two named budgets carve that one pool into independent slices — one for each background fan-out (`_ANIMATION_LIMITER`, `_STORE_PREWARM_LIMITER`) — so background work cannot starve request serving. Understanding which work runs where is essential when reasoning about latency, throughput, and capacity.
 
 ### 12.1 Why most endpoints are `def`, not `async def`
 
@@ -1155,16 +1048,15 @@ Stampede protection (`_slice_memo`, `_processed_memo`, `StoreRegistry._in_flight
 
 ### 12.3 Background tasks run on the event loop and offload work via `anyio.to_thread.run_sync`
 
-The two `asyncio.create_task(...)` calls in `lifespan` create coroutines that run on the event loop:
+The `asyncio.create_task(...)` call in `lifespan` creates a coroutine that runs on the event loop:
 
-- `_startup_cache_sync` — awaits `anyio.to_thread.run_sync(evict_stale_and_orphans, products)` (eviction is sync), then `await prewarm_disk_slices(products)` (prewarm is itself `async def` and handles its own offload internally).
-- `_cache_refresh_loop` — awaits `asyncio.sleep(interval)`, then `await refresh_disk_cache(...)` directly.
+- `prewarm_stores(store_urls)` — fans out one `xr.open_zarr` metadata fetch per unique store URL on the shared anyio pool, gated by `_STORE_PREWARM_LIMITER` (`STORE_PREWARM_WORKERS`, default 8).
 
-Each `await` is a yield point: the event loop is free to dispatch other tasks (including incoming HTTP requests) until the awaited operation completes. The blocking work itself (S3 fetches, disk reads, `.compute()`) runs on a thread from the anyio pool — it does **not** run on the event loop.
+Each `await` is a yield point: the event loop is free to dispatch other tasks (including incoming HTTP requests) until the awaited operation completes. The blocking work itself (`xr.open_zarr`, S3 metadata fetches) runs on a thread from the anyio pool — it does **not** run on the event loop.
 
-This is why a 60-second prewarm at startup does not delay the first request by 60 seconds. The event loop yields at each `await anyio.to_thread.run_sync(...)` boundary, the prewarm work runs in the background, and the event loop continues to handle requests on other threads.
+This is why a multi-second store prewarm at startup does not delay the first request. The event loop yields at each `await anyio.to_thread.run_sync(...)` boundary (inside `prewarm_stores`), the prewarm work runs in the background, and the event loop continues to handle requests on other threads.
 
-`prewarm_disk_slices` and `refresh_disk_cache` further parallelise across `(product, date)` pairs using `anyio.create_task_group` with `_PREWARM_SEM` (`anyio.Semaphore(PREWARM_WORKERS)`, default 8) acquired _before_ each `tg.start_soon`. The semaphore-gated spawn pattern caps both the number of concurrent S3 fetches **and** the number of pending coroutines — for a thousand-job prewarm we never hold more than ~8 coroutines alive. Crucially, this is a **separate concurrency budget** from the default tile-handler limiter — prewarm jobs do not consume slots that tile handlers would otherwise use. See [§12.6](#126-one-pool-three-named-budgets) for why.
+`prewarm_stores` parallelises across store URLs using an `anyio.CapacityLimiter` (`_STORE_PREWARM_LIMITER`) passed into each `to_thread.run_sync(...)` call — bounded by the number of unique stores, which for any realistic product count is small. This is a **separate concurrency budget** from the default tile-handler limiter — store-prewarm work does not consume slots that tile handlers would otherwise use. See [§12.6](#126-one-pool-two-named-budgets) for why.
 
 ### 12.4 Quick reference
 
@@ -1172,29 +1064,25 @@ This is why a 60-second prewarm at startup does not delay the first request by 6
 | --------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | HTTP accept / parse / route       | Event loop                                                                                                                                          | Pure async I/O; never blocks                                                                                                                                                                                                                                                 |
 | Tile/manifest/point handlers      | Anyio pool, default limiter (`THREAD_POOL_SIZE`)                                                                                                    | Sync `def` so blocking xarray/rio-tiler/PIL calls don't freeze the loop                                                                                                                                                                                                      |
-| `/animation`                      | Event-loop coroutine → `anyio.to_thread.run_sync` per frame, gated by `_ANIMATION_LIMITER` (`ANIMATION_WORKERS`, default 10)                        | `async def` so per-frame `load_slice_uncached` calls fan out via `asyncio.gather`; latency drops to ~max(per-frame) instead of the serial sum. Limiter keeps a many-frame request from monopolising the tile-handler budget — see [§12.6](#126-one-pool-three-named-budgets) |
-| `/admin/products` POST            | Event loop (`async def`); `register_product` JSON write offloaded via `anyio.to_thread.run_sync`; spawns `prewarm_disk_slices` as a background task | Stays `async def` because `_spawn_prewarm` calls `asyncio.create_task` and that needs a running loop in this thread                                                                                                                                                          |
+| `/animation`                      | Event-loop coroutine → `anyio.to_thread.run_sync` per frame, gated by `_ANIMATION_LIMITER` (`ANIMATION_WORKERS`, default 10)                        | `async def` so per-frame `load_slice_uncached` calls fan out via `asyncio.gather`; latency drops to ~max(per-frame) instead of the serial sum. Limiter keeps a many-frame request from monopolising the tile-handler budget — see [§12.6](#126-one-pool-two-named-budgets) |
+| `/admin/products` POST            | Event loop (`async def`); store validation + `products.json` write offloaded via `anyio.to_thread.run_sync`                                        | No background task is spawned after registration — the handler returns as soon as the store is validated and the file is written                                                                                                                                             |
 | `/admin/products` DELETE          | Event loop (sync `def`)                                                                                                                             | In-memory removal + sync cache eviction                                                                                                                                                                                                                                      |
-| `GET /admin/cache`                | Anyio pool, default limiter (sync `def`)                                                                                                            | Filesystem walk dispatched automatically by FastAPI                                                                                                                                                                                                                          |
-| `DELETE /admin/cache/disk`        | Anyio pool, default limiter (sync `def`)                                                                                                            | Filesystem walk dispatched automatically by FastAPI                                                                                                                                                                                                                          |
+| `GET /admin/cache`                | Anyio pool, default limiter (sync `def`)                                                                                                            | In-memory counter reads dispatched automatically by FastAPI                                                                                                                                                                                                                  |
 | `/products`, `/colormaps` listing | Event loop (`async def`)                                                                                                                            | In-memory dict reads only                                                                                                                                                                                                                                                    |
 | Store prewarm at startup          | Anyio pool, gated by `_STORE_PREWARM_LIMITER` (`STORE_PREWARM_WORKERS`)                                                                             | Concurrent metadata fetches, tracked as `asyncio.Task`                                                                                                                                                                                                                       |
 | Store TTL refresh                 | One daemon thread per URL on TTL expiry                                                                                                             | Stale store returned immediately; fresh open happens in the background                                                                                                                                                                                                       |
-| `_startup_cache_sync`             | Event-loop task; `evict` via `anyio.to_thread.run_sync`; `prewarm` is `async def` awaited directly                                                  | Coroutine yields while the actual eviction + prewarm work runs on threads                                                                                                                                                                                                    |
-| `_cache_refresh_loop`             | Event-loop task; `refresh_disk_cache` is `async def` awaited directly                                                                               | Coroutine yields during sleep + refresh; never blocks the loop                                                                                                                                                                                                               |
-| `prewarm_disk_slices` fan-out     | Anyio pool, spawn-gated by `_PREWARM_SEM` (`PREWARM_WORKERS`)                                                                                       | At most N tasks alive at a time — bounds S3 fan-out and pending coroutines                                                                                                                                                                                                   |
 | In-flight stampede dedup          | Anyio pool (callers block on `Future`)                                                                                                              | Holds a slot but does no work — see §12.2                                                                                                                                                                                                                                    |
 
 ### 12.5 Failure modes to watch
 
 - **`async def` an endpoint by accident.** If a future contributor turns a `def` handler into `async def`, blocking calls inside it (any `xarray`/`rio-tiler` call) will freeze the event loop and serialise every request behind the slowest one. There is no static check for this — review carefully.
-- **Forget `anyio.to_thread.run_sync` inside an `async def` function.** `prewarm_disk_slices`, `refresh_disk_cache`, and the admin coroutines all run on the event loop. Any blocking call inside their body — `get_available_dates`, `evict_stale_and_orphans`, `evict_if_over_threshold`, filesystem walks — must be wrapped in `anyio.to_thread.run_sync(...)` or it freezes the loop. The `async def` shape converts a one-time offload (at the call site of a sync function) into a per-call discipline (every blocking line inside the body); review additions to these functions carefully.
-- **Unbounded background tasks.** Both lifespan tasks have a top-level `try/except`. New background tasks must do the same — an unhandled exception in an `asyncio.Task` is silent until the task is awaited.
-- **Saturate `_PREWARM_SEM` with the wrong workload.** The semaphore is sized to the S3 connection ceiling for slice fetches (`PREWARM_WORKERS=8`). Don't acquire it around filesystem ops, metadata reads, or anything else not bound by that resource — semantically wrong and accidentally serialises unrelated work.
+- **Forget `anyio.to_thread.run_sync` inside an `async def` function.** `prewarm_stores` and the admin `async def` coroutines run on the event loop. Any blocking call inside their body — `xr.open_zarr`, `get_available_dates`, or any other synchronous xarray/filesystem call — must be wrapped in `anyio.to_thread.run_sync(...)` or it freezes the loop. Review additions to these functions carefully.
+- **Unbounded background tasks.** The lifespan's background task has a top-level `try/except` around its body. New background tasks must do the same — an unhandled exception in an `asyncio.Task` is silent until the task is awaited.
+- **Saturate a limiter with the wrong workload.** `_STORE_PREWARM_LIMITER` and `_ANIMATION_LIMITER` are each sized to the S3 connection-pool ceiling for their specific fan-out. Don't acquire either around unrelated work (filesystem ops, metadata reads not bound by that resource) — semantically wrong and accidentally serialises unrelated work.
 
-### 12.6 One pool, three named budgets
+### 12.6 One pool, two named budgets
 
-§12.2 talks about "the thread pool" singular. That framing is accurate at the OS level: nearly every offload in this app lands in **one** anyio worker pool. What's split into independent slices is the **concurrency budget** on that pool — three named gates, each sized to its own bottleneck. Two are `anyio.CapacityLimiter` (acquired inside `to_thread.run_sync`); one is `anyio.Semaphore` (acquired _before_ `tg.start_soon` to also bound the pending-coroutine count).
+§12.2 talks about "the thread pool" singular. That framing is accurate at the OS level: nearly every offload in this app lands in **one** anyio worker pool. What's split into independent slices is the **concurrency budget** on that pool — two named gates, each sized to its own bottleneck. Both are `anyio.CapacityLimiter`, acquired inside `to_thread.run_sync`. Neither current fan-out needs semaphore-style spawn-gating (see below) because both are bounded to a small N.
 
 #### Why a single pool, not three
 
@@ -1202,37 +1090,33 @@ Earlier versions of this server used three thread pools:
 
 1. anyio's pool for sync `def` tile handlers (size 100).
 2. asyncio's default executor for `asyncio.to_thread(...)` calls (~32) — used by admin endpoints and background tasks.
-3. A `concurrent.futures.ThreadPoolExecutor(max_workers=PREWARM_WORKERS)` built inside `prewarm_disk_slices` for the S3 fan-out (size 8).
+3. A `concurrent.futures.ThreadPoolExecutor(max_workers=STORE_PREWARM_WORKERS)` built inside the startup store-prewarm routine for the S3 fan-out (size 8).
 
 The three-pool layout bought isolation but at the cost of conceptual overhead — three different APIs (`anyio.to_thread.run_sync`, `asyncio.to_thread`, manual `ThreadPoolExecutor`), three different sizing knobs, and the subtle pitfall that `asyncio.to_thread` and `anyio.to_thread.run_sync` look interchangeable but route to **different pools**. Reviewers had to keep that distinction in mind on every async-related change.
 
-The current design collapses this to one pool with one default limiter and three named feature budgets:
+The current design collapses this to one pool with one default limiter and two named feature budgets:
 
 - **Default limiter** (size `THREAD_POOL_SIZE`, default 100) — the limiter `anyio.to_thread.current_default_thread_limiter()` returns. Used by every sync `def` tile handler (dispatched automatically by FastAPI) and by every `anyio.to_thread.run_sync(...)` call that doesn't pass an explicit limiter. Admin GET/DELETE endpoints also fall under this budget.
-- **`_PREWARM_SEM`** (size `PREWARM_WORKERS`, default 8) — a module-level `anyio.Semaphore` in `services/caching/lifecycle.py`. Acquired _before_ `tg.start_soon` in `prewarm_disk_slices` / `refresh_disk_cache` so at most N tasks (and thus N pending coroutines) exist at a time. Sized to the S3 connection-pool ceiling.
 - **`_ANIMATION_LIMITER`** (size `ANIMATION_WORKERS`, default 10) — a module-level `anyio.CapacityLimiter` in `routers/public/visual_tiles.py`. Used by the per-frame `load_slice_uncached` fan-out inside `/animation`, via the explicit `limiter=_ANIMATION_LIMITER` argument. Sized to the aiobotocore S3 connection-pool ceiling (~10/host); going higher just queues on the connection pool without reducing latency, and the bound keeps a many-frame request from monopolising the tile-handler budget.
-- **`_STORE_PREWARM_LIMITER`** (size `STORE_PREWARM_WORKERS`, default 8) — a module-level `anyio.CapacityLimiter` in `services/store/registry.py`. Used by `StoreRegistry.prewarm` to gate concurrent `xr.open_zarr` opens at startup. Same S3 connection-pool rationale as `_PREWARM_SEM`.
+- **`_STORE_PREWARM_LIMITER`** (size `STORE_PREWARM_WORKERS`, default 8) — a module-level `anyio.CapacityLimiter` in `services/store/registry.py`. Used by `StoreRegistry.prewarm` to gate concurrent `xr.open_zarr` opens at startup. Same S3 connection-pool rationale as `_ANIMATION_LIMITER`.
 
-All four budgets live over the **same** anyio worker pool. Anyio creates worker threads on demand and they're shared across budgets — but each call only acquires (or pre-acquires) the budget it was given, so the slices are independent. A prewarm burst saturating its 8-slot budget does not reduce the tile-handler budget of 100, and a 30-frame animation does not steal from prewarm either.
+All three budgets live over the **same** anyio worker pool. Anyio creates worker threads on demand and they're shared across budgets — but each call only acquires the budget it was given, so the slices are independent. A store-prewarm burst saturating its 8-slot budget does not reduce the tile-handler budget of 100, and a 30-frame animation does not steal from store-prewarm either.
 
 #### Semaphore vs CapacityLimiter — when to use which
 
 Both bound concurrent work, but they live at different points in the spawn lifecycle:
 
-- **CapacityLimiter passed to `to_thread.run_sync(..., limiter=...)`** — the coroutine is _already created_ when the limiter is acquired. For fan-outs built via `asyncio.gather(*(to_thread.run_sync(...) for ...))`, all N coroutines exist simultaneously, each parked on the limiter. Fine when N is small and bounded (≤30 frames for animation, ≤handful of stores for prewarm).
-- **Semaphore acquired before `tg.start_soon`** — the spawn loop pauses on `sem.acquire()` when N workers are running, so at most N coroutines exist _at all_. Necessary when N could be large (`prewarm_disk_slices` over `products × CACHE_DAYS` is thousands).
+- **CapacityLimiter passed to `to_thread.run_sync(..., limiter=...)`** — the coroutine is _already created_ when the limiter is acquired. For fan-outs built via `asyncio.gather(*(to_thread.run_sync(...) for ...))`, all N coroutines exist simultaneously, each parked on the limiter. Fine when N is small and bounded (≤30 frames for animation, ≤handful of stores for store prewarm) — which is why both current budgets use this style.
+- **Semaphore acquired before `tg.start_soon`** — the spawn loop pauses on `sem.acquire()` when N workers are running, so at most N coroutines exist _at all_. Necessary when N could grow unbounded (e.g. a batch fan-out sized to `products × dates`). No fan-out in the current codebase needs this — both `_ANIMATION_LIMITER` and `_STORE_PREWARM_LIMITER` bound a small, fixed N — but the pattern is worth knowing if a future large batch job is added.
 
-`_PREWARM_SEM` is a Semaphore because product × date jobs can grow into the thousands. `_ANIMATION_LIMITER` and `_STORE_PREWARM_LIMITER` are CapacityLimiters because their N is bounded (30 frames; one open per unique store URL).
+#### Why two named budgets, not one
 
-#### Why three named budgets, not one
-
-| Concern                                               | What the layout buys                                                                                                                                                                                                                                                                                                          |
-| ----------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Tile traffic isolated from background work**        | A 1000-slice prewarm doesn't consume tile-handler capacity. Without `_PREWARM_SEM`, the same fan-out would either flood the default 100-slot limiter (starving requests) or keep thousands of coroutines alive parked on a limiter.                                                                                           |
-| **Tile traffic isolated from animation requests**     | A 30-frame `/animation` request consumes at most 10 anyio slots, not all 100. Without `_ANIMATION_LIMITER`, a couple of concurrent animation requests could saturate the tile budget.                                                                                                                                         |
-| **Tile traffic isolated from store-prewarm bursts**   | An admin registering 50 distinct sources won't briefly consume 50 pool threads on startup — `_STORE_PREWARM_LIMITER` caps it at 8.                                                                                                                                                                                            |
-| **Resource ceilings decoupled from request capacity** | `PREWARM_WORKERS=8`, `ANIMATION_WORKERS=10`, `STORE_PREWARM_WORKERS=8` all match the aiobotocore S3 connection-pool ceiling (~10/host) — the real bottleneck for S3 work. All are independent of how many tile requests can run concurrently.                                                                                 |
-| **Admin endpoints answer under tile-pool pressure**   | `/admin/cache` GET and `DELETE /admin/cache/disk` are sync `def` and run under the default limiter — they share the 100-slot budget with tile handlers, but admin endpoints are one-shot filesystem walks; the practical chance of contention is negligible, and the simplicity is worth more than a fourth dedicated budget. |
+| Concern                                               | What the layout buys                                                                                                                                                                                                                             |
+| ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Tile traffic isolated from animation requests**     | A 30-frame `/animation` request consumes at most 10 anyio slots, not all 100. Without `_ANIMATION_LIMITER`, a couple of concurrent animation requests could saturate the tile budget.                                                            |
+| **Tile traffic isolated from store-prewarm bursts**   | An admin registering 50 distinct sources won't briefly consume 50 pool threads on startup — `_STORE_PREWARM_LIMITER` caps it at 8.                                                                                                               |
+| **Resource ceilings decoupled from request capacity** | `ANIMATION_WORKERS=10` and `STORE_PREWARM_WORKERS=8` both match the aiobotocore S3 connection-pool ceiling (~10/host) — the real bottleneck for S3 work. Both are independent of how many tile requests can run concurrently.                    |
+| **Admin endpoints answer under tile-pool pressure**   | `GET /admin/cache` is sync `def` and runs under the default limiter — it shares the 100-slot budget with tile handlers, but it's a one-shot in-memory read; the practical chance of contention is negligible, and the simplicity is worth more than a third dedicated budget. |
 
 #### Non-pool worker threads (unchanged)
 
@@ -1242,33 +1126,31 @@ Both bound concurrent work, but they live at different points in the spawn lifec
 #### Convention: which to use where
 
 - **Inside a `def` handler** — already on the anyio pool under the default limiter. Don't offload further unless the work is unusually heavy and would block other tile requests.
-- **Inside an `async def` function** — wrap any blocking call in `anyio.to_thread.run_sync(...)`. By default this runs under the default limiter (shared with tile handlers, which is fine for one-shot ops). For bounded-N batch fan-out, pass an appropriate `limiter=` (or define a new module-level `CapacityLimiter` sized to _that_ workload's bottleneck). For unbounded-N fan-out, use `anyio.create_task_group` + `anyio.Semaphore` with `await sem.acquire()` _before_ `tg.start_soon` to bound coroutine memory too. Don't reuse `_PREWARM_SEM` / `_ANIMATION_LIMITER` / `_STORE_PREWARM_LIMITER` for unrelated work — see §12.5.
-- **For background coroutines** (prewarm, refresh, store prewarm) — call them with plain `await`. They're `async def` and handle their own offload via `anyio.to_thread.run_sync` / task-group fan-out internally.
+- **Inside an `async def` function** — wrap any blocking call in `anyio.to_thread.run_sync(...)`. By default this runs under the default limiter (shared with tile handlers, which is fine for one-shot ops). For bounded-N batch fan-out, pass an appropriate `limiter=` (or define a new module-level `CapacityLimiter` sized to _that_ workload's bottleneck). For unbounded-N fan-out, use `anyio.create_task_group` + `anyio.Semaphore` with `await sem.acquire()` _before_ `tg.start_soon` to bound coroutine memory too. Don't reuse `_ANIMATION_LIMITER` / `_STORE_PREWARM_LIMITER` for unrelated work — see §12.5.
+- **For background coroutines** (store prewarm) — call them with plain `await`. They're `async def` and handle their own offload via `anyio.to_thread.run_sync` internally.
 
-The trade-off compared to the old three-pool design: admin endpoints and the refresh loop no longer have a dedicated executor isolated from tiles. In exchange, the mental model is much simpler — one pool, named budgets where isolation matters. Tile-vs-prewarm, tile-vs-animation, and tile-vs-store-prewarm isolation, the properties that actually matter for capacity planning, are preserved by their dedicated budgets.
+The trade-off compared to the old three-pool design: admin endpoints no longer have a dedicated executor isolated from tiles. In exchange, the mental model is much simpler — one pool, named budgets where isolation matters. Tile-vs-animation and tile-vs-store-prewarm isolation, the properties that actually matter for capacity planning, are preserved by their dedicated budgets.
 
 ### 12.7 Per-request paths
 
-Every tile request falls into one of four paths depending on which cache layer it hits. Latency and which resources it consumes vary by an order of magnitude across the paths — this taxonomy is the basis for the capacity tables in §12.8.
+Every tile request falls into one of three paths depending on which cache layer it hits. Latency and which resources it consumes vary by an order of magnitude across the paths — this taxonomy is the basis for the capacity tables in §12.8.
 
 **Data tile paths (`/data_tiles/...`).** `load_slice` is lazy — the route handler passes a callable to `render_tile`, which only invokes it if `_get_processed` misses:
 
-- **Processed warm** — `(product, date, lod)` already in `_processed_cache`. The thread does `_extract_chunk` + PNG encode only — no S3, disk, or slice I/O.
+- **Processed warm** — `(product, date, lod)` already in `_processed_cache`. The thread does `_extract_chunk` + PNG encode only — no S3 or slice I/O.
 - **Slice warm** — `_processed_cache` misses; `(product, date)` is in the L2 slice cache. The thread loads `ds` from memory, resamples, populates `_processed_cache`, then encodes.
-- **Disk warm** — `_processed_cache` and L2 both miss; `(product, date)` is on disk. The thread reads + decompresses the lz4 pickle (~30 ms), resamples, populates both caches, then encodes.
-- **Cold** — nothing cached. The thread fetches Zarr chunks from S3 (`.compute()`, ~2 s), writes to disk and L2, resamples, populates `_processed_cache`, then encodes.
+- **Cold** — both caches miss. The thread fetches Zarr chunks from S3 (`.compute()`, ~2 s), populates L2, resamples, populates `_processed_cache`, then encodes.
 
 **Visual tile paths (`/visual_tiles/...` and `/bbox`).** No processed grid cache. Each request calls `load_slice` unconditionally:
 
 - **L2 warm** — `(product, date)` in L2. Reads `ds` from memory and renders via `XarrayReader`.
-- **Disk warm** — L2 miss; slice on disk. Reads + decompresses, populates L2, renders.
-- **Cold** — fetches from S3, writes to disk and L2, renders.
+- **Cold** — L2 miss; fetches from S3, populates L2, renders.
 
 All paths share the anyio thread pool and compete for the same slots. Processed-warm data-tile requests are fastest and release their slot quickly; cold requests hold slots for seconds.
 
 ### 12.8 Per-request capacity (origin server, EC2/ECS in-region)
 
-S3 latency from within the same AWS region is an internal network hop — effectively negligible compared to home internet. The dominant cost on a cold request is chunk decompression and numpy assembly, not network wait.
+S3 latency from within the same AWS region is an internal network hop — effectively negligible compared to home internet. The dominant cost on a cold request is the S3 fetch itself plus chunk decompression and numpy assembly.
 
 **Hot requests** (processed-warm or L2-warm):
 
@@ -1279,54 +1161,42 @@ S3 latency from within the same AWS region is an internal network hop — effect
 | Throughput burst | ~100 ÷ 0.03 s ≈ **3,000 req/s**  |
 | Bottleneck       | CPU (PNG encode) and thread pool |
 
-**Disk-warm requests:**
-
-| Factor           | Value                                                    |
-| ---------------- | -------------------------------------------------------- |
-| Request duration | ~50 ms (GSLA-class) — ~200 ms (satellite-class)          |
-| Max simultaneous | 100 (thread pool limit)                                  |
-| Throughput burst | ~2,000 req/s (GSLA-class) — ~500 req/s (satellite-class) |
-| Bottleneck       | EBS read + lz4 decompress + numpy resample               |
-
-Sustained throughput on satellite-class slices is further capped by **EBS bandwidth**: gp3 baseline 125 MB/s ÷ 18 MB/slice ≈ ~7 unique satellite-slice loads/sec. Provision EBS IOPS / bandwidth above baseline if disk-warm becomes the dominant traffic pattern (rare in practice — repeated reads of the same slice promote it to L2 after the first hit, after which the request is hot).
-
 **Cold requests (S3):**
 
 | Factor                       | Value                                                    |
-| ---------------------------- | -------------------------------------------------------- |
+| ----------------------------- | -------------------------------------------------------- |
 | Request duration             | ~400 ms (GSLA-class) — ~1.5–2 s (satellite-class)        |
 | Max simultaneous cold slices | 100 (thread pool limit; deduplicated by `_slice_memo`)   |
 | Throughput burst             | ~250 req/s (GSLA-class) — ~50–70 req/s (satellite-class) |
 | Bottleneck                   | S3 fetch + CPU (decompression + numpy resample)          |
 
-The dominant cost on cold-class requests is the **S3 fetch itself** (~300–800 ms per Zarr chunk; the satellite-class slice needs 6 chunks). Disk-warm is ~5–10× faster than cold because the same 18 MB slice reads from local EBS (~5–25 ms) instead of S3, and is stored fully assembled rather than as 6 separate Zarr chunks needing recombination.
+The dominant cost on a cold request is the **S3 fetch itself** (~300–800 ms per Zarr chunk; the satellite-class slice needs 6 chunks).
 
-In practice cold S3 requests only occur for dates older than `CACHE_DAYS` (outside the disk-cache window) or before startup prewarm completes. The hot / disk-warm / cold numbers above are **per-request** and independent of product mix — they hold for Scenario A, B, and C alike. What changes across scenarios is the **hit-rate distribution**: a larger product mix increases the chance that any given request falls into a cold or disk-warm tier rather than the hot tier, which is why [§14.3](#143-why-the-default-slice_cache_size10-is-too-small-for-production) sizes cache capacity to keep the working set hot.
+With no on-disk tier, a cold S3 fetch happens for **every** L2 miss, not just for dates outside some retention window — the first request for a date after any L2 eviction (TTL or LRU) pays the same ~2 s cost as the very first request for that date ever. The hot / cold numbers above are **per-request** and independent of product mix — they hold for Scenario A, B, and C alike. What changes across scenarios is the **hit-rate distribution**: a larger product mix increases the chance that any given request falls into the cold tier rather than the hot tier, which is why [§14.3](#143-why-the-default-slice_cache_size10-is-too-small-for-production) sizes cache capacity to keep the working set hot.
 
 ### 12.9 Scaling `THREAD_POOL_SIZE`
 
-The throughput numbers in §12.8 are **burst ceilings** computed as `THREAD_POOL_SIZE ÷ request_duration` at `THREAD_POOL_SIZE = 100`. They represent what the pool can absorb in a brief spike, **not what the server can sustain indefinitely**. Sustained throughput is bound by real resources (CPU cores, EBS bandwidth, S3 connection pool) that don't scale with thread count.
+The throughput numbers in §12.8 are **burst ceilings** computed as `THREAD_POOL_SIZE ÷ request_duration` at `THREAD_POOL_SIZE = 100`. They represent what the pool can absorb in a brief spike, **not what the server can sustain indefinitely**. Sustained throughput is bound by real resources (CPU cores, S3 connection pool) that don't scale with thread count.
 
 **What scales with `THREAD_POOL_SIZE`, and what doesn't:**
 
-| Resource                              | Scales with pool size? | Actual ceiling                                                                                           |
-| ------------------------------------- | ---------------------- | -------------------------------------------------------------------------------------------------------- |
-| Burst capacity (short spikes)         | **Yes**, linearly      | Transient RAM: `pool_size × 61 MB` worst-case unique satellite slices in flight                          |
-| Hot sustained throughput              | **No**                 | CPU. On 4 vCPU with GIL-releasing PNG encode, plateaus around **~250–400 req/s** regardless of pool size |
-| Disk-warm sustained (satellite-class) | **No**                 | EBS bandwidth: gp3 baseline 125 MB/s ÷ 18 MB ≈ **~7 unique slices/sec**                                  |
-| Cold sustained (satellite-class)      | Partially              | S3 connection pool (aiobotocore default ~10 per host) + CPU for decompress/assembly                      |
-| Queueing tolerance under burst        | **Yes**, linearly      | OS thread limit (Linux defaults: thousands per process)                                                  |
+| Resource                        | Scales with pool size? | Actual ceiling                                                                                           |
+| -------------------------------- | ---------------------- | -------------------------------------------------------------------------------------------------------- |
+| Burst capacity (short spikes)   | **Yes**, linearly      | Transient RAM: `pool_size × 61 MB` worst-case unique satellite slices in flight                          |
+| Hot sustained throughput        | **No**                 | CPU. On 4 vCPU with GIL-releasing PNG encode, plateaus around **~250–400 req/s** regardless of pool size |
+| Cold sustained (satellite-class) | Partially              | S3 connection pool (aiobotocore default ~10 per host) + CPU for decompress/assembly                      |
+| Queueing tolerance under burst  | **Yes**, linearly      | OS thread limit (Linux defaults: thousands per process)                                                  |
 
 **Throughput at higher `THREAD_POOL_SIZE` (burst ceilings):**
 
-| `THREAD_POOL_SIZE` | Hot burst     | Disk-warm satellite burst | Cold satellite burst | Worst-case transient RAM | Thread-stack RAM |
-| ------------------ | ------------- | ------------------------- | -------------------- | ------------------------ | ---------------- |
-| 50                 | ~1,500 req/s  | ~250 req/s                | ~25–35 req/s         | ~3 GB                    | ~50 MB           |
-| **100** (default)  | ~3,000 req/s  | ~500 req/s                | ~50–70 req/s         | ~6 GB                    | ~100 MB          |
-| 200                | ~6,000 req/s  | ~1,000 req/s              | ~100–140 req/s       | ~12 GB                   | ~200 MB          |
-| 500                | ~15,000 req/s | ~2,500 req/s              | ~250–350 req/s       | ~30 GB                   | ~500 MB          |
+| `THREAD_POOL_SIZE` | Hot burst     | Cold satellite burst | Worst-case transient RAM | Thread-stack RAM |
+| ------------------- | ------------- | --------------------- | ------------------------- | ----------------- |
+| 50                 | ~1,500 req/s  | ~25–35 req/s         | ~3 GB                    | ~50 MB           |
+| **100** (default)  | ~3,000 req/s  | ~50–70 req/s         | ~6 GB                    | ~100 MB          |
+| 200                | ~6,000 req/s  | ~100–140 req/s       | ~12 GB                   | ~200 MB          |
+| 500                | ~15,000 req/s | ~250–350 req/s       | ~30 GB                   | ~500 MB          |
 
-Burst columns scale linearly because they're arithmetic ceilings, not physical ones. **Sustained throughput converges to the CPU / EBS / S3 ceilings regardless of pool size** — raising the pool from 100 to 500 with 4 vCPU does not give 5× sustained hot throughput; it just lets bursts of 500 concurrent requests be absorbed without queueing rejections, at the cost of 5× transient RAM.
+Burst columns scale linearly because they're arithmetic ceilings, not physical ones. **Sustained throughput converges to the CPU / S3 ceilings regardless of pool size** — raising the pool from 100 to 500 with 4 vCPU does not give 5× sustained hot throughput; it just lets bursts of 500 concurrent requests be absorbed without queueing rejections, at the cost of 5× transient RAM.
 
 **Theoretical maximum.** `anyio.to_thread.current_default_thread_limiter().total_tokens` accepts any positive integer — anyio has no hard cap. Practical ceilings are OS-level:
 
@@ -1340,7 +1210,7 @@ Burst columns scale linearly because they're arithmetic ceilings, not physical o
 - Steady-state CPU is **< 70 %** on all cores while you observe queueing → the pool, not the CPU, is the bottleneck.
 - CPU is pegged at **100 %** across all cores → CPU is the bottleneck; raising the pool just adds context-switching overhead. Provision more vCPU or scale out horizontally instead.
 
-For the production scenarios in [§14.7](#147-planning-scenarios), `THREAD_POOL_SIZE = 100` is sufficient when fronted by CloudFront (§12.10), which absorbs the bulk of repeat traffic before it reaches the origin. Raise to 200 only when sized for a workload that legitimately produces simultaneous bursts of >100 unique uncached requests and you have the RAM headroom.
+For the production scenarios in [§14.6](#146-planning-scenarios), `THREAD_POOL_SIZE = 100` is sufficient when fronted by CloudFront (§12.10), which absorbs the bulk of repeat traffic before it reaches the origin. Raise to 200 only when sized for a workload that legitimately produces simultaneous bursts of >100 unique uncached requests and you have the RAM headroom.
 
 ### 12.10 CloudFront and real-world concurrency
 
@@ -1350,7 +1220,7 @@ In practice:
 
 - The vast majority of tile requests are served by CloudFront and never reach the origin.
 - Only cache misses (first request for a tile coordinate, or after CloudFront TTL expiry) hit the origin.
-- The thread pool and stampede protection (§10.5) are a **backstop for origin misses**, not the steady-state load path.
+- The thread pool and stampede protection (§10.4) are a **backstop for origin misses**, not the steady-state load path.
 
 Concurrency pressure on the origin is therefore much lower than the theoretical maximums in §12.8 / §12.9 suggest.
 
@@ -1364,8 +1234,8 @@ Concurrency pressure on the origin is therefore much lower than the theoretical 
 
 | Flow                                                             | When to use                                                                  | Effect                                                                                                                                |
 | ---------------------------------------------------------------- | ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| **Bootstrap** — write `products.json` before `docker-compose up` | Fresh deployment, infra-as-code, or any reproducible bootstrap.              | `load_products()` reads the file into `PRODUCTS` during lifespan startup; `_startup_cache_sync` then prewarms disk for every product. |
-| **Admin API** — `POST /admin/products` to the running server     | Adding or removing products without a restart in an already-deployed system. | The admin handler appends to `products.json`, reloads `PRODUCTS`, and fires a background `prewarm_disk_slices` for the new product.   |
+| **Bootstrap** — write `products.json` before `docker-compose up` | Fresh deployment, infra-as-code, or any reproducible bootstrap.              | `load_products()` reads the file into `PRODUCTS` during lifespan startup; `store_prewarm_task` then warms each store's metadata, but slice data stays cold until first request. |
+| **Admin API** — `POST /admin/products` to the running server     | Adding or removing products without a restart in an already-deployed system. | The admin handler validates the store, appends to `products.json`, and reloads `PRODUCTS` — no background warming fires for the new product.   |
 
 Both flows produce identical in-memory state. The bootstrap flow skips the admin-key + network round-trip but requires file-system access to `data/products.json`. The admin-API flow works once the server is running and is the only option in environments where you cannot touch the host filesystem.
 
@@ -1409,10 +1279,10 @@ curl -X DELETE http://localhost:8000/admin/products/my_product \
 
 On registration:
 
-- The store is opened and the declared `variable`(s) are checked against `store.data_vars`. A failure (unreachable bucket, malformed URL, missing variable) returns **400** and nothing is persisted. Without this guard, a typo'd URL would stay registered and the failure would only surface later in the background prewarm log. The validation runs synchronously via `anyio.to_thread.run_sync` because `xr.open_zarr` is blocking; on success, `get_store` caches the open dataset in the store singleton so the subsequent prewarm reuses it.
+- The store is opened and the declared `variable`(s) are checked against `store.data_vars`. A failure (unreachable bucket, malformed URL, missing variable) returns **400** and nothing is persisted. Without this guard, a typo'd URL would stay registered and only fail later, on the first tile request. The validation runs synchronously via `anyio.to_thread.run_sync` because `xr.open_zarr` is blocking; on success, `get_store` caches the open dataset in the store singleton so the first real request reuses it instead of opening again.
 - `products.json` is written atomically (tempfile + `os.replace`) under a process-wide `threading.Lock`, so concurrent admin writes can't interleave and a crash mid-write can't leave a truncated file. `PRODUCTS` is then reloaded from the file.
 - `evict_product_cache` is **not** called for new products (nothing to evict).
-- A disk-cache prewarm for the new product is fired with `asyncio.create_task(prewarm_disk_slices([product]))` — `prewarm_disk_slices` is `async def` and offloads its sync work internally.
+- No background warming is fired for the new product — the handler returns as soon as the store is validated and the file is written. The first tile request for the new product pays the normal cold-store / cold-slice cost.
 
 On the first request after registration:
 
@@ -1423,7 +1293,7 @@ On the first request after registration:
 On deletion:
 
 - `products.json` is rewritten without the product, and `PRODUCTS` reloads.
-- `evict_product_cache` removes the product's entries from `_slice_cache`, the L1 processed cache, and its disk directory.
+- `evict_product_cache` removes the product's entries from `_slice_cache` (L2) and the L1 processed cache.
 
 ### 13.3 Requirements for the Zarr store
 
@@ -1449,7 +1319,7 @@ On deletion:
 
 ## 14. Capacity and resource planning
 
-This section quantifies how RAM and disk grow with product count, slice size, thread-pool size, and cache size. Use it when picking instance class for a new deployment or sizing a horizontal scale-out.
+This section quantifies how RAM grows with product count, slice size, thread-pool size, and cache size. Use it when picking instance class for a new deployment or sizing a horizontal scale-out. With no on-disk cache tier, disk sizing is no longer part of this exercise — the only persistent storage this server touches is the small `products.json` / `colormaps.json` config files ([§4](#4-file-layout)); everything cache-related lives in RAM and disappears on restart.
 
 ### 14.1 Planning premise — what kinds of products do we plan for?
 
@@ -1457,17 +1327,17 @@ The products listed in [`docs/dataset.md`](dataset.md) are **representative exam
 
 For capacity planning we abstract those examples into **two size classes** and treat every actual product as falling into one of them:
 
-| Size class          | Anchored on (example in `dataset.md`) | Grid scale   | L2 slice in RAM | L1 processed (all LODs combined)  | L3 disk (lz4) per date |
-| ------------------- | ------------------------------------- | ------------ | --------------- | --------------------------------- | ---------------------- |
-| **GSLA-class**      | sea_level_anomaly / ocean_current     | ~351 × 641   | ~2 MB / var     | ~1.4 MB (single LOD)              | ~0.5 MB / var          |
-| **Satellite-class** | satellite_austemp_heatwave_8day_ssta  | ~2000 × 3900 | ~61 MB          | ~58 MB (4 LODs, ~15 MB avg/entry) | ~18 MB                 |
+| Size class          | Anchored on (example in `dataset.md`) | Grid scale   | L2 slice in RAM | L1 processed (all LODs combined)  |
+| -------------------- | -------------------------------------- | ------------ | ---------------- | ----------------------------------- |
+| **GSLA-class**      | sea_level_anomaly / ocean_current     | ~351 × 641   | ~2 MB / var     | ~1.4 MB (single LOD)              |
+| **Satellite-class** | satellite_austemp_heatwave_8day_ssta  | ~2000 × 3900 | ~61 MB          | ~58 MB (4 LODs, ~15 MB avg/entry) |
 
 A real product won't match these numbers exactly — a 400 × 700 product is still GSLA-class for sizing; a 1800 × 4200 product is still satellite-class. Use the closest class as the planning anchor; a product that is meaningfully different in scale (e.g. 5000 × 10000) needs a one-off calculation from [§14.2](#142-ram-components) before fitting into the scenarios below.
 
-A production deployment is expected to be **dominated by satellite-class products** with a smaller number of GSLA-class accompaniments. `CACHE_DAYS` ranges from `30` (default) up to `90` (3-month history — the maximum the project plans to support). The three scenarios in [§14.7](#147-planning-scenarios) bracket what we expect to see in practice, each sized at all three cache windows:
+A production deployment is expected to be **dominated by satellite-class products** with a smaller number of GSLA-class accompaniments. The three scenarios in [§14.6](#146-planning-scenarios) bracket what we expect to see in practice:
 
 | Scenario        | Products                    | Phase                         |
-| --------------- | --------------------------- | ----------------------------- |
+| --------------- | --------------------------- | ------------------------------ |
 | **A — Initial** | 6 (2 GSLA + 4 satellite)    | Initial production deployment |
 | **B — Steady**  | 20 (6 GSLA + 14 satellite)  | Mid-term steady state         |
 | **C — Ceiling** | 50 (10 GSLA + 40 satellite) | Long-term single-node ceiling |
@@ -1475,7 +1345,7 @@ A production deployment is expected to be **dominated by satellite-class product
 ### 14.2 RAM components
 
 | Component                             | Sizing rule                                                                                                                    | Magnitude with N satellite products in production                   |
-| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------- |
+| --------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
 | Process baseline                      | Python + FastAPI + xarray + numpy + rio-tiler + PIL                                                                            | ~250–350 MB                                                         |
 | Store singletons                      | One open `xr.Dataset` per unique URL — metadata + coord arrays only, no data chunks                                            | ~5 MB × stores ≈ tens of MB                                         |
 | L2 slice cache                        | `SLICE_CACHE_SIZE × 61 MB` (every satellite slot ≈ 61 MB)                                                                      | Grows linearly with `SLICE_CACHE_SIZE`                              |
@@ -1486,7 +1356,7 @@ A production deployment is expected to be **dominated by satellite-class product
 **Cache RAM as a function of cache size, assuming satellite-dominated slots:**
 
 | `SLICE_CACHE_SIZE` | `PROCESSED_CACHE_SIZE` | L2 worst-case | L1 worst-case (LOD-4 only) | L1 mixed-LOD typical | Steady RAM (baseline + L2 + L1) |
-| -----------------: | ---------------------: | ------------: | -------------------------: | -------------------: | ------------------------------: |
+| -------------------: | ------------------------: | --------------: | ----------------------------: | -----------------------: | ----------------------------------: |
 |                 10 |                     50 |       ~610 MB |                    ~2.0 GB |              ~750 MB |                         ~1.7 GB |
 |                 20 |                     80 |       ~1.2 GB |                    ~3.2 GB |              ~1.2 GB |                         ~2.7 GB |
 |                 30 |                    120 |       ~1.8 GB |                    ~4.8 GB |              ~1.8 GB |                         ~3.9 GB |
@@ -1497,53 +1367,36 @@ A production deployment is expected to be **dominated by satellite-class product
 
 ### 14.3 Why the default `SLICE_CACHE_SIZE=10` is too small for production
 
-With **10+ satellite products**, default `SLICE_CACHE_SIZE=10` gives you at most one cache slot per product. Any request for a non-cached date evicts another product's most recent slice — the cache thrashes and most visual-tile requests fall through to disk (or S3 on cold start). Two sizing principles:
+With **10+ satellite products**, default `SLICE_CACHE_SIZE=10` gives you at most one cache slot per product. Any request for a non-cached date evicts another product's most recent slice — the cache thrashes and most visual-tile requests fall through to a cold S3 fetch. Two sizing principles:
 
 - **At minimum**, size for one slot per product: `SLICE_CACHE_SIZE ≥ product_count`. With 10 satellite products that means **`SLICE_CACHE_SIZE = 10`** is the _floor_, not the recommended setting.
 - **Recommended**, size for a few recent dates per product so users panning across recent dates stay in L2: `SLICE_CACHE_SIZE ≈ product_count × hot_dates_per_product`. For 10 products with ~3 hot dates each: **`SLICE_CACHE_SIZE = 30`**, **`PROCESSED_CACHE_SIZE = 120`** (i.e. `SLICE_CACHE_SIZE × LOD.max_lods`).
 
-Memory cost of these recommendations: ~2.7 GB and ~3.9 GB steady respectively, before transient headroom. CloudFront mitigates the visible impact of L2 misses for repeat tile URLs but does not help requests for new dates.
+Memory cost of these recommendations: ~2.7 GB and ~3.9 GB steady respectively, before transient headroom. CloudFront mitigates the visible impact of L2 misses for repeat tile URLs but does not help requests for new dates. With no on-disk tier behind L2, undersizing this cache is more costly than it used to be — every eviction now falls straight through to a multi-second cold S3 fetch rather than a fast disk read.
 
 ### 14.4 How RAM scales when products are added
 
 | Change                                                        | RAM impact                                                                                                                              |
-| ------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| ----------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
 | Add a satellite-class product without changing cache sizes    | No new RAM ceiling, but L2/L1 hit rates degrade — more products compete for the same slots, more cold S3 reads.                         |
 | Add a satellite-class product and raise `SLICE_CACHE_SIZE +1` | + ~61 MB L2, + ~58 MB L1 (one full row of LODs).                                                                                        |
 | Raise `SLICE_CACHE_SIZE` by N (satellite worst case)          | + `N × 61 MB` L2, + `N × ~58 MB` L1.                                                                                                    |
 | Raise `THREAD_POOL_SIZE`                                      | No direct steady RAM growth (~1 MB stack/thread). Higher _unique_ concurrent cold misses can spike transient RAM by `(N_cold) × 61 MB`. |
-| Raise `PREWARM_WORKERS`                                       | Startup-only spike of `PREWARM_WORKERS × 61 MB`. Default 8 ≈ 500 MB.                                                                    |
-| Raise `CACHE_DAYS` (e.g. 30 → 90)                             | **No effect on RAM** — only affects disk. L2/L1 sizes are bounded by their LRU sizes regardless of how many dates are on disk.          |
 
 Stampede protection (`_slice_memo`, `_processed_memo`) means transient RAM scales with **unique cold keys in flight**, not `THREAD_POOL_SIZE`. But under truly mixed cold traffic (different `(product, date)` pairs from many users at once), the cap is `min(THREAD_POOL_SIZE, distinct_keys) × 61 MB`. With `THREAD_POOL_SIZE = 100` and a perfect-storm spread across many products and dates, that ceiling is **~6 GB** — short-lived but real. Provision RAM accordingly or lower `THREAD_POOL_SIZE`.
 
 ### 14.5 Thread pool vs cache sizing
 
-Thread-pool size and cache size are **independent knobs** — concrete pairings are in the scenarios in §14.7. The general goal-to-knob mapping:
+Thread-pool size and cache size are **independent knobs** — concrete pairings are in the scenarios in §14.6. The general goal-to-knob mapping:
 
-| Goal                                               | Knob                                                                         |
-| -------------------------------------------------- | ---------------------------------------------------------------------------- |
-| Serve more concurrent requests without queueing    | Raise `THREAD_POOL_SIZE` (cheap in steady RAM; raises transient ceiling)     |
-| Keep more `(product, date)` pairs hot in RAM       | Raise `SLICE_CACHE_SIZE` (and `PROCESSED_CACHE_SIZE = SLICE_CACHE_SIZE × 4`) |
-| Keep more dates available on disk without S3 reads | Raise `CACHE_DAYS` (affects disk only, not RAM)                              |
-| Shorten startup prewarm duration                   | Raise `PREWARM_WORKERS`                                                      |
+| Goal                                             | Knob                                                                         |
+| --------------------------------------------------- | --------------------------------------------------------------------------- |
+| Serve more concurrent requests without queueing  | Raise `THREAD_POOL_SIZE` (cheap in steady RAM; raises transient ceiling)     |
+| Keep more `(product, date)` pairs hot in RAM     | Raise `SLICE_CACHE_SIZE` (and `PROCESSED_CACHE_SIZE = SLICE_CACHE_SIZE × 4`) |
 
-### 14.6 Disk usage formula
+### 14.6 Planning scenarios
 
-After lz4 compression, disk usage per scenario follows:
-
-```
-Disk total ≈ N_satellite × CACHE_DAYS × 18 MB
-           + N_GSLA      × CACHE_DAYS × 0.5 MB  (typically < 5% of total)
-```
-
-The GSLA-class term is small enough to ignore for sizing decisions. The dominant variable is `N_satellite × CACHE_DAYS`. Pressure eviction triggers at `DISK_CACHE_LIMIT_GB × DISK_EVICTION_THRESHOLD` (default `20 × 0.85 = 17 GB`) — **the default 20 GB limit is too small for almost any production scenario** and must be raised explicitly. Eviction policy is documented in [§10.4](#104-l3--slice-cache-disk-disk_cache_path-directory).
-
-EBS gp3 storage costs $0.08/GB-month, so disk is not a cost lever — capacity-planning correctness is. Plan for ~1.5× the steady-state disk total to absorb transient writes during refresh cycles.
-
-### 14.7 Planning scenarios
-
-Each scenario gives the disk footprint at the three cache windows (30 / 60 / 90 days) and the recommended cache sizing and instance class. **Cache RAM is independent of `CACHE_DAYS`** — only disk usage scales with the cache window, so the cache sizing column is shown once per scenario.
+Each scenario gives the recommended cache sizing and instance class. Cache RAM has no dependency on any retention-window setting — since there's no on-disk tier, the process is either running (cache warm, within TTL) or freshly restarted (cache fully cold); there is no partial "warm restart" state to plan around.
 
 For each scenario, two cache-sizing strategies are presented:
 
@@ -1555,16 +1408,6 @@ Steady RAM column = process baseline (~400 MB) + L2 cache worst-case (satellite-
 #### Scenario A — 6 products (2 GSLA + 4 satellite)
 
 Initial production deployment.
-
-**Disk:**
-
-| Metric                            | 30 days | 60 days | 90 days |
-| --------------------------------- | ------: | ------: | ------: |
-| Lz4 steady total                  | ~2.2 GB | ~4.4 GB | ~6.6 GB |
-| Recommended `DISK_CACHE_LIMIT_GB` |       4 |       8 |      12 |
-| EBS gp3 volume                    |    8 GB |   16 GB |   16 GB |
-
-**Cache and RAM** (independent of `CACHE_DAYS`):
 
 | Strategy                                | `SLICE_CACHE_SIZE` | `PROCESSED_CACHE_SIZE` | Steady cache RAM | Steady total |
 | --------------------------------------- | -----------------: | ---------------------: | ---------------: | -----------: |
@@ -1579,16 +1422,6 @@ Initial production deployment.
 
 Mid-term steady state.
 
-**Disk:**
-
-| Metric                            | 30 days |  60 days |  90 days |
-| --------------------------------- | ------: | -------: | -------: |
-| Lz4 steady total                  | ~7.7 GB | ~15.3 GB | ~22.9 GB |
-| Recommended `DISK_CACHE_LIMIT_GB` |      12 |       24 |       36 |
-| EBS gp3 volume                    |   16 GB |    32 GB |    48 GB |
-
-**Cache and RAM:**
-
 | Strategy                                | `SLICE_CACHE_SIZE` | `PROCESSED_CACHE_SIZE` | Steady cache RAM | Steady total |
 | --------------------------------------- | -----------------: | ---------------------: | ---------------: | -----------: |
 | 1 hot date / product (floor)            |                 20 |                     80 |          ~2.4 GB |      ~2.8 GB |
@@ -1602,16 +1435,6 @@ Mid-term steady state.
 
 Long-term ceiling for a single node. At this scale, **horizontal scale-out usually beats a single large node** on cost and resilience.
 
-**Disk:**
-
-| Metric                            |  30 days |  60 days |  90 days |
-| --------------------------------- | -------: | -------: | -------: |
-| Lz4 steady total                  | ~21.7 GB | ~43.5 GB | ~65.2 GB |
-| Recommended `DISK_CACHE_LIMIT_GB` |       32 |       64 |       96 |
-| EBS gp3 volume                    |    48 GB |    80 GB |   128 GB |
-
-**Cache and RAM** (single-node sizing — see scale-out note below):
-
 | Strategy                                | `SLICE_CACHE_SIZE` | `PROCESSED_CACHE_SIZE` | Steady cache RAM | Steady total |
 | --------------------------------------- | -----------------: | ---------------------: | ---------------: | -----------: |
 | 1 hot date / product (floor)            |                 50 |                    200 |          ~6.1 GB |      ~6.5 GB |
@@ -1619,26 +1442,10 @@ Long-term ceiling for a single node. At this scale, **horizontal scale-out usual
 
 **Recommended deployment options:**
 
-- **Horizontal scale-out (preferred above ~30 products):** 2–3 × `m6i.xlarge` or `m6i.2xlarge` replicas behind CloudFront. Each replica has independent L1/L2/L3 caches but reads from the same S3 stores; CloudFront fans out at the edge. Cheaper, more resilient, and avoids the very-large-instance pricing curve. Each replica is sized per Scenario B numbers.
+- **Horizontal scale-out (preferred above ~30 products):** 2–3 × `m6i.xlarge` or `m6i.2xlarge` replicas behind CloudFront. Each replica has independent L1/L2 caches but reads from the same S3 stores; CloudFront fans out at the edge. Cheaper, more resilient, and avoids the very-large-instance pricing curve. Each replica is sized per Scenario B numbers.
 - **Single node:** `m6i.4xlarge` (16 vCPU, **64 GB**) for the recommended strategy, or `m6i.2xlarge` (32 GB) if 1 hot date per product is acceptable.
 
----
-
-#### Prewarm time at startup
-
-Cold startup `prewarm_disk_slices` grows linearly with `N_satellite × CACHE_DAYS`. At the default `PREWARM_WORKERS = 8` and ~3–4 s per satellite slice (S3 fetch + decompress + pickle + lz4 + write):
-
-| Scenario         | 30 days | 60 days | 90 days |
-| ---------------- | ------: | ------: | ------: |
-| A (4 satellite)  |  ~1 min |  ~2 min |  ~3 min |
-| B (14 satellite) |  ~3 min |  ~7 min | ~10 min |
-| C (40 satellite) | ~10 min | ~20 min | ~30 min |
-
-Raise `PREWARM_WORKERS` further (e.g. 12–16) to halve startup again at the cost of more transient RAM and S3 bandwidth contention. On warm restart (disk already populated), prewarm completes in seconds regardless of scenario — it just verifies files exist.
-
-> Full capacity-per-request-type tables (hot / disk-warm / cold throughput per request) are in [§12.8](#128-per-request-capacity-origin-server-ec2ecs-in-region) and [§12.9](#129-scaling-thread_pool_size).
-
----
+> Full capacity-per-request-type tables (hot / cold throughput per request) are in [§12.8](#128-per-request-capacity-origin-server-ec2ecs-in-region) and [§12.9](#129-scaling-thread_pool_size).
 
 ## 15. Environment variables
 
@@ -1650,7 +1457,7 @@ This codebase holds configuration in three places. Both env vars and code consta
 
 | Layer                                                | What lives here                                                                                          | Change discipline                                                               | Examples                                                                                           |
 | ---------------------------------------------------- | -------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| **Env vars** (this section)                          | Operational knobs — perf, resource limits, secrets. Do **not** affect wire format or shader contract.    | Rotate freely at deploy; the value itself doesn't need code review.             | `THREAD_POOL_SIZE`, `SLICE_CACHE_SIZE`, `CACHE_DAYS`, `ADMIN_API_KEY`                              |
+| **Env vars** (this section)                          | Operational knobs — perf, resource limits, secrets. Do **not** affect wire format or shader contract.    | Rotate freely at deploy; the value itself doesn't need code review.             | `THREAD_POOL_SIZE`, `SLICE_CACHE_SIZE`, `STORE_TTL_SECONDS`, `ADMIN_API_KEY`                       |
 | **Code constants** (`config/constants.py`)           | Wire / shader contracts — values that must stay in lockstep with the frontend or with the data encoding. | Change via PR so frontend and server stay in sync; the diff is the audit trail. | `LOD.max_lods`, `LOD.min_coarsest`, `LOD.zoom_thresholds`, `CHUNK_PX`, `PADDING` (global defaults) |
 | **Per-product fields** (`Product` dataclass + admin) | Data characteristics that legitimately vary across products.                                             | Set per product via `POST /admin/products`; no code change needed.              | `chunk_px`, `padding`, `variable`, `source_path`                                                   |
 
@@ -1685,25 +1492,15 @@ Tuning knobs for the botocore client used by `fsspec`/`s3fs` underneath every Za
 | Variable                      | Default | Description                                                                                                                                                                                                    |
 | ----------------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `THREAD_POOL_SIZE`            | `100`   | Anyio thread-pool size. Each in-flight sync request uses one slot. See [§12](#12-concurrency-event-loop-and-threading).                                                                                        |
-| `ANIMATION_WORKERS`           | `10`    | Capacity-limiter cap for `/animation` per-frame S3 fan-out. Sized to the aiobotocore S3 connection pool. See [§12.6](#126-one-pool-three-named-budgets).                                                       |
-| `STORE_PREWARM_WORKERS`       | `8`     | Capacity-limiter cap for concurrent `xr.open_zarr` opens during startup store prewarm. Sized to the S3 connection pool. See [§12.6](#126-one-pool-three-named-budgets).                                        |
+| `ANIMATION_WORKERS`           | `10`    | Capacity-limiter cap for `/animation` per-frame S3 fan-out. Sized to the aiobotocore S3 connection pool. See [§12.6](#126-one-pool-two-named-budgets).                                                         |
+| `STORE_PREWARM_WORKERS`       | `8`     | Capacity-limiter cap for concurrent `xr.open_zarr` opens during startup store prewarm. Sized to the S3 connection pool. See [§12.6](#126-one-pool-two-named-budgets).                                          |
 | `SLICE_CACHE_SIZE`            | `10`    | Max entries in the L2 in-memory slice cache. RAM bound: `SLICE_CACHE_SIZE × max_slice_size`.                                                                                                                   |
 | `SLICE_CACHE_TTL_SECONDS`     | `600`   | Per-entry TTL for the L2 slice cache (`cachetools.TTLCache`). Entries expire this many seconds after insertion so idle RAM returns to baseline; `SLICE_CACHE_SIZE` still bounds capacity under burst pressure. |
 | `PROCESSED_CACHE_SIZE`        | `50`    | Max entries in the L1 processed-grid cache. Sized as `SLICE_CACHE_SIZE × LOD.max_lods` with headroom.                                                                                                          |
 | `PROCESSED_CACHE_TTL_SECONDS` | `600`   | Per-entry TTL for the L1 processed-grid cache (`cachetools.TTLCache`). Same idle-RAM rationale as `SLICE_CACHE_TTL_SECONDS`.                                                                                   |
 | `STORE_TTL_SECONDS`           | `600`   | Stale-while-revalidate window for the Zarr store singleton.                                                                                                                                                    |
 
-### 15.5 Disk cache (L3)
-
-| Variable                         | Default | Description                                                                                                                                                                                                                |
-| -------------------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `DISK_CACHE_LIMIT_GB`            | `20`    | Maximum total disk usage before pressure-based eviction runs.                                                                                                                                                              |
-| `DISK_EVICTION_THRESHOLD`        | `0.85`  | Fraction of limit at which pressure eviction triggers (0.0–1.0).                                                                                                                                                           |
-| `CACHE_DAYS`                     | `30`    | How many recent dates per product to keep on disk; dates outside this window are evicted.                                                                                                                                  |
-| `PREWARM_WORKERS`                | `8`     | Spawn-gate (`_PREWARM_SEM`) cap used during the startup disk prewarm and per-product prewarm fired by `POST /admin/products`. Bounds concurrent S3 fetches _and_ the pending-coroutine count when product × date is large. |
-| `CACHE_REFRESH_INTERVAL_SECONDS` | `14400` | Period (seconds) between background refresh cycles. Default 4 hours.                                                                                                                                                       |
-
-### 15.6 Logging
+### 15.5 Logging
 
 | Variable                       | Default  | Description                                                                                                                                                                      |
 | ------------------------------ | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -1771,14 +1568,11 @@ A clean startup produces these `message` values in order (all `INFO` unless note
 Thread pool size set            thread_pool_size=100
 Loaded products from disk       count=3, path=data/products.json
 Loaded colormaps from disk      count=2, path=data/colormaps.json
-Disk cache enabled              path=slice_cache, limit_gb=20, days=30, workers=8
 Memory cache configured         slice_cache_size=10, processed_cache_size=50, store_ttl_seconds=600
-Store opened                    store_url=s3://..., date_count=365             ← one per product, from prewarm threads
-Cache refresh interval set      interval_seconds=14400
-Prewarm complete                written=90, skipped=0, failed=0, seconds=23.4
+Store opened                    store_url=s3://..., date_count=365             ← one per product, from the store-prewarm task
 ```
 
-If any line is missing, the corresponding feature is either misconfigured (missing env var) or failed silently — the prewarm/refresh error paths log at `WARNING` or `EXCEPTION` level.
+If any line is missing, the corresponding feature is either misconfigured (missing env var) or failed silently. There is no separate disk-cache or refresh-cycle startup line to check for — the only startup background work is `store_prewarm_task`, and its per-store completion shows up as one `Store opened` line per unique store URL.
 
 ### 16.5 Operational signals
 
@@ -1786,23 +1580,10 @@ Lines to watch for in production. Filter on `message` for the event name; the li
 
 | Level     | `message`                                                    | Key fields                                      | What it means                                                                                                                                                                             |
 | --------- | ------------------------------------------------------------ | ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `WARNING` | `Slow S3 fetch`                                              | `store_url`, `date`, `seconds`                  | A cold `.compute()` exceeded `SLOW_FETCH_THRESHOLD_SECONDS`. S3 is slow for this key — check S3 region, VPC endpoints, or increase `DISK_CACHE_PATH` capacity so the date gets prewarmed. |
-| `WARNING` | `Disk cache add failed`                                      | `product_id`, `date`                            | Refresh cycle couldn't write a slice — check disk space and `DISK_CACHE_LIMIT_GB`.                                                                                                        |
+| `WARNING` | `Slow S3 fetch`                                              | `store_url`, `date`, `seconds`                  | A cold `.compute()` exceeded `SLOW_FETCH_THRESHOLD_SECONDS`. S3 is slow for this key — check S3 region and VPC endpoints, or consider raising `SLICE_CACHE_SIZE` / `SLICE_CACHE_TTL_SECONDS` so the slice stays warm in L2 longer once fetched, reducing how often this date is re-fetched. |
 | `WARNING` | `Admin auth rejected: invalid key`                           | `client`, `path`                                | Failed admin authentication attempt. Unexpected `client` IPs warrant investigation.                                                                                                       |
 | `DEBUG`   | `Multiple timestamps map to single date; first will be used` | `count`, `date`, `store_url`, `first_timestamp` | The Zarr store has more than one UTC timestamp resolving to the same local date (expected for sub-daily stores). The first timestamp is used. Enable `LOG_LEVEL=DEBUG` to see these.      |
 | `ERROR`   | `Unhandled error`                                            | `method`, `path`                                | An uncaught exception reached the global handler — always signals a bug. The full traceback rides in `exc`.                                                                               |
-| `ERROR`   | `Cache refresh cycle failed; will retry next interval`       | —                                               | The periodic refresh loop raised an unhandled exception. The next cycle still runs; check for disk-full or S3 access issues.                                                              |
-
-Background task summary lines confirm normal operation:
-
-```
-Prewarm complete                 written=142, skipped=8, failed=0, seconds=23.4
-Cache eviction complete          stale_dates=5, orphan_dirs=1
-Refresh cycle complete           added=3, failed=0, seconds=4.1
-Disk pressure eviction completed files_removed=12, mb_freed=480.0, usage_pct=71.2
-```
-
-These are always `INFO`. Absence of `Prewarm complete` after startup suggests a disk-cache config problem.
 
 ### 16.6 Health check suppression
 

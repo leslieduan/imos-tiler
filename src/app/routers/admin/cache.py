@@ -1,27 +1,17 @@
 """Read-only cache state for debugging production behaviour.
 
-Combines disk footprint (per-product + global vs eviction threshold), refresh
-loop status, and live in-flight counts from both memoizers (L2 slice, L1
-processed grid). Per-product in-flight breakdown is computed by mapping each
-in-flight key's store_url back to its product id — useful for spotting one
-product saturating S3 fetches.
-
-Filesystem walks run in the FastAPI thread pool (sync handler) so the event
-loop stays free; the response itself is small.
+Combines live in-flight counts from both memoizers (L2 slice, L1 processed
+grid). Per-product in-flight breakdown is computed by mapping each in-flight
+key's store_url back to its product id — useful for spotting one product
+saturating S3 fetches.
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 
-from app.schemas.admin import CacheStateResponse, DiskClearedResponse, MemoryClearedResponse
-from app.services.caching.disk import clear_disk_cache, collect_disk_stats
-from app.services.caching.lifecycle import (
-    get_refresh_status,
-    is_prewarm_running,
-    is_refresh_running,
-)
+from app.schemas.admin import CacheStateResponse, MemoryClearedResponse
 from app.services.caching.processed_cache import clear_processed_cache, processed_memo_stats
 from app.services.caching.slice_cache import clear_slice_cache, slice_memo_stats
-from app.services.product.registry import iter_product_items, iter_products
+from app.services.product.registry import iter_product_items
 
 router = APIRouter()
 
@@ -57,10 +47,8 @@ def _build_response() -> dict:
         processed_stats["inflight_keys"], product_index
     )
 
-    disk_stats = collect_disk_stats(iter_products())
     products = {
         pid: {
-            **disk_stats["per_product"][pid],
             "slice_in_flight": slice_inflight_by_pid.get(pid, 0),
             "processed_in_flight": processed_inflight_by_pid.get(pid, 0),
         }
@@ -68,11 +56,6 @@ def _build_response() -> dict:
     }
 
     return {
-        "disk": disk_stats["global"],
-        "disk_writes": {
-            "prewarm": {"running": is_prewarm_running()},
-            "refresh": get_refresh_status(),
-        },
         "in_flight": {
             "slice": {  # L2 in-memory slice cache (services/caching/slice_cache.py)
                 "current": slice_stats["inflight"],
@@ -100,11 +83,9 @@ def _build_response() -> dict:
     "/cache",
     summary="Cache state snapshot for debugging",
     description=(
-        "Returns per-product disk-cache footprint, global disk usage vs eviction threshold, "
-        "the most recent refresh-loop status, and live in-flight compute counts (current + "
-        "peak-since-startup) for both the slice and processed-grid memoizers. In-flight counts "
-        "are instantaneous — they reflect ongoing work at the moment of the request, not a "
-        "rolling window."
+        "Returns live in-flight compute counts (current + peak-since-startup) for both the "
+        "slice and processed-grid memoizers, per product. In-flight counts are instantaneous — "
+        "they reflect ongoing work at the moment of the request, not a rolling window."
     ),
     response_model=CacheStateResponse,
     response_model_exclude_unset=True,
@@ -118,8 +99,8 @@ def get_cache_state():
     summary="Clear all in-memory caches",
     description=(
         "Drops every entry in the L2 slice cache and the L1 processed-grid cache. "
-        "Disk cache is untouched. In-flight computes are not cancelled — they'll just "
-        "miss the cache on completion and re-populate it."
+        "In-flight computes are not cancelled — they'll just miss the cache on "
+        "completion and re-populate it."
     ),
     response_model=MemoryClearedResponse,
 )
@@ -128,27 +109,3 @@ def clear_memory_cache():
     # cache sizes ≤50). FastAPI dispatches sync handlers to the thread pool, so the loop
     # stays free without us having to wrap in to_thread.run_sync.
     return MemoryClearedResponse(slice=clear_slice_cache(), processed=clear_processed_cache())
-
-
-@router.delete(
-    "/cache/disk",
-    summary="Clear all on-disk cache",
-    description=(
-        "Deletes every slice file from the L3 disk cache. "
-        "Memory caches are untouched. In-flight computes are not cancelled — "
-        "they may re-populate the disk cache on completion."
-    ),
-    response_model=DiskClearedResponse,
-)
-def clear_disk_cache_endpoint():
-    if is_prewarm_running():
-        raise HTTPException(
-            status_code=409,
-            detail="Prewarm disk cache is running — please try again once it completes.",
-        )
-    if is_refresh_running():
-        raise HTTPException(
-            status_code=409,
-            detail="Disk cache refresh is running — please try again once it completes.",
-        )
-    return DiskClearedResponse(**clear_disk_cache())

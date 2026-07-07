@@ -1,6 +1,5 @@
-"""Admin CRUD for products: POST 201, DELETE 204, error mapping, auth, prewarm spawn."""
+"""Admin CRUD for products: POST 201, DELETE 204, error mapping, auth."""
 
-import asyncio
 from unittest.mock import patch
 
 import pytest
@@ -20,24 +19,6 @@ _HEADERS = {"X-Admin-Key": _ADMIN_KEY}
 @pytest.fixture(autouse=True)
 def admin_key_env(monkeypatch):
     monkeypatch.setenv("ADMIN_API_KEY", _ADMIN_KEY)
-
-
-@pytest.fixture
-def quiet_prewarm(monkeypatch):
-    """Stop the admin handler from scheduling real background tasks.
-
-    Not autouse: the _spawn_prewarm test needs the real implementation.
-    """
-    monkeypatch.setattr(admin_products, "_spawn_prewarm", lambda _product: None)
-
-
-@pytest.fixture(autouse=True)
-def _default_quiet(request, monkeypatch):
-    """Apply quiet_prewarm by default; tests that exercise _spawn_prewarm opt out
-    by marking with @pytest.mark.real_prewarm."""
-    if "real_prewarm" in request.keywords:
-        return
-    monkeypatch.setattr(admin_products, "_spawn_prewarm", lambda _product: None)
 
 
 @pytest.fixture(autouse=True)
@@ -308,40 +289,3 @@ def test_post_wrong_admin_key_returns_403():
     payload = {"id": "p", "source_path": "s3://b/x.zarr", "variable": "V"}
     r = client.post("/admin/products", json=payload, headers={"X-Admin-Key": "wrong"})
     assert r.status_code == 403
-
-
-# ---------------------------------------------------------------------------
-# _spawn_prewarm: anchoring + cleanup
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.anyio
-@pytest.mark.real_prewarm
-async def test_spawn_prewarm_anchors_task_and_cleans_up_on_completion():
-    """The task should be in _background_tasks while running and removed when done."""
-    completed = asyncio.Event()
-
-    def fake_prewarm(_products):
-        completed.set()
-
-    with patch("app.routers.admin.products.prewarm_disk_slices", side_effect=fake_prewarm):
-        admin_products._background_tasks.clear()
-        p = Product(id="bg", source_path="s3://b/x.zarr", variable="V")
-        admin_products._spawn_prewarm(p)
-
-        # Immediately after scheduling, the task is anchored.
-        assert len(admin_products._background_tasks) == 1
-
-        # Let the loop run the to_thread → done callback.
-        for _ in range(20):
-            if not admin_products._background_tasks:
-                break
-            await asyncio.sleep(0.05)
-
-        assert completed.is_set()
-        assert len(admin_products._background_tasks) == 0
-
-
-@pytest.fixture
-def anyio_backend():
-    return "asyncio"

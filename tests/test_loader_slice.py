@@ -1,8 +1,8 @@
 """loader.load_slice + evict_product_cache + date-index resolution.
 
 Existing tests in test_loader.py cover get_store + get_lod_grids. These cover
-the L2/L3 cache interaction, the multi-timestamp warning path, and the
-fan-out eviction across L1/L2/L3.
+the L2 cache interaction, the multi-timestamp warning path, and the fan-out
+eviction across L1/L2.
 """
 
 import numpy as np
@@ -10,7 +10,6 @@ import pandas as pd
 import pytest
 import xarray as xr
 
-import app.services.caching.disk as disk_cache
 import app.services.caching.lifecycle as lifecycle
 import app.services.caching.slice_cache as loader
 import app.services.store.registry as store_registry_module
@@ -19,9 +18,8 @@ from app.services.store.registry import store_registry
 
 
 @pytest.fixture(autouse=True)
-def isolate_caches(monkeypatch, tmp_path):
-    """Clear in-memory caches and isolate disk cache to tmp before/after each test."""
-    monkeypatch.setattr(disk_cache, "DISK_CACHE_PATH", str(tmp_path))
+def isolate_caches():
+    """Clear in-memory caches before/after each test."""
     store_registry.clear()
     loader._slice_cache.clear()
     loader._slice_memo._inflight.clear()
@@ -85,24 +83,6 @@ def test_load_slice_caches_result(monkeypatch):
     assert opens == 1, "second call should hit slice cache, not open_zarr again"
 
 
-def test_load_slice_uses_l3_disk_cache_on_miss(monkeypatch, tmp_path):
-    """If the slice exists on disk, load_slice must read it without touching the store."""
-    product_source = "s3://b/x.zarr"
-    cached = xr.Dataset({"v": xr.DataArray(np.full((2, 2), 99.0), dims=["lat", "lon"])})
-    p = disk_cache.disk_cache_path(product_source, "2099-01-01", ["v"])
-    p.parent.mkdir(parents=True)
-    disk_cache.write_slice_to_disk(p, cached)
-
-    # Should never be called — return value just satisfies the registry probe.
-    def fake_open(*_, **__):
-        raise AssertionError("open_zarr called even though disk cache had the slice")
-
-    monkeypatch.setattr(xr, "open_zarr", fake_open)
-
-    result = loader.load_slice(product_source, "2099-01-01", ["v"])
-    assert float(result["v"].values[0, 0]) == 99.0
-
-
 def test_load_slice_warns_on_multiple_timestamps_per_date(monkeypatch):
     """Two UTC timestamps mapping to the same local date should log debug but still serve."""
     # Two times that both land on Sydney local date 2024-01-16.
@@ -158,8 +138,8 @@ def test_load_slice_without_ocean_masked_keeps_all_cells(monkeypatch):
     assert not np.isnan(result["v"]).any()
 
 
-def test_evict_product_cache_clears_l2_and_disk(monkeypatch, tmp_path):
-    """evict_product_cache must clear slice cache entries AND remove the disk dir."""
+def test_evict_product_cache_clears_l2(monkeypatch):
+    """evict_product_cache must clear slice cache entries for the product."""
     p = Product(id="ev", source_path="s3://b/ev.zarr", variable="v")
     ds = _ds_with_time(["2024-01-15T13:00:00"])
     monkeypatch.setattr(xr, "open_zarr", lambda *_, **__: ds)
@@ -168,21 +148,13 @@ def test_evict_product_cache_clears_l2_and_disk(monkeypatch, tmp_path):
     loader.load_slice(p.source_path, "2024-01-16", ["v"])
     assert any(k[0] == p.source_path for k in loader._slice_cache)
 
-    # Populate L3.
-    disk_p = disk_cache.disk_cache_path(p.source_path, "2024-01-16", ["v"])
-    disk_p.parent.mkdir(parents=True, exist_ok=True)
-    disk_cache.write_slice_to_disk(disk_p, ds.isel(time=0))
-    assert disk_p.exists()
-
     lifecycle.evict_product_cache(p)
 
     # L2 entries for this product must be gone.
     assert not any(k[0] == p.source_path for k in loader._slice_cache)
-    # L3 dir must be gone.
-    assert not disk_p.parent.exists()
 
 
-def test_evict_product_cache_leaves_other_products_alone(monkeypatch, tmp_path):
+def test_evict_product_cache_leaves_other_products_alone(monkeypatch):
     p_keep = Product(id="keep", source_path="s3://b/keep.zarr", variable="v")
     p_drop = Product(id="drop", source_path="s3://b/drop.zarr", variable="v")
     ds = _ds_with_time(["2024-01-15T13:00:00"])

@@ -2,14 +2,13 @@
 
 Two responsibilities:
   * ``load_slice`` — return a fully-computed 2-D slice for a (store, date,
-    variables) tuple. Cached in an LRU (L2); checks the L3 disk cache before
-    falling through to S3. Concurrent identical requests share one compute via
-    the slice Memoizer.
+    variables) tuple. Cached in an LRU (L2); falls through to S3 on a miss.
+    Concurrent identical requests share one compute via the slice Memoizer.
   * ``evict_slice_cache_for_product`` — narrow L2-only eviction helper used by
     [[caching.lifecycle.evict_product_cache]] (the cross-layer fan-out).
 
-Long-lived store handles, disk IO, and cross-layer lifecycle live in their own
-modules ([[store.registry]], [[caching.disk]], [[caching.lifecycle]]).
+Long-lived store handles and cross-layer lifecycle live in their own modules
+([[store.registry]], [[caching.lifecycle]]).
 """
 
 import logging
@@ -20,7 +19,6 @@ import pandas as pd
 import xarray as xr
 from cachetools import TTLCache
 
-from app.services.caching.disk import disk_cache_path, read_slice_from_disk
 from app.services.product.product import Product
 from app.services.rendering.masks import apply_ocean_mask
 from app.services.store.registry import get_store, store_registry
@@ -42,17 +40,13 @@ _slice_memo: Memoizer = Memoizer(_slice_cache)
 def _compute_slice_from_store(
     store_url: str, date: str, variables: list[str], ocean_masked: bool = False
 ) -> xr.Dataset:
-    """Fetch a 2-D slice from L3 disk cache or fall through to the Zarr store.
-
-    Read-only with respect to L3 — populating the disk cache is the prewarmer's
-    job, not the request path's. Both `load_slice` and `load_slice_uncached`
-    delegate here; they differ only in whether the result lands in L2.
+    """Fetch a 2-D slice from the Zarr store. Both `load_slice` and
+    `load_slice_uncached` delegate here; they differ only in whether the
+    result lands in L2.
 
     When ``ocean_masked`` is set, anomalous values outside the model's valid ocean
     domain are nulled here (masks.apply_ocean_mask) so every downstream consumer
-    inherits the cut. The disk cache stores the *raw* slice — only the prewarmer
-    writes L3 and it never sets the flag — so the cut is re-applied per compute and
-    a rebuilt mask asset takes effect on restart without clearing L3.
+    inherits the cut.
     """
     result = _fetch_slice_from_store(store_url, date, variables)
     if ocean_masked:
@@ -61,18 +55,6 @@ def _compute_slice_from_store(
 
 
 def _fetch_slice_from_store(store_url: str, date: str, variables: list[str]) -> xr.Dataset:
-    cache_path = disk_cache_path(store_url, date, list(variables))
-    if cache_path.exists():
-        t0 = time.monotonic()
-        cached = read_slice_from_disk(cache_path)
-        disk_ms = (time.monotonic() - t0) * 1000
-        if cached is not None:
-            logger.debug(
-                "[timing] slice loaded from disk",
-                extra={"date": date, "disk_read_ms": round(disk_ms, 1)},
-            )
-            return cached
-
     store = get_store(store_url)
     index = store_registry.date_index(store_url)
     matching = list(index.get(date, ()))
@@ -126,13 +108,9 @@ def load_slice_uncached(
 ) -> xr.Dataset:
     """Return a 2-D slice without touching the L2 in-memory cache.
 
-    Reads from the L3 disk cache if present, otherwise pulls directly from the
-    Zarr store. Never writes to L3 — animation requests can span dates outside
-    the prewarmed window, and we don't want a rare endpoint to pollute the
-    shared disk cache or evict another product's hot slices.
-
-    The prewarmer calls this without ``ocean_masked`` so the slice it writes to L3
-    stays raw; request-path callers pass ``Product.ocean_masked`` to get the cut.
+    Pulls directly from the Zarr store. Used by the animation endpoint so a
+    rare multi-date request doesn't evict another product's hot slices from
+    the shared L2 LRU.
     """
     return _compute_slice_from_store(store_url, date, variables, ocean_masked)
 
