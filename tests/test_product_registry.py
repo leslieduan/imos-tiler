@@ -1,8 +1,10 @@
-"""product/registry: JSON round-trip + the no-empty-state guarantee from the docstring.
+"""product/registry: JSON load + the no-empty-state guarantee from the docstring.
 
 load_products documents that concurrent readers never see an empty PRODUCTS
 dict during reload — additions happen before removals. We pin that ordering
-along with the basic CRUD persistence.
+along with basic load behavior. Products are static config now (no admin
+API), so these tests write products.json directly rather than going through
+a registration call.
 """
 
 import json
@@ -26,8 +28,12 @@ def isolated_products(tmp_path, monkeypatch):
     PRODUCTS.update(saved)
 
 
-def _entry(product_id="p1", source="s3://bucket/x.zarr", variable="V"):
-    return {"id": product_id, "source_path": source, "variable": variable}
+def _entry(product_id="p1", source="s3://bucket/x.zarr", variable="V", **kwargs):
+    return {"id": product_id, "source_path": source, "variable": variable, **kwargs}
+
+
+def _write(cfg, entries):
+    cfg.write_text(json.dumps(entries))
 
 
 def test_load_products_no_file_is_noop(isolated_products):
@@ -35,117 +41,91 @@ def test_load_products_no_file_is_noop(isolated_products):
     assert PRODUCTS == {}
 
 
-def test_register_then_persist_and_reload(isolated_products):
-    registry.register_product(_entry("p1"))
-    assert "p1" in PRODUCTS
-    on_disk = json.loads(isolated_products.read_text())
-    assert on_disk[0]["id"] == "p1"
-
-    # Reload from disk (no in-memory bypass) — should match.
-    PRODUCTS.clear()
+def test_load_populates_products(isolated_products):
+    _write(isolated_products, [_entry("p1")])
     registry.load_products()
     assert PRODUCTS["p1"].source_path == "s3://bucket/x.zarr"
 
 
-def test_register_duplicate_raises(isolated_products):
-    registry.register_product(_entry("p1"))
-    with pytest.raises(ValueError, match="already exists"):
-        registry.register_product(_entry("p1"))
-
-
-def test_register_with_multi_variable(isolated_products):
+def test_load_with_multi_variable(isolated_products):
     """variable can be a list — exercised by the ocean_current fixture."""
-    registry.register_product(_entry("multi", variable=["U", "V"]))
-    p = PRODUCTS["multi"]
-    assert p.variables == ["U", "V"]
+    _write(isolated_products, [_entry("multi", variable=["U", "V"])])
+    registry.load_products()
+    assert PRODUCTS["multi"].variables == ["U", "V"]
 
 
-def test_register_with_chunk_px_and_padding(isolated_products):
-    registry.register_product(
-        {
-            "id": "tuned",
-            "source_path": "s3://bucket/x.zarr",
-            "variable": "V",
-            "chunk_px": [128, 96],
-            "padding": 4,
-        }
+def test_load_with_chunk_px_and_padding(isolated_products):
+    _write(
+        isolated_products,
+        [
+            {
+                "id": "tuned",
+                "source_path": "s3://bucket/x.zarr",
+                "variable": "V",
+                "chunk_px": [128, 96],
+                "padding": 4,
+            }
+        ],
     )
+    registry.load_products()
     p = PRODUCTS["tuned"]
     assert p.chunk_px == (128, 96)
     assert p.padding == 4
 
 
-def test_register_with_coastal_fill(isolated_products):
-    registry.register_product(
-        {
-            "id": "sparse",
-            "source_path": "s3://bucket/x.zarr",
-            "variable": "V",
-            "coastal_fill": {"max_dist_px": 4},
-        }
+def test_load_with_coastal_fill(isolated_products):
+    _write(
+        isolated_products,
+        [
+            {
+                "id": "sparse",
+                "source_path": "s3://bucket/x.zarr",
+                "variable": "V",
+                "coastal_fill": {"max_dist_px": 4},
+            }
+        ],
     )
+    registry.load_products()
     p = PRODUCTS["sparse"]
     assert p.coastal_fill is not None
     assert p.coastal_fill.max_dist_px == 4
 
 
 def test_coastal_fill_absent_defaults_to_none(isolated_products):
-    registry.register_product({"id": "plain", "source_path": "s3://bucket/x.zarr", "variable": "V"})
+    _write(isolated_products, [_entry("plain")])
+    registry.load_products()
     assert PRODUCTS["plain"].coastal_fill is None
 
 
 def test_ocean_masked_absent_defaults_to_false(isolated_products):
-    registry.register_product({"id": "plain", "source_path": "s3://bucket/x.zarr", "variable": "V"})
+    _write(isolated_products, [_entry("plain")])
+    registry.load_products()
     assert PRODUCTS["plain"].ocean_masked is False
 
 
 def test_ocean_masked_defaults_true_for_listed_product(isolated_products):
     # The currents product is masked by default even without the config flag.
     pid = "model_sea_level_anomaly_gridded_realtime_vcur_ucur"
-    registry.register_product(
-        {"id": pid, "source_path": "s3://bucket/x.zarr", "variable": ["UCUR", "VCUR"]}
-    )
+    _write(isolated_products, [_entry(pid, variable=["UCUR", "VCUR"])])
+    registry.load_products()
     assert PRODUCTS[pid].ocean_masked is True
 
 
 def test_ocean_masked_explicit_false_overrides_default(isolated_products):
     pid = "model_sea_level_anomaly_gridded_realtime_vcur_ucur"
-    registry.register_product(
-        {
-            "id": pid,
-            "source_path": "s3://bucket/x.zarr",
-            "variable": ["UCUR", "VCUR"],
-            "ocean_masked": False,
-        }
-    )
+    _write(isolated_products, [_entry(pid, variable=["UCUR", "VCUR"], ocean_masked=False)])
+    registry.load_products()
     assert PRODUCTS[pid].ocean_masked is False
 
 
-def test_remove_product_persists_and_reflects_in_memory(isolated_products):
-    registry.register_product(_entry("p1"))
-    registry.register_product(_entry("p2", source="s3://bucket/y.zarr"))
-    assert set(PRODUCTS.keys()) == {"p1", "p2"}
-
-    registry.remove_product("p1")
-
-    assert set(PRODUCTS.keys()) == {"p2"}
-    on_disk = json.loads(isolated_products.read_text())
-    assert [e["id"] for e in on_disk] == ["p2"]
-
-
-def test_remove_unknown_raises_keyerror(isolated_products):
-    registry.register_product(_entry("p1"))
-    with pytest.raises(KeyError):
-        registry.remove_product("nope")
-    # p1 should still be there.
-    assert "p1" in PRODUCTS
-
-
 def test_list_products_reflects_file_contents(isolated_products):
-    registry.register_product(_entry("a"))
-    registry.register_product(_entry("b", source="s3://bucket/y.zarr"))
+    _write(isolated_products, [_entry("a"), _entry("b", source="s3://bucket/y.zarr")])
     listed = registry.list_products()
     assert [e["id"] for e in listed] == ["a", "b"]
+
+
+def test_list_products_no_file_returns_empty(isolated_products):
+    assert registry.list_products() == []
 
 
 def test_load_products_never_exposes_empty_state(isolated_products, monkeypatch):
@@ -190,25 +170,11 @@ def test_load_malformed_json_raises(isolated_products):
         registry.load_products()
 
 
-def test_from_dict_returns_frozen_product(isolated_products):
+def test_from_dict_returns_frozen_product():
     from dataclasses import FrozenInstanceError
 
-    registry.register_product(_entry("frozen"))
-    p = PRODUCTS["frozen"]
+    p = registry._from_dict(_entry("frozen"))
     assert isinstance(p, Product)
     # Frozen dataclass: assignment must raise.
     with pytest.raises(FrozenInstanceError):
         p.id = "changed"  # type: ignore[misc]
-
-
-def test_register_returns_the_product_object(isolated_products):
-    p = registry.register_product(_entry("returned"))
-    assert isinstance(p, Product)
-    assert p.id == "returned"
-    assert p is PRODUCTS["returned"]
-
-
-def test_write_uses_indented_json(isolated_products):
-    registry.register_product(_entry("readable"))
-    raw = isolated_products.read_text()
-    assert "\n" in raw, "indent=2 missing"

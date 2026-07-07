@@ -1,5 +1,7 @@
 # Cache Design Analysis
 
+> **Historical record.** This document analyses and justifies the on-disk L3 cache tier described below. That tier has since been **removed** — the server now caches only in-memory (L1 processed grids + L2 slices; see `docs/technical.md` §10). The analysis is preserved for the historical context behind that decision, not as a description of the current architecture.
+
 ## Problem
 
 Cold tile requests for large dadaset take up to ~2s because `load_slice` reads Zarr chunks from S3. The in-memory `_slice_cache` eliminates repeat hits within one process lifetime, but is wiped on every container restart. CloudFront reduces origin load but has its own TTL and eviction — tiles regularly cycle out of the CDN cache and those misses flow back to the origin, hitting the cold S3 path again. The cold path therefore occurs both on container restart and on any CloudFront eviction.

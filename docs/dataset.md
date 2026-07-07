@@ -1,6 +1,6 @@
 # Dataset Reference
 
-> **Scope.** This document describes a handful of IMOS Zarr stores that have been used in development as concrete examples of the kind of data this server consumes. **It is not an exhaustive list of products served by any given deployment.** Products are registered at runtime (or pre-populated in `products.json` at bootstrap) via the admin API — see [`technical.md` §13](technical.md#13-adding-a-new-product). A production deployment will typically register many more satellite-class products than are listed here, and the registry is expected to grow over time without touching this file.
+> **Scope.** This document describes a handful of IMOS Zarr stores that have been used in development as concrete examples of the kind of data this server consumes. **It is not an exhaustive list of products served by any given deployment.** Products are static config in [`src/app/config/products.json`](../src/app/config/products.json) — see [`technical.md` §13](technical.md#13-adding-a-new-product). A production deployment will typically register many more satellite-class products than are listed here, and the registry is expected to grow over time without touching this file.
 >
 > The purpose of this reference is to help engineers reason about the **shape, dimensions, chunking, and variables** of the kinds of Zarr stores the server supports, so they can confirm a new candidate store will work with the existing pipelines (see the Zarr store requirements in [`technical.md` §13.3](technical.md#133-requirements-for-the-zarr-store)).
 

@@ -55,7 +55,7 @@ It exposes **two independent tile pipelines** from the same underlying data:
 
 The same Zarr slice is the source for both pipelines; they diverge at the renderer. See [§5](#5-tile-coordinate-systems-and-projection-pipeline) for the full distinction.
 
-There is no static product list compiled into the code. Products live in `products.json` and can be populated in two ways: pre-populated on disk **before** the server starts (typical for a fresh deployment or reproducible bootstrap), or added/removed at runtime via the **admin API**, which takes effect immediately without restart. See [§13](#13-adding-a-new-product) for both flows.
+Products are static config: they live in `src/app/config/products.json`, committed with the code and loaded once on startup. Adding, removing, or changing a product means editing that file and redeploying — there is no runtime registration API. See [§13](#13-adding-a-new-product).
 
 ---
 
@@ -85,19 +85,16 @@ Zarr eliminates this: metadata is one `.zmetadata` HTTP request, and variable ch
 ┌────────────────────────────────────────────────────────────────────────────┐
 │                            FastAPI  (main.py)                              │
 │             event loop  +  anyio thread pool (THREAD_POOL_SIZE)            │
-└──────────────────┬───────────────────────────────────────┬─────────────────┘
-                   │                                       │
-                   ▼                                       ▼
-┌────────────────────────────────────┐  ┌────────────────────────────────────┐
-│          Tile Routers              │  │             /admin                 │
-│  /data_tiles  ·  /visual_tiles     │  │  routers/admin/{auth,products,     │
-│       products.py  (shared)        │  │              colormaps}.py         │
-│  /products · /manifest · /point    │  │          X-Admin-Key               │
-└──────────────────┬─────────────────┘  └────────────────────────────────────┘
-                   │
-                   ├───────────────────────────────────────┐
-                   │                                       │
-                   ▼                                       ▼
+└──────────────────────────────────┬─────────────────────────────────────────┘
+                                    ▼
+┌────────────────────────────────────────────────────────────────────────────┐
+│                            Tile Routers                                    │
+│                     /data_tiles  ·  /visual_tiles                          │
+│                          products.py  (shared)                             │
+│                   /products · /manifest · /point                           │
+└──────────────────┬─────────────────────────┬───────────────────────────────┘
+                   │                         │
+                   ▼                         ▼
 ┌────────────────────────────────────┐  ┌────────────────────────────────────┐
 │   rendering/data_tiles.py          │  │  rendering/visual_tiles.py         │
 │   EPSG:4326 (Plate Carrée)         │  │  + colormap/resolver.py            │
@@ -152,6 +149,8 @@ imos-tiler/
     config/
       constants.py               ← LOD/LODConfig + TILE/TileConfig (server-shader contract), CACHE_VERSION, COORD_NAMES
       paths.py                   ← PRODUCTS_CONFIG_PATH, COLORMAPS_CONFIG_PATH, LAND_MASK_PATH, OCEAN_MASK_PATH
+      products.json               ← static product config, committed with the code — see §13
+      colormaps.json              ← static custom-colormap config, committed with the code
       log_config.py              ← logging setup (JSON in Docker, coloured text locally)
     routers/
       shared.py                  ← shared router helpers (PRODUCT_EX/DATE_EX examples, get_product_or_404, load_slice_or_404)
@@ -159,24 +158,17 @@ imos-tiler/
         data_tiles.py            ← /data_tiles — raw value-encoded RGBA tiles for WebGL
         visual_tiles.py          ← /visual_tiles — colourised Web Mercator XYZ tiles + bbox + colormap listing/legend
         products.py              ← shared: /products, /manifest, /{id}/inspect, /{id}/{date}/point — included by both tile routers
-      admin/                     ← /admin — product, colormap, and cache-state endpoints (key-protected, package)
-        __init__.py              ← assembles admin_router and applies require_admin_key
-        auth.py                  ← X-Admin-Key dependency
-        products.py              ← POST/DELETE /admin/products
-        colormaps.py             ← POST/DELETE /admin/colormaps
-        cache.py                 ← GET /admin/cache (state snapshot) + DELETE /admin/cache/memory (clear L1+L2)
     services/
       caching/
-        lifecycle.py             ← evict_product_cache(product) — fans out eviction across L1 (processed_cache) and L2 (slice_cache) on product delete
-        slice_cache.py           ← L2 LRU + load_slice + evict_slice_cache_for_product
-        processed_cache.py       ← L1 processed-grid cache + memoizer + per-product eviction
+        slice_cache.py           ← L2 LRU + load_slice
+        processed_cache.py       ← L1 processed-grid cache + memoizer
       colormap/
-        registry.py              ← colormaps.json read/write + in-memory colormap registry + ColormapMode + invalidation hooks
+        registry.py              ← colormaps.json read + in-memory colormap registry + ColormapMode + invalidation hooks
         resolver.py              ← resolve_colormap() — custom→rio-tiler→matplotlib fallback chain
         legend.py                ← render_legend() — color bar + tick labels
       product/
         product.py               ← Product dataclass + LOD algorithm + get_lod_grids lazy-init
-        registry.py              ← PRODUCTS dict + load/register/remove + get_product / iter_products facades
+        registry.py              ← PRODUCTS dict + load + get_product / iter_products facades
         manifest.py              ← render_manifest() — product introspection (bounds + per-variable ranges + LOD meta)
         inspect.py               ← inspect_product() — store introspection (dimensions + per-variable dtype/shape/chunks + attrs)
       rendering/
@@ -194,26 +186,21 @@ imos-tiler/
       image.py                   ← encode_rgba(arr, fmt) + empty_tile(fmt) + media_type(fmt) — PNG/WebP encoders shared by both renderers
   docker/
     Dockerfile
-    docker-entrypoint.sh
     nginx.conf
   tests/
-  data/
-    products.json                ← persisted product registrations (runtime, gitignored; mounted volume in Docker)
-    colormaps.json               ← persisted custom colormap registrations (runtime, gitignored; mounted volume in Docker)
   docs/
     technical.md                 ← this file
     cache_analysis.md            ← cache design decision record (Redis vs EFS vs EBS vs ephemeral)
     dataset.md                   ← per-store variable / dimension / chunking reference
     netcdf-vs-zarr.md            ← format comparison, IMOS product file analysis, performance data
-    security.md                  ← admin endpoint protection (key + nginx + EC2 security group)
 ```
 
-These runtime paths are constants in `src/app/config/paths.py`. All are hardcoded — there is no env-var override for any of them (the on-disk slice cache and its `DISK_CACHE_PATH` override have been removed; see [§10](#10-caching-strategy)):
+These paths are constants in `src/app/config/paths.py`, all resolved relative to the package (not the CWD) since they're static assets shipped with the code, not runtime-writable state:
 
 | Constant                | Default               | Notes                                                                                       |
 | ----------------------- | --------------------- | -------------------------------------------------------------------------------------------- |
-| `PRODUCTS_CONFIG_PATH`  | `data/products.json`  | Auto-created by `docker-entrypoint.sh` if absent; `./data` bind-mounted in Docker.          |
-| `COLORMAPS_CONFIG_PATH` | `data/colormaps.json` | Same as above.                                                                               |
+| `PRODUCTS_CONFIG_PATH`  | `config/products.json`  | Committed with the code; edit + redeploy to add/remove/change a product — see [§13](#13-adding-a-new-product). |
+| `COLORMAPS_CONFIG_PATH` | `config/colormaps.json` | Same as above, for custom colormaps.                                                          |
 | `LAND_MASK_PATH`        | packaged asset        | Committed coastline raster used by coastal fill; see [§7.6](#76-coastal-fill-sparse-products). |
 | `OCEAN_MASK_PATH`       | packaged asset        | Committed valid-domain raster used by the ocean-validity mask; see [§7.6](#76-coastal-fill-sparse-products). |
 
@@ -481,21 +468,6 @@ The store-touching prelude (`get_available_dates`, `_default_bbox_from_store`, n
 
 The end-user experience: cold requests are still slow (every missing date is an S3 round-trip), repeat requests don't get faster, but no other endpoint is affected.
 
-### 6.4 Admin API (`/admin`)
-
-All endpoints require the `X-Admin-Key` header. The expected value is read from the `ADMIN_API_KEY` environment variable. See [`docs/security.md`](security.md) for the full key/nginx/security-group layering.
-
-```
-POST   /admin/products              → register a new product
-DELETE /admin/products/{product_id} → remove a product
-
-POST   /admin/colormaps             → register a custom colormap
-DELETE /admin/colormaps/{name}      → remove a custom colormap
-
-GET    /admin/cache                 → cache-state snapshot (see §10.5)
-DELETE /admin/cache/memory          → clear all in-memory caches (L1 + L2) (see §10.6)
-```
-
 ---
 
 # Part III — Tile generation internals
@@ -564,7 +536,7 @@ We benchmarked several alternatives on EC2 `t3.large` against a real cached SSTA
 
 The numba kernel wins by ~5.5× while preserving full NaN-mask fidelity. PIL is fast but uses pixel-center sampling coordinates that produce visible ~1 °C systematic errors at coarse LODs — wrong for visualisation. The scipy alternatives all scale worse than xarray at LOD 4 because building the explicit 2-D point cloud is slower than xarray's vectorised dispatch.
 
-End-to-end production impact on EC2 `t3.large` (cold L1, LOD 4, disk-cached date):
+End-to-end production impact on EC2 `t3.large` (cold L1, LOD 4, disk-cached date — measured when the server still had an on-disk L3 tier, since removed; `disk_read` has no equivalent step today, a cold request now reads straight from S3 instead):
 
 | Step      | Before (xr.interp + numpy) | After (numba) |  Speedup |
 | --------- | -------------------------: | ------------: | -------: |
@@ -668,7 +640,7 @@ Both segments are rendered independently using `XarrayReader` and the results ar
 
 Visual tiles support any colormap name that resolves through the following lookup chain (first match wins):
 
-1. **Custom registry** (`colormaps.json`) — names registered at runtime via the admin API.
+1. **Custom registry** (`config/colormaps.json`) — static, committed names, loaded once at startup.
 2. **rio-tiler built-ins** — e.g. `viridis`, `plasma`, `inferno`.
 3. **matplotlib** — any name from `matplotlib.colormaps`, including diverging maps like `RdBu_r`, `coolwarm`.
 
@@ -684,11 +656,11 @@ An unrecognised name returns `400 Bad Request`.
 }
 ```
 
-**Custom colormaps.** Registered via `POST /admin/colormaps` and persisted in `colormaps.json`. Loaded on startup by `load_colormaps()` in `services/colormap/registry.py` and take effect immediately without a server restart. All colormap state lives in `colormap/registry.py` — no other module holds it directly. Runtime lookup (custom → rio-tiler → matplotlib fallback) is implemented in a separate module, `services/colormap/resolver.py`, which subscribes to `colormap/registry`'s invalidation hooks to clear its LRU caches whenever the registry changes.
+**Custom colormaps.** Defined in `config/colormaps.json`, committed with the code. Loaded once on startup by `load_colormaps()` in `services/colormap/registry.py` — adding, removing, or changing one means editing the file and redeploying. All colormap state lives in `colormap/registry.py` — no other module holds it directly. Runtime lookup (custom → rio-tiler → matplotlib fallback) is implemented in a separate module, `services/colormap/resolver.py`, which subscribes to `colormap/registry`'s invalidation hooks to clear its LRU caches whenever the registry reloads.
 
-All colormaps are stored internally as **256-entry RGBA LUTs** (one tuple per normalised byte value, where 0 = data minimum and 255 = data maximum after `rescale`). The `POST /admin/colormaps` payload normalises the input to this format at registration time.
+All colormaps are stored internally as **256-entry RGBA LUTs** (one tuple per normalised byte value, where 0 = data minimum and 255 = data maximum after `rescale`). Entries in `colormaps.json` are already expanded to this format; `app/utils/colors.py` (`interpolate_colormap`, `build_categorical_lut`, `parse_color`) has the helpers used to build a new entry by hand.
 
-**Colormap modes.** The `mode` field on `POST /admin/colormaps` controls how the input stops are expanded to the 256-entry LUT:
+**Colormap modes.** The `mode` field in a `colormaps.json` entry controls how the input stops were expanded to the 256-entry LUT:
 
 | Mode             | `entries` format              | Behaviour                                                                |
 | ---------------- | ----------------------------- | ------------------------------------------------------------------------ |
@@ -697,7 +669,7 @@ All colormaps are stored internally as **256-entry RGBA LUTs** (one tuple per no
 
 Each colour stop (in both modes) may be a CSS hex string (`#rgb`, `#rrggbb`, `#rrggbbaa`) or a `[r, g, b, a]` list. Hex strings without alpha default to fully opaque (a=255).
 
-_Ramp example_ — 5 stops interpolated across the full LUT:
+_Ramp example_ — the source stops passed to `interpolate_colormap` (`app/utils/colors.py`) before writing the expanded 256-entry LUT into `colormaps.json`:
 
 ```json
 {
@@ -707,7 +679,7 @@ _Ramp example_ — 5 stops interpolated across the full LUT:
 }
 ```
 
-_Categorical example_ — discrete class values 1–4:
+_Categorical example_ — discrete class values 1–4, passed to `build_categorical_lut`:
 
 ```json
 {
@@ -719,11 +691,11 @@ _Categorical example_ — discrete class values 1–4:
 
 Categorical colormaps ignore `rescale`. They render only through the discrete, value-indexed path (nearest-neighbour resampling, a LUT keyed by the raw integer code), which is reached only for categorical variables — so the integer code maps straight to a colour with no scaling involved. (`rescale` is still honoured for continuous variables with a ramp colormap.)
 
-The data range for a categorical colormap is inferred from the key range (`min(keys)` → `max(keys)`) at registration time and used to place each value in the LUT. Values not covered by any key render as fully transparent.
+The data range for a categorical colormap is inferred from the key range (`min(keys)` → `max(keys)`) when the LUT is built and used to place each value in the LUT. Values not covered by any key render as fully transparent.
 
 **Categorical colormaps are dataset-specific.** A categorical colormap is tightly coupled to a specific variable's integer encoding — equivalent to the CF convention `flag_values` + `flag_colors` pair that ncWMS reads from dataset attributes. The `entries` keys must exactly match the discrete integer values that appear in the dataset.
 
-Registration does **not** bind the colormap to a product — a categorical colormap registers standalone, and its sorted category values are persisted alongside the LUT. The coupling is instead checked at **render time** (tile / bbox / animation) by a single gate, `_validate_categorical_request` in `services/rendering/visual_tiles.py`, which raises `ValueError` (mapped to `400 Bad Request`). It lives in the renderer rather than the router because the variable's `attrs` — the only way to tell whether the variable is categorical — are already loaded there for the render dispatch, so the checks cost no extra store read. The rules:
+A colormap entry is **not** bound to a product — a categorical colormap is defined standalone, and its sorted category values are persisted alongside the LUT. The coupling is instead checked at **render time** (tile / bbox / animation) by a single gate, `_validate_categorical_request` in `services/rendering/visual_tiles.py`, which raises `ValueError` (mapped to `400 Bad Request`). It lives in the renderer rather than the router because the variable's `attrs` — the only way to tell whether the variable is categorical — are already loaded there for the render dispatch, so the checks cost no extra store read. The rules:
 
 - a categorical colormap requires a categorical variable (one with CF `flag_values`) — applied to a *continuous* variable it is rejected, since it would otherwise fall through to the scale-dependent ramp path;
 - a categorical colormap's category values must exactly equal the variable's `flag_values` — e.g. keys `{1, 2, 3, 4}` on a variable whose `flag_values` are `{0, 1, 2, 3, 4}` is rejected rather than silently shifting every colour by one slot;
@@ -736,7 +708,7 @@ Practical rules:
 - Name categorical colormaps after the dataset or variable they describe (e.g. `land_cover_classes`, `ocean_current_flag`) to make the coupling explicit.
 - Ramp colormaps are dataset-agnostic; categorical colormaps are not.
 
-**Cache behaviour.** `resolve_colormap()` in `services/colormap/resolver.py` is `@lru_cache`-d (max 64 entries). `colormap/legend.render_legend()` caches the final PNG bytes (max 256 entries) and converts the colormap dict to a numpy array inline. The caches are cleared automatically whenever a colormap is added or deleted via the admin API — `colormap/registry._reload()` invokes the registered invalidation hooks, which include `resolve_colormap.cache_clear()` and `render_legend.cache_clear()`.
+**Cache behaviour.** `resolve_colormap()` in `services/colormap/resolver.py` is `@lru_cache`-d (max 64 entries). `colormap/legend.render_legend()` caches the final PNG bytes (max 256 entries) and converts the colormap dict to a numpy array inline. The caches are cleared automatically whenever the registry reloads — `colormap/registry._reload()` invokes the registered invalidation hooks, which include `resolve_colormap.cache_clear()` and `render_legend.cache_clear()`. In practice this only fires once, at startup.
 
 ### 8.4 Output format (PNG vs WebP)
 
@@ -860,8 +832,6 @@ After eviction, the next request for that key recomputes the processed grid from
 
 Size is controlled by `PROCESSED_CACHE_SIZE` (default `50`). Sized as `SLICE_CACHE_SIZE × LOD.max_lods` with headroom: `10 × 4 = 40`, rounded to 50. This keeps all LOD levels warm for every date in the L2 slice cache.
 
-On product deletion, `evict_processed_cache` is called from `evict_product_cache` in `caching/lifecycle.py` to purge all entries matching `source_path`.
-
 Visual tiles do not use L1 — `XarrayReader` handles its own rendering per request from the L2 slice.
 
 ### 10.3 L2 — Slice cache, in-memory (`services/caching/slice_cache.py`, `_slice_cache`)
@@ -891,24 +861,6 @@ All three layers use `concurrent.futures.Future` to deduplicate concurrent misse
 - `_tile_memo` / `_bbox_memo` (Memoizers with `cache=None`) — dedup-only protection in front of the visual-tile renderer.
 
 The first thread to miss the cache creates the Future and does the work; all other threads arriving for the same key block on `future.result()` and receive the same result when the single computation completes. Errors propagate to all waiting threads so a failed request does not permanently block future attempts for the same key. See [§12.8](#128-per-request-capacity-origin-server-ec2ecs-in-region) for capacity implications.
-
-### 10.5 Cache-state visibility (`GET /admin/cache`)
-
-A single read-only admin endpoint surfaces everything a production debugger usually wants to know about the cache. It returns three top-level sections:
-
-- **`in_flight`** — instantaneous count of computations currently mid-flight in each Memoizer (`current`), high-water mark since process start (`peak`), and total computes started since startup (`total_computes`). Slice and processed-grid memoizers reported separately. **Not** a rolling window — values reflect the moment of the request and drop to 0 when nothing is running.
-- **`memory_cache`** — current size and max for the slice and processed-grid LRUs.
-- **`products`** — per-product breakdown: `slice_in_flight` and `processed_in_flight`, attributed by `(source_path, sorted_variables)` so two products sharing a Zarr don't collide.
-
-The handler is a sync `def` (FastAPI dispatches it to the anyio pool automatically). There is no filesystem walk to perform — with no on-disk tier, the entire response is assembled from in-memory counters, so the cost is a handful of dict reads regardless of cache size. Peak/total counters are bumped under the Memoizer's existing lock; ambient cost on the tile-serving path is two integer ops per cache miss.
-
-### 10.6 In-memory cache flush (`DELETE /admin/cache/memory`)
-
-Drops every entry from both in-memory tiers — `_processed_cache` (L1) and `_slice_cache` (L2) — and returns the counts cleared as `{"cleared": {"slice": N, "processed": M}}`. Since there is no on-disk tier, the next request for any flushed key falls straight through to a cold S3 fetch.
-
-Implemented as `Memoizer.evict_matching(lambda _: True)` in both `services/caching/slice_cache.clear_slice_cache` and `services/caching/processed_cache.clear_processed_cache`. Per-product fan-out for a specific deleted product is `evict_product_cache` in `services/caching/lifecycle.py`. The eviction runs under the Memoizer's existing lock — concurrent `get_or_compute` calls block briefly while keys are removed. Any **in-flight** compute is not cancelled: it finishes and re-publishes into the (now-empty) cache when it completes, so a flush during heavy load may leave a handful of partially-refilled entries from work that was already running. Callers that arrived before the flush and are still `await`ing a shared Future receive the original result, not a re-computed one — there is no torn state.
-
-Use cases: forcing a re-read after a Zarr store has been updated out-of-band, recovering from a poisoned cache entry, or freeing memory during an interactive debugging session without restarting the process.
 
 ---
 
@@ -949,8 +901,6 @@ Everything before `yield` runs on startup; everything after runs on shutdown. **
 | --------------------------- | -------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `prewarm_stores` at startup | Open each unique Zarr store URL (metadata only) so first requests don't pay the cost         | `asyncio.Task` fanning out on the anyio pool, gated by `_STORE_PREWARM_LIMITER` (`STORE_PREWARM_WORKERS`, default 8); tracked + cancelled at shutdown |
 | Store TTL expiry            | Re-open Zarr store in the background to pick up new timestamps; stale store served meanwhile | `StoreRegistry._refresh_background` via `threading.Thread`                                                                                            |
-| `POST /admin/products`      | None beyond validating the store and persisting the product — no background warming fires    | Synchronous on the request thread; the first tile request for the new product pays the normal cold-store / cold-slice cost                           |
-| `DELETE /admin/products`    | Evict the product's in-memory L1/L2 entries                                                  | Synchronous on the request thread (fast — dict pop, no filesystem work)                                                                               |
 
 ### 11.3 Graceful shutdown
 
@@ -1065,9 +1015,6 @@ This is why a multi-second store prewarm at startup does not delay the first req
 | HTTP accept / parse / route       | Event loop                                                                                                                                          | Pure async I/O; never blocks                                                                                                                                                                                                                                                 |
 | Tile/manifest/point handlers      | Anyio pool, default limiter (`THREAD_POOL_SIZE`)                                                                                                    | Sync `def` so blocking xarray/rio-tiler/PIL calls don't freeze the loop                                                                                                                                                                                                      |
 | `/animation`                      | Event-loop coroutine → `anyio.to_thread.run_sync` per frame, gated by `_ANIMATION_LIMITER` (`ANIMATION_WORKERS`, default 10)                        | `async def` so per-frame `load_slice_uncached` calls fan out via `asyncio.gather`; latency drops to ~max(per-frame) instead of the serial sum. Limiter keeps a many-frame request from monopolising the tile-handler budget — see [§12.6](#126-one-pool-two-named-budgets) |
-| `/admin/products` POST            | Event loop (`async def`); store validation + `products.json` write offloaded via `anyio.to_thread.run_sync`                                        | No background task is spawned after registration — the handler returns as soon as the store is validated and the file is written                                                                                                                                             |
-| `/admin/products` DELETE          | Event loop (sync `def`)                                                                                                                             | In-memory removal + sync cache eviction                                                                                                                                                                                                                                      |
-| `GET /admin/cache`                | Anyio pool, default limiter (sync `def`)                                                                                                            | In-memory counter reads dispatched automatically by FastAPI                                                                                                                                                                                                                  |
 | `/products`, `/colormaps` listing | Event loop (`async def`)                                                                                                                            | In-memory dict reads only                                                                                                                                                                                                                                                    |
 | Store prewarm at startup          | Anyio pool, gated by `_STORE_PREWARM_LIMITER` (`STORE_PREWARM_WORKERS`)                                                                             | Concurrent metadata fetches, tracked as `asyncio.Task`                                                                                                                                                                                                                       |
 | Store TTL refresh                 | One daemon thread per URL on TTL expiry                                                                                                             | Stale store returned immediately; fresh open happens in the background                                                                                                                                                                                                       |
@@ -1076,7 +1023,7 @@ This is why a multi-second store prewarm at startup does not delay the first req
 ### 12.5 Failure modes to watch
 
 - **`async def` an endpoint by accident.** If a future contributor turns a `def` handler into `async def`, blocking calls inside it (any `xarray`/`rio-tiler` call) will freeze the event loop and serialise every request behind the slowest one. There is no static check for this — review carefully.
-- **Forget `anyio.to_thread.run_sync` inside an `async def` function.** `prewarm_stores` and the admin `async def` coroutines run on the event loop. Any blocking call inside their body — `xr.open_zarr`, `get_available_dates`, or any other synchronous xarray/filesystem call — must be wrapped in `anyio.to_thread.run_sync(...)` or it freezes the loop. Review additions to these functions carefully.
+- **Forget `anyio.to_thread.run_sync` inside an `async def` function.** `prewarm_stores` and the `/animation` handler run on the event loop. Any blocking call inside their body — `xr.open_zarr`, `get_available_dates`, or any other synchronous xarray/filesystem call — must be wrapped in `anyio.to_thread.run_sync(...)` or it freezes the loop. Review additions to these functions carefully.
 - **Unbounded background tasks.** The lifespan's background task has a top-level `try/except` around its body. New background tasks must do the same — an unhandled exception in an `asyncio.Task` is silent until the task is awaited.
 - **Saturate a limiter with the wrong workload.** `_STORE_PREWARM_LIMITER` and `_ANIMATION_LIMITER` are each sized to the S3 connection-pool ceiling for their specific fan-out. Don't acquire either around unrelated work (filesystem ops, metadata reads not bound by that resource) — semantically wrong and accidentally serialises unrelated work.
 
@@ -1089,14 +1036,14 @@ This is why a multi-second store prewarm at startup does not delay the first req
 Earlier versions of this server used three thread pools:
 
 1. anyio's pool for sync `def` tile handlers (size 100).
-2. asyncio's default executor for `asyncio.to_thread(...)` calls (~32) — used by admin endpoints and background tasks.
+2. asyncio's default executor for `asyncio.to_thread(...)` calls (~32) — used by background tasks.
 3. A `concurrent.futures.ThreadPoolExecutor(max_workers=STORE_PREWARM_WORKERS)` built inside the startup store-prewarm routine for the S3 fan-out (size 8).
 
 The three-pool layout bought isolation but at the cost of conceptual overhead — three different APIs (`anyio.to_thread.run_sync`, `asyncio.to_thread`, manual `ThreadPoolExecutor`), three different sizing knobs, and the subtle pitfall that `asyncio.to_thread` and `anyio.to_thread.run_sync` look interchangeable but route to **different pools**. Reviewers had to keep that distinction in mind on every async-related change.
 
 The current design collapses this to one pool with one default limiter and two named feature budgets:
 
-- **Default limiter** (size `THREAD_POOL_SIZE`, default 100) — the limiter `anyio.to_thread.current_default_thread_limiter()` returns. Used by every sync `def` tile handler (dispatched automatically by FastAPI) and by every `anyio.to_thread.run_sync(...)` call that doesn't pass an explicit limiter. Admin GET/DELETE endpoints also fall under this budget.
+- **Default limiter** (size `THREAD_POOL_SIZE`, default 100) — the limiter `anyio.to_thread.current_default_thread_limiter()` returns. Used by every sync `def` tile handler (dispatched automatically by FastAPI) and by every `anyio.to_thread.run_sync(...)` call that doesn't pass an explicit limiter.
 - **`_ANIMATION_LIMITER`** (size `ANIMATION_WORKERS`, default 10) — a module-level `anyio.CapacityLimiter` in `routers/public/visual_tiles.py`. Used by the per-frame `load_slice_uncached` fan-out inside `/animation`, via the explicit `limiter=_ANIMATION_LIMITER` argument. Sized to the aiobotocore S3 connection-pool ceiling (~10/host); going higher just queues on the connection pool without reducing latency, and the bound keeps a many-frame request from monopolising the tile-handler budget.
 - **`_STORE_PREWARM_LIMITER`** (size `STORE_PREWARM_WORKERS`, default 8) — a module-level `anyio.CapacityLimiter` in `services/store/registry.py`. Used by `StoreRegistry.prewarm` to gate concurrent `xr.open_zarr` opens at startup. Same S3 connection-pool rationale as `_ANIMATION_LIMITER`.
 
@@ -1114,9 +1061,8 @@ Both bound concurrent work, but they live at different points in the spawn lifec
 | Concern                                               | What the layout buys                                                                                                                                                                                                                             |
 | ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Tile traffic isolated from animation requests**     | A 30-frame `/animation` request consumes at most 10 anyio slots, not all 100. Without `_ANIMATION_LIMITER`, a couple of concurrent animation requests could saturate the tile budget.                                                            |
-| **Tile traffic isolated from store-prewarm bursts**   | An admin registering 50 distinct sources won't briefly consume 50 pool threads on startup — `_STORE_PREWARM_LIMITER` caps it at 8.                                                                                                               |
+| **Tile traffic isolated from store-prewarm bursts**   | A deployment with 50 distinct sources won't briefly consume 50 pool threads on startup — `_STORE_PREWARM_LIMITER` caps it at 8.                                                                                                               |
 | **Resource ceilings decoupled from request capacity** | `ANIMATION_WORKERS=10` and `STORE_PREWARM_WORKERS=8` both match the aiobotocore S3 connection-pool ceiling (~10/host) — the real bottleneck for S3 work. Both are independent of how many tile requests can run concurrently.                    |
-| **Admin endpoints answer under tile-pool pressure**   | `GET /admin/cache` is sync `def` and runs under the default limiter — it shares the 100-slot budget with tile handlers, but it's a one-shot in-memory read; the practical chance of contention is negligible, and the simplicity is worth more than a third dedicated budget. |
 
 #### Non-pool worker threads (unchanged)
 
@@ -1129,7 +1075,7 @@ Both bound concurrent work, but they live at different points in the spawn lifec
 - **Inside an `async def` function** — wrap any blocking call in `anyio.to_thread.run_sync(...)`. By default this runs under the default limiter (shared with tile handlers, which is fine for one-shot ops). For bounded-N batch fan-out, pass an appropriate `limiter=` (or define a new module-level `CapacityLimiter` sized to _that_ workload's bottleneck). For unbounded-N fan-out, use `anyio.create_task_group` + `anyio.Semaphore` with `await sem.acquire()` _before_ `tg.start_soon` to bound coroutine memory too. Don't reuse `_ANIMATION_LIMITER` / `_STORE_PREWARM_LIMITER` for unrelated work — see §12.5.
 - **For background coroutines** (store prewarm) — call them with plain `await`. They're `async def` and handle their own offload via `anyio.to_thread.run_sync` internally.
 
-The trade-off compared to the old three-pool design: admin endpoints no longer have a dedicated executor isolated from tiles. In exchange, the mental model is much simpler — one pool, named budgets where isolation matters. Tile-vs-animation and tile-vs-store-prewarm isolation, the properties that actually matter for capacity planning, are preserved by their dedicated budgets.
+The trade-off compared to the old three-pool design: fewer independent executors overall. In exchange, the mental model is much simpler — one pool, named budgets where isolation matters. Tile-vs-animation and tile-vs-store-prewarm isolation, the properties that actually matter for capacity planning, are preserved by their dedicated budgets.
 
 ### 12.7 Per-request paths
 
@@ -1230,70 +1176,41 @@ Concurrency pressure on the origin is therefore much lower than the theoretical 
 
 ## 13. Adding a new product
 
-`products.json` is the single source of truth for the product list. The server reads it once on startup (`load_products()` in `services/product/registry.py`) and exposes a runtime admin API that reads and writes the same file. Two equivalent flows:
+`src/app/config/products.json` is the single source of truth for the product list — it's static config committed with the code, not runtime state. The server reads it once on startup (`load_products()` in `services/product/registry.py`) into the in-memory `PRODUCTS` dict. There is no runtime registration API: adding, removing, or changing a product means editing the file and redeploying.
 
-| Flow                                                             | When to use                                                                  | Effect                                                                                                                                |
-| ---------------------------------------------------------------- | ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| **Bootstrap** — write `products.json` before `docker-compose up` | Fresh deployment, infra-as-code, or any reproducible bootstrap.              | `load_products()` reads the file into `PRODUCTS` during lifespan startup; `store_prewarm_task` then warms each store's metadata, but slice data stays cold until first request. |
-| **Admin API** — `POST /admin/products` to the running server     | Adding or removing products without a restart in an already-deployed system. | The admin handler validates the store, appends to `products.json`, and reloads `PRODUCTS` — no background warming fires for the new product.   |
+### 13.1 Editing `config/products.json`
 
-Both flows produce identical in-memory state. The bootstrap flow skips the admin-key + network round-trip but requires file-system access to `data/products.json`. The admin-API flow works once the server is running and is the only option in environments where you cannot touch the host filesystem.
-
-### 13.1 Bootstrap flow — pre-populate `products.json`
-
-For a fresh deployment, write the file before starting the container so the server comes up with products already registered. The Docker Compose default path is `data/products.json`:
-
-```bash
-mkdir -p data
-cat > data/products.json << 'EOF'
+```json
 [
-  {"id": "sea_level_anomaly",                       "source_path": "s3://aodn-cloud-optimised/model_sea_level_anomaly_gridded_realtime.zarr/", "variable": "GSLA",          "chunk_px": [240, 192], "padding": 1},
-  {"id": "ocean_current",                           "source_path": "s3://aodn-cloud-optimised/model_sea_level_anomaly_gridded_realtime.zarr/", "variable": ["UCUR","VCUR"], "chunk_px": [240, 192], "padding": 1},
-  {"id": "satellite_austemp_heatwave_8day_ssta",    "source_path": "s3://aodn-cloud-optimised/satellite_austemp_heatwave_8day.zarr",           "variable": "ssta",          "chunk_px": [240, 192], "padding": 1}
+  {"id": "sea_level_anomaly",                    "source_path": "s3://aodn-cloud-optimised/model_sea_level_anomaly_gridded_realtime.zarr/", "variable": "GSLA",          "chunk_px": [240, 192], "padding": 1},
+  {"id": "ocean_current",                        "source_path": "s3://aodn-cloud-optimised/model_sea_level_anomaly_gridded_realtime.zarr/", "variable": ["UCUR","VCUR"], "chunk_px": [240, 192], "padding": 1},
+  {"id": "satellite_austemp_heatwave_8day_ssta", "source_path": "s3://aodn-cloud-optimised/satellite_austemp_heatwave_8day.zarr",           "variable": "ssta",          "chunk_px": [240, 192], "padding": 1}
 ]
-EOF
-docker-compose up --build
 ```
 
-The schema mirrors the admin-API payload (`ProductPayload` in `routers/admin/products.py`). `chunk_px` and `padding` are optional — omit them to inherit `CHUNK_PX = (240, 192)` and `PADDING = 1` from `config/constants.py`.
+`chunk_px` and `padding` are optional — omit them to inherit `CHUNK_PX = (240, 192)` and `PADDING = 1` from `config/constants.py`. See [§13.4](#134-optional-overrides) for the other optional fields.
 
-### 13.2 Admin-API flow
+Before committing an entry, confirm the store opens and the declared `variable`(s) exist — a typo'd URL or variable name won't surface until the first tile request otherwise:
 
 ```bash
-# Scalar variable
-curl -X POST http://localhost:8000/admin/products \
-  -H "X-Admin-Key: your-secret-key" \
-  -H "Content-Type: application/json" \
-  -d '{"id": "my_product", "source_path": "s3://my-bucket/my_product.zarr", "variable": "VAR_NAME"}'
-
-# UV (vector) product
-curl -X POST http://localhost:8000/admin/products \
-  -H "X-Admin-Key: your-secret-key" \
-  -H "Content-Type: application/json" \
-  -d '{"id": "my_uv_product", "source_path": "s3://my-bucket/my_product.zarr", "variable": ["U_VAR", "V_VAR"]}'
-
-# Remove a product
-curl -X DELETE http://localhost:8000/admin/products/my_product \
-  -H "X-Admin-Key: your-secret-key"
+uv run python -c "
+from app.services.store.registry import get_store
+ds = get_store('s3://my-bucket/my_product.zarr')
+print(list(ds.data_vars))
+"
 ```
 
-On registration:
+On startup:
 
-- The store is opened and the declared `variable`(s) are checked against `store.data_vars`. A failure (unreachable bucket, malformed URL, missing variable) returns **400** and nothing is persisted. Without this guard, a typo'd URL would stay registered and only fail later, on the first tile request. The validation runs synchronously via `anyio.to_thread.run_sync` because `xr.open_zarr` is blocking; on success, `get_store` caches the open dataset in the store singleton so the first real request reuses it instead of opening again.
-- `products.json` is written atomically (tempfile + `os.replace`) under a process-wide `threading.Lock`, so concurrent admin writes can't interleave and a crash mid-write can't leave a truncated file. `PRODUCTS` is then reloaded from the file.
-- `evict_product_cache` is **not** called for new products (nothing to evict).
-- No background warming is fired for the new product — the handler returns as soon as the store is validated and the file is written. The first tile request for the new product pays the normal cold-store / cold-slice cost.
-
-On the first request after registration:
-
-- The store is opened and coordinates are normalised automatically.
+- `load_products()` reads the file into `PRODUCTS`.
+- `store_prewarm_task` opens each unique store's metadata in the background (see [§11](#11-background-tasks)) — slice data stays cold until the first request for that product/date.
+- The store is opened lazily on first request if prewarm hasn't completed yet; coordinates are normalised automatically.
 - LOD grids are computed from the store's actual lat/lon dimensions (see [§7](#7-data-tile-internals)).
 - Rendering and manifest generation work generically from `product.variable`.
 
-On deletion:
+### 13.2 Removing a product
 
-- `products.json` is rewritten without the product, and `PRODUCTS` reloads.
-- `evict_product_cache` removes the product's entries from `_slice_cache` (L2) and the L1 processed cache.
+Delete its entry from `config/products.json` and redeploy. There is no cache eviction step to worry about — every deploy is a fresh process, so L1/L2 start empty regardless.
 
 ### 13.3 Requirements for the Zarr store
 
@@ -1313,17 +1230,17 @@ On deletion:
 | `chunk_px`     | `(240, 192)`         | Store has very small or very large spatial extent                                         |
 | `padding`      | `1`                  | Tile edge artefacts, or no padding needed                                                 |
 | `lod_grids`    | `{}` (auto-computed) | Pre-set known grids to skip the first-request computation                                 |
-| `coastal_fill` | `None` (off)         | Sparse/coarse products with a wide coastal transparency gap (e.g. GSLA); see [§7.6](#76-coastal-fill-sparse-products). Set `{"max_dist_px": N}` (positive int); validated by the admin API. Data tiles only. |
+| `coastal_fill` | `None` (off)         | Sparse/coarse products with a wide coastal transparency gap (e.g. GSLA); see [§7.6](#76-coastal-fill-sparse-products). Set `{"max_dist_px": N}` (positive int). Data tiles only. |
 
 ---
 
 ## 14. Capacity and resource planning
 
-This section quantifies how RAM grows with product count, slice size, thread-pool size, and cache size. Use it when picking instance class for a new deployment or sizing a horizontal scale-out. With no on-disk cache tier, disk sizing is no longer part of this exercise — the only persistent storage this server touches is the small `products.json` / `colormaps.json` config files ([§4](#4-file-layout)); everything cache-related lives in RAM and disappears on restart.
+This section quantifies how RAM grows with product count, slice size, thread-pool size, and cache size. Use it when picking instance class for a new deployment or sizing a horizontal scale-out. With no on-disk cache tier, disk sizing is no longer part of this exercise — the only persistent storage this server touches is the small `config/products.json` / `config/colormaps.json` config files ([§4](#4-file-layout)), committed with the code; everything cache-related lives in RAM and disappears on restart.
 
 ### 14.1 Planning premise — what kinds of products do we plan for?
 
-The products listed in [`docs/dataset.md`](dataset.md) are **representative examples**, not an exhaustive or fixed list. Actual production products are registered at runtime via the admin API and will vary over time, but they are expected to **stay close in shape and scale** to the examples documented there — same order of magnitude in grid size, same dtype, same regular lat/lon convention.
+The products listed in [`docs/dataset.md`](dataset.md) are **representative examples**, not an exhaustive or fixed list. Actual production products are configured in `config/products.json` (see [§13](#13-adding-a-new-product)) and will vary over time, but they are expected to **stay close in shape and scale** to the examples documented there — same order of magnitude in grid size, same dtype, same regular lat/lon convention.
 
 For capacity planning we abstract those examples into **two size classes** and treat every actual product as falling into one of them:
 
@@ -1455,17 +1372,17 @@ Consolidated reference. Defaults match the application code; the Docker Compose 
 
 This codebase holds configuration in three places. Both env vars and code constants are evaluated once at startup, so from a "when does it take effect" perspective they are equivalent — the choice of layer is a deliberate **signal** about how a value should change, not a runtime distinction.
 
-| Layer                                                | What lives here                                                                                          | Change discipline                                                               | Examples                                                                                           |
-| ---------------------------------------------------- | -------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| **Env vars** (this section)                          | Operational knobs — perf, resource limits, secrets. Do **not** affect wire format or shader contract.    | Rotate freely at deploy; the value itself doesn't need code review.             | `THREAD_POOL_SIZE`, `SLICE_CACHE_SIZE`, `STORE_TTL_SECONDS`, `ADMIN_API_KEY`                       |
-| **Code constants** (`config/constants.py`)           | Wire / shader contracts — values that must stay in lockstep with the frontend or with the data encoding. | Change via PR so frontend and server stay in sync; the diff is the audit trail. | `LOD.max_lods`, `LOD.min_coarsest`, `LOD.zoom_thresholds`, `CHUNK_PX`, `PADDING` (global defaults) |
-| **Per-product fields** (`Product` dataclass + admin) | Data characteristics that legitimately vary across products.                                             | Set per product via `POST /admin/products`; no code change needed.              | `chunk_px`, `padding`, `variable`, `source_path`                                                   |
+| Layer                                                 | What lives here                                                                                          | Change discipline                                                               | Examples                                                                                           |
+| ------------------------------------------------------ | -------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| **Env vars** (this section)                           | Operational knobs — perf, resource limits, secrets. Do **not** affect wire format or shader contract.    | Rotate freely at deploy; the value itself doesn't need code review.             | `THREAD_POOL_SIZE`, `SLICE_CACHE_SIZE`, `STORE_TTL_SECONDS`                                        |
+| **Code constants** (`config/constants.py`)            | Wire / shader contracts — values that must stay in lockstep with the frontend or with the data encoding. | Change via PR so frontend and server stay in sync; the diff is the audit trail. | `LOD.max_lods`, `LOD.min_coarsest`, `LOD.zoom_thresholds`, `CHUNK_PX`, `PADDING` (global defaults) |
+| **Per-product fields** (`config/products.json`)       | Data characteristics that legitimately vary across products.                                             | Set per product in the config file; redeploy.                                  | `chunk_px`, `padding`, `variable`, `source_path`                                                   |
 
 **The rule when adding a new tunable**: ask _who needs to be informed when the value changes?_
 
 - Only the operator → **env var**.
 - The frontend (or any wire-format consumer) needs a matching update → **code constant**, so the change goes through code review alongside the frontend change.
-- Only one product is affected → **per-product field**, exposed via the admin API.
+- Only one product is affected → **per-product field** in `config/products.json`.
 
 A wrong-layer choice has real costs: making `max_lods` an env var would let an ops engineer raise it to `6` thinking "more LODs = better detail", silently overflowing the WebGL atlas's 4096×4096 (≈64 MB VRAM) cap and triggering LRU tile thrashing — rendering still works, but UX degrades through re-upload churn that ops can't easily diagnose without frontend context. Making `THREAD_POOL_SIZE` a code constant would require a redeploy and PR for every perf-tuning experiment.
 
@@ -1474,7 +1391,6 @@ A wrong-layer choice has real costs: making `max_lods` an env var would let an o
 | Variable        | Default            | Description                                                                                 |
 | --------------- | ------------------ | ------------------------------------------------------------------------------------------- |
 | `TILE_TIMEZONE` | `Australia/Sydney` | IANA timezone for date conversion. See [§9](#9-date-timezone-and-coordinate-normalisation). |
-| `ADMIN_API_KEY` | _(required)_       | Secret value compared against the `X-Admin-Key` header on every `/admin` request.           |
 
 ### 15.3 S3 client
 
@@ -1508,7 +1424,7 @@ Tuning knobs for the botocore client used by `fsspec`/`s3fs` underneath every Za
 | `LOG_LEVEL`                    | `INFO`   | Application log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`). Controls `services`, `routers`, and `main` namespaces. Uvicorn's own log level is set separately via `--log-level`. |
 | `SLOW_FETCH_THRESHOLD_SECONDS` | `5`      | Log a `WARNING` when a cold S3 `.compute()` takes longer than this many seconds. See [§16.5](#165-operational-signals).                                                          |
 
-See `docker-compose.yml` for the production wiring of these variables, and [`docs/security.md`](security.md) for how `ADMIN_API_KEY` interacts with nginx and the EC2 security group.
+See `docker-compose.yml` for the production wiring of these variables.
 
 ---
 
@@ -1566,8 +1482,8 @@ A clean startup produces these `message` values in order (all `INFO` unless note
 
 ```
 Thread pool size set            thread_pool_size=100
-Loaded products from disk       count=3, path=data/products.json
-Loaded colormaps from disk      count=2, path=data/colormaps.json
+Loaded products from disk       count=3, path=.../config/products.json
+Loaded colormaps from disk      count=2, path=.../config/colormaps.json
 Memory cache configured         slice_cache_size=10, processed_cache_size=50, store_ttl_seconds=600
 Store opened                    store_url=s3://..., date_count=365             ← one per product, from the store-prewarm task
 ```
@@ -1581,7 +1497,6 @@ Lines to watch for in production. Filter on `message` for the event name; the li
 | Level     | `message`                                                    | Key fields                                      | What it means                                                                                                                                                                             |
 | --------- | ------------------------------------------------------------ | ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `WARNING` | `Slow S3 fetch`                                              | `store_url`, `date`, `seconds`                  | A cold `.compute()` exceeded `SLOW_FETCH_THRESHOLD_SECONDS`. S3 is slow for this key — check S3 region and VPC endpoints, or consider raising `SLICE_CACHE_SIZE` / `SLICE_CACHE_TTL_SECONDS` so the slice stays warm in L2 longer once fetched, reducing how often this date is re-fetched. |
-| `WARNING` | `Admin auth rejected: invalid key`                           | `client`, `path`                                | Failed admin authentication attempt. Unexpected `client` IPs warrant investigation.                                                                                                       |
 | `DEBUG`   | `Multiple timestamps map to single date; first will be used` | `count`, `date`, `store_url`, `first_timestamp` | The Zarr store has more than one UTC timestamp resolving to the same local date (expected for sub-daily stores). The first timestamp is used. Enable `LOG_LEVEL=DEBUG` to see these.      |
 | `ERROR`   | `Unhandled error`                                            | `method`, `path`                                | An uncaught exception reached the global handler — always signals a bug. The full traceback rides in `exc`.                                                                               |
 

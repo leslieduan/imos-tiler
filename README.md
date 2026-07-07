@@ -1,6 +1,6 @@
 # imos-tiler
 
-On-demand tile server for IMOS ocean data products. **Scope: gridded data stored as Zarr on S3 only**.  Tiles are generated in real time without pre-rendering. A three-tier cache — processed grids (in-memory LRU) → slice cache (in-memory LRU) → slice files (disk) — absorbs cold S3 reads: disk-warm slices serve in ~30ms vs ~2s from S3. Products are managed at runtime via the admin API (or pre-populated in `products.json` before startup) — no redeploy required.
+On-demand tile server for IMOS ocean data products. **Scope: gridded data stored as Zarr on S3 only**.  Tiles are generated in real time without pre-rendering. A two-tier in-memory cache — processed grids (LRU) → slice cache (LRU) — absorbs cold S3 reads. Products and custom colormaps are static config in `src/app/config/{products,colormaps}.json`, committed with the code — add, remove, or change one by editing the file and redeploying.
 
 ## Setup
 
@@ -11,14 +11,8 @@ On-demand tile server for IMOS ocean data products. **Scope: gridded data stored
 uv sync --group dev
 ```
 
-Create a `.env` file in the project root (never commit this):
-
 ```bash
-ADMIN_API_KEY=your-secret-key
-```
-
-```bash
-# Run the development server (.env is loaded automatically)
+# Run the development server (.env is loaded automatically if present)
 uv run uvicorn app.main:app --reload
 ```
 
@@ -32,26 +26,11 @@ LOG_LEVEL=DEBUG uv run uvicorn app.main:app --reload
 
 Server available at `http://localhost:8000`. Interactive API docs at `http://localhost:8000/docs`.
 
-> **Tip — keep the disk cache out of the repo.** The L3 disk cache defaults to `./slice_cache`, *inside* the working tree, so a `git clean`, an IDE "discard untracked", or a worktree swap around a branch checkout silently wipes your warm slices. Point it elsewhere by adding `DISK_CACHE_PATH` to `.env` (a leading `~` is expanded):
->
-> ```bash
-> DISK_CACHE_PATH=~/.cache/titiler-project/slice_cache
-> ```
->
-> The directory is created automatically on first write. A real environment variable (shell `export` or Docker) overrides the `.env` value.
-
 ### Docker
 
-Create a `.env` file in the project root before starting:
+To enable debug logs, add `LOG_LEVEL=DEBUG` to a `.env` file in the project root (logs go to CloudWatch in JSON format):
 
 ```bash
-ADMIN_API_KEY=your-secret-key
-```
-
-To enable debug logs, add `LOG_LEVEL=DEBUG` to `.env` (logs go to CloudWatch in JSON format):
-
-```bash
-ADMIN_API_KEY=your-secret-key
 LOG_LEVEL=DEBUG
 ```
 
@@ -113,90 +92,59 @@ Query parameters for tile requests:
 
 | Parameter  | Default                          | Description                                                                                         |
 | ---------- | -------------------------------- | --------------------------------------------------------------------------------------------------- |
-| `colormap` | `viridis`                        | Colormap name — any matplotlib or rio-tiler built-in, or a custom name registered via the admin API |
+| `colormap` | `viridis`                        | Colormap name — any matplotlib or rio-tiler built-in, or a custom name defined in `config/colormaps.json` |
 | `rescale`  | auto (data min/max for the date) | Value range as `min,max`, e.g. `-0.5,0.5`                                                           |
-
-### Admin (`/admin`)
-
-Requires `X-Admin-Key` header. Admin endpoints are blocked at the nginx layer and only reachable at port 8000 — on EC2, use an SSH tunnel (`ssh -L 8000:localhost:8000 ec2-user@your-ec2-ip`) before calling them.
-
-| Method | Path                      | Description                                                                |
-| ------ | ------------------------- | -------------------------------------------------------------------------- |
-| POST   | `/admin/products`         | Register a new product                                                     |
-| DELETE | `/admin/products/{id}`    | Remove a product                                                           |
-| POST   | `/admin/colormaps`        | Register a new custom colormap                                             |
-| DELETE | `/admin/colormaps/{name}` | Remove a custom colormap                                                   |
-| GET    | `/admin/cache`            | Cache state snapshot (disk footprint, refresh status, in-flight computes) |
-| DELETE | `/admin/cache/memory`     | Clear all in-memory caches (L1 processed grids + L2 slices). Disk untouched. |
-| DELETE | `/admin/cache/disk`       | Delete every slice file from the L3 disk cache. Memory caches untouched. |
 
 ## Managing products
 
-Products are stored in `products.json` and loaded on startup. Changes via the admin API take effect immediately without a restart.
+Products are static config in [`src/app/config/products.json`](src/app/config/products.json), loaded once on startup. There is no runtime registration API — add, remove, or change a product by editing the file and redeploying.
 
-**Add a product:**
+**Add a product** — append an entry to `src/app/config/products.json` and redeploy:
 
-```bash
-curl -X POST http://localhost:8000/admin/products \
-  -H "X-Admin-Key: your-secret-key" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "id": "sea_level_anomaly",
-    "source_path": "s3://aodn-cloud-optimised/model_sea_level_anomaly_gridded_realtime.zarr/",
-    "variable": "GSLA"
-  }'
+```json
+{
+  "id": "sea_level_anomaly",
+  "source_path": "s3://aodn-cloud-optimised/model_sea_level_anomaly_gridded_realtime.zarr/",
+  "variable": "GSLA"
+}
 ```
 
 **Add a product with multiple variables (e.g. UV current):**
 
-```bash
-curl -X POST http://localhost:8000/admin/products \
-  -H "X-Admin-Key: your-secret-key" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "id": "ocean_current",
-    "source_path": "s3://aodn-cloud-optimised/model_sea_level_anomaly_gridded_realtime.zarr/",
-    "variable": ["UCUR", "VCUR"]
-  }'
+```json
+{
+  "id": "ocean_current",
+  "source_path": "s3://aodn-cloud-optimised/model_sea_level_anomaly_gridded_realtime.zarr/",
+  "variable": ["UCUR", "VCUR"]
+}
 ```
 
-**Delete a product:**
-
-```bash
-curl -X DELETE http://localhost:8000/admin/products/sea_level_anomaly \
-  -H "X-Admin-Key: your-secret-key"
-```
+**Remove a product** — delete its entry from the file and redeploy.
 
 ## Managing colormaps
 
-Custom colormaps are stored in `colormaps.json` and loaded on startup. Changes via the admin API take effect immediately without a restart. All supported colormap names (custom, rio-tiler built-ins, and matplotlib) can be browsed via `GET /visual_tiles/colormaps`. Names registered here can be used via `?colormap=<name>` on any visual tile request.
+Custom colormaps are static config in [`src/app/config/colormaps.json`](src/app/config/colormaps.json), loaded once on startup. All supported colormap names (custom, rio-tiler built-ins, and matplotlib) can be browsed via `GET /visual_tiles/colormaps`. Names defined here can be used via `?colormap=<name>` on any visual tile request.
 
-Two modes are supported — see [`docs/technical.md`](docs/technical.md#83-colormap-system) for full details.
+Two modes are supported — see [`docs/technical.md`](docs/technical.md#83-colormap-system) for full details. Entries in the file are already expanded to a 256-entry LUT; use `app/utils/colors.py`'s `interpolate_colormap` / `build_categorical_lut` to build a new entry from a short list of stops before adding it.
 
 **Ramp colormap** — 2–256 evenly-spaced stops, linearly interpolated to a 256-entry LUT. Stops can be hex strings or `[r,g,b,a]` lists:
 
-```bash
-curl -X POST http://localhost:8000/admin/colormaps \
-  -H "X-Admin-Key: your-secret-key" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "imos_sst",
-    "mode": "ramp",
-    "entries": ["#000080", "#00ffff", "#ffffff", "#ff8c00", "#8b0000"]
-  }'
+```json
+{
+  "name": "imos_sst",
+  "mode": "ramp",
+  "entries": ["#000080", "#00ffff", "#ffffff", "#ff8c00", "#8b0000"]
+}
 ```
 
 **Categorical colormap** — maps discrete integer data values to specific colours. `rescale=min,max` matching the key range is required at render time:
 
-```bash
-curl -X POST http://localhost:8000/admin/colormaps \
-  -H "X-Admin-Key: your-secret-key" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "land_cover",
-    "mode": "categorical",
-    "entries": {"1": "#ffff00", "2": "#0000ff", "3": "#ff0000", "4": "#000000"}
-  }'
+```json
+{
+  "name": "land_cover",
+  "mode": "categorical",
+  "entries": {"1": "#ffff00", "2": "#0000ff", "3": "#ff0000", "4": "#000000"}
+}
 ```
 
 ```
@@ -211,22 +159,14 @@ GET /visual_tiles/colormaps/imos_sst/legend?rescale=-1,1&width=300&height=40&ori
 GET /visual_tiles/colormaps/imos_sst/legend?width=40&height=256&orientation=vertical
 ```
 
-**Delete a colormap:**
-
-```bash
-curl -X DELETE http://localhost:8000/admin/colormaps/imos_sst \
-  -H "X-Admin-Key: your-secret-key"
-```
-
-See [`docs/security.md`](docs/security.md) for how admin endpoints are secured in production.
+**Remove a colormap** — delete its entry from the file and redeploy.
 
 ## Docs
 
 - [`docs/technical.md`](docs/technical.md) — architecture, tile coordinate systems, LOD algorithm, caching strategy, concurrency model, capacity planning, PNG encoding contract, logging
-- [`docs/cache_analysis.md`](docs/cache_analysis.md) — cache option analysis: why disk cache was chosen over Redis and EFS
+- [`docs/cache_analysis.md`](docs/cache_analysis.md) — historical record: why an on-disk cache was chosen over Redis/EFS, and why it was later removed in favour of in-memory-only caching
 - [`docs/http_caching.md`](docs/http_caching.md) — HTTP caching design: Cache-Control headers, ETag revalidation on `/manifest`, CACHE_VERSION invalidation
 - [`docs/dataset.md`](docs/dataset.md) — representative example Zarr stores (size classes, dimensions, chunking, variables) used as planning anchors
-- [`docs/security.md`](docs/security.md) — admin endpoint security, API key setup, nginx, EC2 configuration
 - [`docs/png-vs-webp-vs-bin.md`](docs/png-vs-webp-vs-bin.md) — tile format evaluation
 - [`docs/benchmark.md`](docs/benchmark.md) — response time benchmarks on EC2 (cold / disk-warm / hot)
 - [`docs/netcdf-vs-zarr.md`](docs/netcdf-vs-zarr.md) — format comparison and IMOS product file analysis

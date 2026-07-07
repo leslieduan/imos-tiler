@@ -117,7 +117,7 @@ def get_products_availability(
         f"from={from_date or ''}",
         f"to={to_date or ''}",
     ]
-    # iter_product_items returns a snapshot list so a concurrent admin reload can't
+    # iter_product_items returns a snapshot list so a concurrent reload can't
     # raise RuntimeError ("dictionary changed size during iteration") here.
     for product_id, product in iter_product_items():
         all_dates = get_available_dates(product.source_path)

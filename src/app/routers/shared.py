@@ -16,9 +16,9 @@ DATE_EX: dict[str, Example] = {"default": Example(value="2024-02-24")}
 # Cache headers for content-addressed endpoints (tiles, legends, per-date manifest,
 # point lookups). The URL fully determines the response bytes, so caches can hold the
 # response indefinitely. `immutable` blocks browser revalidation on user-triggered
-# reload. Invariants: product IDs and colormap names are treated as immutable by admin
-# operations; renderer code changes that alter output bytes are propagated by bumping
-# CACHE_VERSION (see docs/http_caching.md).
+# reload. Invariants: product IDs and colormap names are static config, fixed for the
+# life of a deployment; renderer code changes that alter output bytes are propagated by
+# bumping CACHE_VERSION (see docs/http_caching.md).
 IMMUTABLE_CACHE_HEADERS = {"Cache-Control": f"public, max-age={86400 * 365}, immutable"}
 
 

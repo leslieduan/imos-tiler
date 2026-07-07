@@ -1,14 +1,10 @@
 """In-memory slice loading (L2).
 
-Two responsibilities:
-  * ``load_slice`` — return a fully-computed 2-D slice for a (store, date,
-    variables) tuple. Cached in an LRU (L2); falls through to S3 on a miss.
-    Concurrent identical requests share one compute via the slice Memoizer.
-  * ``evict_slice_cache_for_product`` — narrow L2-only eviction helper used by
-    [[caching.lifecycle.evict_product_cache]] (the cross-layer fan-out).
+``load_slice`` returns a fully-computed 2-D slice for a (store, date,
+variables) tuple. Cached in an LRU (L2); falls through to S3 on a miss.
+Concurrent identical requests share one compute via the slice Memoizer.
 
-Long-lived store handles and cross-layer lifecycle live in their own modules
-([[store.registry]], [[caching.lifecycle]]).
+Long-lived store handles live in their own module ([[store.registry]]).
 """
 
 import logging
@@ -19,7 +15,6 @@ import pandas as pd
 import xarray as xr
 from cachetools import TTLCache
 
-from app.services.product.product import Product
 from app.services.rendering.masks import apply_ocean_mask
 from app.services.store.registry import get_store, store_registry
 from app.utils.memoizer import Memoizer
@@ -113,31 +108,3 @@ def load_slice_uncached(
     the shared L2 LRU.
     """
     return _compute_slice_from_store(store_url, date, variables, ocean_masked)
-
-
-def slice_memo_stats() -> dict:
-    """In-flight + LRU stats for the L2 slice memoizer. Used by /admin/cache."""
-    return {
-        **_slice_memo.stats(),
-        "cache_size": len(_slice_cache),
-        "cache_max": _slice_cache.maxsize,
-    }
-
-
-def clear_slice_cache() -> int:
-    """Drop every entry in the L2 slice cache. Returns count removed."""
-    removed = _slice_memo.evict_matching(lambda _: True)
-    if removed:
-        logger.info("Memory cache cleared", extra={"slices_removed": removed})
-    return removed
-
-
-def evict_slice_cache_for_product(product: Product) -> int:
-    """Evict L2 slice cache entries belonging to ``product``. Returns count removed.
-
-    Narrow helper exposed for [[caching.lifecycle.evict_product_cache]] so the
-    cross-layer fan-out can drop L2 entries without reaching into ``_slice_memo``
-    internals.
-    """
-    vars_tuple = tuple(sorted(product.variables))
-    return _slice_memo.evict_matching(lambda k: k[0] == product.source_path and k[2] == vars_tuple)

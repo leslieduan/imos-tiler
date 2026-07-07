@@ -11,7 +11,6 @@ from starlette.middleware.cors import CORSMiddleware
 from starlette.middleware.gzip import GZipMiddleware
 
 from app.config.log_config import configure_logging
-from app.routers.admin import admin_router
 from app.routers.public.data_tiles import router as data_tiles_router
 from app.routers.public.visual_tiles import router as visual_tiles_router
 from app.services.colormap.registry import load_colormaps
@@ -83,7 +82,6 @@ app.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=5)
 
 app.include_router(data_tiles_router, prefix="/data_tiles", tags=["data_tiles"])
 app.include_router(visual_tiles_router, prefix="/visual_tiles", tags=["visual_tiles"])
-app.include_router(admin_router, prefix="/admin", tags=["admin"])
 
 
 @app.exception_handler(Exception)

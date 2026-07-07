@@ -1,0 +1,38 @@
+[
+  {
+    "id": "satellite_austemp_sst_8day_sst",
+    "source_path": "s3://aodn-cloud-optimised/satellite_austemp_sst_8day.zarr/",
+    "variable": "sst"
+  },
+  {
+    "id": "satellite_austemp_heatwave_8day_ssta_mosaic",
+    "source_path": "s3://aodn-cloud-optimised/satellite_austemp_heatwave_8day.zarr",
+    "variable": "ssta_mosaic"
+  },
+  {
+    "id": "model_sea_level_anomaly_gridded_realtime_gsla",
+    "source_path": "s3://aodn-cloud-optimised/model_sea_level_anomaly_gridded_realtime.zarr/",
+    "variable": "GSLA",
+    "coastal_fill": {
+      "max_dist_px": 4
+    }
+  },
+  {
+    "id": "model_sea_level_anomaly_gridded_realtime_vcur_ucur",
+    "source_path": "s3://aodn-cloud-optimised/model_sea_level_anomaly_gridded_realtime.zarr/",
+    "variable": [
+      "UCUR",
+      "VCUR"
+    ]
+  },
+  {
+    "id": "satellite_austemp_heatwave_8day_mcs_category",
+    "source_path": "s3://aodn-cloud-optimised/satellite_austemp_heatwave_8day.zarr",
+    "variable": "MCS_category",
+    "chunk_px": [
+      240,
+      192
+    ],
+    "padding": 1
+  }
+]

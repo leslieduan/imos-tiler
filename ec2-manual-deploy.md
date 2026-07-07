@@ -6,7 +6,7 @@
 2. Choose **Amazon Linux 2023 AMI**
 3. Instance type: `t3.medium` recommended — slice cache (100 entries ≈ 700 MB) + processed cache + Docker overhead totals ~1.3 GB at peak, leaving little headroom on `t3.small` (2 GB) under concurrent load
 4. Key pair: create or use existing `.pem`
-5. **Storage**: increase root volume to **30 GB** — the disk slice cache uses up to `DISK_CACHE_LIMIT_GB` (default 20 GB) on top of the OS and Docker images (~6 GB). The default 8 GB root volume is not enough.
+5. **Storage**: default 8 GB root volume is fine — there is no on-disk cache; the server keeps everything in RAM and disappears on restart. The only persistent footprint is the OS and Docker images (~6 GB).
 6. Security group — open these ports:
    - **22** (SSH) — anywhere (`0.0.0.0/0`)
    - **80** (HTTP) — anywhere (`0.0.0.0/0`)
@@ -78,15 +78,14 @@ cd /app/imos-tiler
 
 ---
 
-## Step 5 — Pre-load Default Products (Optional)
+## Step 5 — Products and Colormaps (Optional)
 
-On first start the container automatically creates `data/products.json` (empty `[]`) and `data/colormaps.json` (empty `{}`) if they don't exist. No manual setup is required.
+Products and custom colormaps are static config committed with the code — `src/app/config/products.json` and `src/app/config/colormaps.json` — baked into the Docker image at build time. No runtime setup is required; the clone in Step 4 already has a working default product set.
 
-To start with the default products already registered instead of an empty product list:
+To deploy a different product mix on this instance, edit `src/app/config/products.json` before building:
 
 ```bash
-mkdir -p /app/imos-tiler/data
-cat > /app/imos-tiler/data/products.json << 'EOF'
+cat > /app/imos-tiler/src/app/config/products.json << 'EOF'
 [
   {"id":"sea_level_anomaly","source_path":"s3://aodn-cloud-optimised/model_sea_level_anomaly_gridded_realtime.zarr/","variable":"GSLA","chunk_px":[240,192],"padding":1},
   {"id":"ocean_current","source_path":"s3://aodn-cloud-optimised/model_sea_level_anomaly_gridded_realtime.zarr/","variable":["UCUR","VCUR"],"chunk_px":[240,192],"padding":1},
@@ -95,16 +94,16 @@ cat > /app/imos-tiler/data/products.json << 'EOF'
 EOF
 ```
 
+`docker compose up --build` (Step 7) picks up the change — the file is copied into the image, not bind-mounted.
+
 ---
 
 ## Step 6 — Set Environment Variables
 
-The Zarr stores are on a public S3 bucket so no AWS credentials are needed. All variables below have working defaults — only `ADMIN_API_KEY` is required.
+The Zarr stores are on a public S3 bucket so no AWS credentials are needed. All variables below have working defaults, so a `.env` file is optional.
 
 ```bash
 cat > /app/imos-tiler/.env << 'EOF'
-ADMIN_API_KEY=titiler_imos_admin
-
 # Timezone used to convert UTC store timestamps to local dates for the manifest and tile endpoints.
 # Set to any IANA timezone name (e.g. America/New_York, Europe/London) to deploy for a different region.
 # Both get_available_dates and load_slice must use the same value — do not change one without the other.
@@ -130,23 +129,8 @@ PROCESSED_CACHE_SIZE=50
 # insertion so idle RAM returns to baseline.
 PROCESSED_CACHE_TTL_SECONDS=600
 
-# Disk cache: maximum total size before pressure eviction runs.
-DISK_CACHE_LIMIT_GB=20
-
-# Disk cache: fraction of limit at which eviction triggers.
-DISK_EVICTION_THRESHOLD=0.85
-
-# Disk cache: how many of each product's most-recent available dates to cache.
-CACHE_DAYS=30
-
-# Disk cache: thread pool size for parallel prewarm at startup.
-PREWARM_WORKERS=8
-
 # /animation: per-frame S3 fan-out concurrency cap.
 ANIMATION_WORKERS=10
-
-# Disk cache: seconds between background refresh cycles.
-CACHE_REFRESH_INTERVAL_SECONDS=14400
 EOF
 ```
 
@@ -166,7 +150,7 @@ docker compose ps
 docker compose logs -f app
 ```
 
-On first start, the server prewarmed the disk cache in the background — logs will show lines like `Disk prewarm written (S3): sea_level_anomaly / 2024-01-15` as it fetches the latest 30 dates per product from S3. With 4 products and `PREWARM_WORKERS=8` this takes ~30s. Subsequent restarts load from disk in ~30s.
+On first start, the server prewarms each product's Zarr store *metadata* in the background (no slice data) — logs will show one `Store opened` line per unique store URL. This is quick (metadata only, no data chunks) and every restart pays it again, since nothing is cached to disk. The first tile request for each `(product, date)` still pays a full cold S3 fetch (~2s for a satellite-class slice).
 
 ---
 
@@ -191,7 +175,7 @@ git pull
 docker compose up -d --build
 ```
 
-Both `data/` (products, colormaps) and `slice_cache/` are preserved across redeploys — volume-mounted from the host, not rebuilt with the image.
+Nothing is preserved across a redeploy — there is no on-disk cache and no bind-mounted state. Every restart starts fully cold; a product/colormap change takes effect by editing `src/app/config/{products,colormaps}.json`, committing, and rebuilding.
 
 ---
 
@@ -203,6 +187,4 @@ Both `data/` (products, colormaps) and `slice_cache/` are preserved across redep
 | Stop                      | `docker compose down`                       |
 | Restart                   | `docker compose restart`                    |
 | Rebuild after code change | `docker compose up -d --build`              |
-| Check disk cache size     | `du -sh /app/imos-tiler/slice_cache`   |
-| Clear disk cache          | `rm -rf /app/imos-tiler/slice_cache/*` |
 | Check disk usage          | `df -h`                                     |

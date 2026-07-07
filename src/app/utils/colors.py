@@ -1,4 +1,4 @@
-"""Pure color utility functions shared across admin and colormap modules."""
+"""Pure color utility functions for building colormap.json LUT entries."""
 
 from typing import Any
 

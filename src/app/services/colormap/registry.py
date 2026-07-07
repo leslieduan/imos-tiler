@@ -64,39 +64,6 @@ def load_colormaps() -> None:
     )
 
 
-def register_colormap(
-    name: str,
-    entries: list[tuple[int, int, int, int]],
-    mode: ColormapMode = "ramp",
-    values: list[int] | None = None,
-) -> None:
-    """Persist a new colormap. Raises ValueError if name already exists.
-
-    ``values`` are the category values of a categorical colormap (ignored for
-    ramp mode); they are persisted so callers can match the colormap against a
-    product's flag_values at request time.
-    """
-    if name in _custom_colormaps:
-        raise ValueError(f"Colormap '{name}' already exists — use PUT to update")
-    data = _read_file()
-    if mode == "ramp":
-        data[name] = entries
-    else:
-        data[name] = {"entries": list(entries), "mode": mode, "values": sorted(values or [])}
-    _write_file(data)
-    _reload(data)
-
-
-def remove_colormap(name: str) -> None:
-    """Delete a colormap. Raises KeyError if name not found."""
-    if name not in _custom_colormaps:
-        raise KeyError(name)
-    data = _read_file()
-    data.pop(name, None)
-    _write_file(data)
-    _reload(data)
-
-
 def list_colormaps() -> dict[str, list]:
     """Return all supported colormap names grouped by source.
 
@@ -118,16 +85,6 @@ def list_colormaps() -> dict[str, list]:
     mpl_names = sorted(n for n in matplotlib.colormaps if n not in custom_set and n not in rio_set)
 
     return {"custom": custom, "rio_tiler": rio_names, "matplotlib": mpl_names}
-
-
-def _read_file() -> dict[str, list]:
-    if not _config_path.exists():
-        return {}
-    return json.loads(_config_path.read_text())
-
-
-def _write_file(data: dict[str, list]) -> None:
-    _config_path.write_text(json.dumps(data, indent=2))
 
 
 def _reload(data: dict[str, list | dict]) -> None:

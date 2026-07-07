@@ -1,8 +1,10 @@
 # Performance Benchmarks
 
-> **Scope.** The figures in this document are measured against a handful of example Zarr stores that have been used during development. **They are not benchmarks of any particular production deployment** — a production deployment registers products at runtime via the admin API (see [`technical.md` §13](technical.md#13-adding-a-new-product)), and its actual product mix may differ.
+> **Historical record.** These figures were measured when the server had a three-tier cache (in-memory → on-disk → S3), documented as **Hot** / **Disk warm** / **Cold** below. The on-disk tier has since been removed (see [`cache_analysis.md`](cache_analysis.md)) — the current server only has **Hot** (in-memory) and **Cold** (S3) paths, so the "Disk warm" rows no longer correspond to a real path. They're preserved here because the relative Cold-vs-warm-tier delta is still informative context for why L2 sizing matters (see [`technical.md` §14.3](technical.md#143-why-the-default-slice_cache_size10-is-too-small-for-production)); a re-run against the current in-memory-only architecture would only have Cold and Hot numbers.
 >
-> The example stores below were chosen to span the **size classes** the server is expected to handle: one **satellite-class** product (large grid, multi-chunk per slice, dominates RAM/disk in production) and two **GSLA-class** products (small grid, one chunk per slice). Numbers for a new product can be estimated by comparing its grid size and chunk layout against the closest size class here.
+> **Scope.** The figures in this document are measured against a handful of example Zarr stores that have been used during development. **They are not benchmarks of any particular production deployment** — a production deployment configures products in `config/products.json` (see [`technical.md` §13](technical.md#13-adding-a-new-product)), and its actual product mix may differ.
+>
+> The example stores below were chosen to span the **size classes** the server is expected to handle: one **satellite-class** product (large grid, multi-chunk per slice, dominates RAM in production) and two **GSLA-class** products (small grid, one chunk per slice). Numbers for a new product can be estimated by comparing its grid size and chunk layout against the closest size class here.
 
 ## Methodology
 
@@ -15,17 +17,17 @@ server processing (disk/S3 fetch → render → encode) + network transfer from 
 | ----------- | ------------------------ | -------------------- |
 | AWS EC2     | t3.large, ap-southeast-2 | AWS internal network |
 
-### Cache tiers
+### Cache tiers (at the time of measurement)
 
-The server has a three-tier cache. Each request is served from the fastest available tier:
+The server had a three-tier cache when these numbers were recorded. Each request was served from the fastest available tier:
 
 | Term          | Definition                                                                                                                                                                          |
 | ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Hot**       | Slice is in the in-memory LRU cache. No S3 or disk I/O — chunk extraction and PNG encoding only.                                                                                    |
-| **Disk warm** | Slice is not in memory but is present on disk (all dates within the last 30 days are prewarmed to disk on startup and refreshed every 4 hours). Reads from local EBS instead of S3. |
-| **Cold**      | Slice is not in memory or on disk. The full time slice is fetched from S3, rendered, and written to both the disk cache and memory cache.                                           |
+| **Hot**       | Slice is in the in-memory LRU cache. No S3 or disk I/O — chunk extraction and PNG encoding only. Still a real path today.                                                          |
+| **Disk warm** | *(removed — no longer a real path)* Slice is not in memory but is present on disk (all dates within the last 30 days were prewarmed to disk on startup and refreshed every 4 hours). Read from local EBS instead of S3. |
+| **Cold**      | Slice is not in memory. The full time slice is fetched from S3 and rendered. Still a real path today — it just no longer also writes to a disk cache.                             |
 
-> **Note:** Manifest hot times are not shown. A manifest is a single fixed URL per product+date, typically fetched once to initialise the client. Unlike tiles — where many z/x/y combinations benefit from the same cached slice — there is only one manifest URL to request, so a hot measurement is not meaningful. Disk warm is shown since a manifest request after a server restart (cache cleared, disk still populated) is a realistic scenario.
+> **Note:** Manifest hot times are not shown. A manifest is a single fixed URL per product+date, typically fetched once to initialise the client. Unlike tiles — where many z/x/y combinations benefit from the same cached slice — there is only one manifest URL to request, so a hot measurement is not meaningful. Disk warm was shown (historically) since a manifest request after a server restart, back when the disk tier survived a restart, was a realistic scenario — today a restart always means Cold.
 
 ---
 
@@ -154,8 +156,8 @@ The server has a three-tier cache. Each request is served from the fastest avail
 
 ## Key observations
 
-- **Hot tiles (150–200 ms)** — S3 and disk I/O are both eliminated by the in-memory cache. Variation reflects PNG payload size.
-- **Hot point (71–74 ms)** — consistently fast across all products; small JSON response with no PNG encoding.
-- **Disk warm (155–500 ms)** — all dates within `CACHE_DAYS` (default 30) are prewarmed to disk on startup and refreshed every 4 hours. A request that misses the in-memory LRU (e.g. after a restart or cache eviction) reads from local EBS rather than S3, roughly halving cold latency and capped at ~500 ms even for the satellite-class slice.
-- **Chunk design drives S3 cold-start time** — `satellite_austemp` requires 6 S3 reads per slice (2 lat chunks × 3 lon chunks); `sea_level_anomaly` and `ocean_current` pack the full spatial grid into a single chunk, so one read is enough. In practice, S3 cold requests only occur for dates older than `CACHE_DAYS` or before startup prewarm completes.
+- **Hot tiles (150–200 ms)** — S3 I/O is eliminated by the in-memory cache. Variation reflects PNG payload size. Still applies today.
+- **Hot point (71–74 ms)** — consistently fast across all products; small JSON response with no PNG encoding. Still applies today.
+- **Disk warm (155–500 ms)** — *(historical only)* with the on-disk tier, a request that missed the in-memory LRU (e.g. after a restart or cache eviction) read from local EBS rather than S3, roughly halving cold latency. With no disk tier today, an in-memory miss always falls straight through to the full Cold cost below.
+- **Chunk design drives S3 cold-start time** — `satellite_austemp` requires 6 S3 reads per slice (2 lat chunks × 3 lon chunks); `sea_level_anomaly` and `ocean_current` pack the full spatial grid into a single chunk, so one read is enough. Without a disk tier, this cold cost now recurs on every restart and every L2 (in-memory slice cache) eviction, not just for dates outside a disk-cache window.
 - **Estimating a new product** — a product whose grid is similar in size to `sea_level_anomaly` (351 × 641) but with `K` variables will land near `K × sea_level_anomaly` cold-time (UCUR + VCUR is the worked example). A new satellite-class product (~2000 × 3900) sized for `M` lat-chunks × `N` lon-chunks will scale cold time as `(M × N) / 6` relative to the satellite figures above.

@@ -23,8 +23,9 @@ Two tile systems with different coordinate conventions — do not mix them up:
 
 Non-obvious wiring:
 
-- Routers split into `src/app/routers/public/` and `src/app/routers/admin/`. `public/products.py` is `include_router`'d into both `data_tiles` and `visual_tiles`, so its handlers are exposed under both prefixes.
+- `public/products.py` is `include_router`'d into both `data_tiles` and `visual_tiles`, so its handlers are exposed under both prefixes.
 - Cache hierarchy in `src/app/services/caching/`: **L1** `processed_cache` (processed grids) → **L2** `slice_cache` (in-memory slices). There is no on-disk cache layer — a miss on both falls straight through to the Zarr store (`services/store/registry.py`).
+- Products and custom colormaps are static config in `src/app/config/{products,colormaps}.json`, committed with the code and loaded once on startup. There is no admin/runtime registration API — add, remove, or change one by editing the file and redeploying.
 
 See `docs/technical.md` for full architecture, caching strategy, LOD algorithm, and PNG encoding contract.
 

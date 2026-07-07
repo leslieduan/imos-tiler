@@ -1,8 +1,7 @@
-"""loader.load_slice + evict_product_cache + date-index resolution.
+"""loader.load_slice + date-index resolution.
 
 Existing tests in test_loader.py cover get_store + get_lod_grids. These cover
-the L2 cache interaction, the multi-timestamp warning path, and the fan-out
-eviction across L1/L2.
+the L2 cache interaction and the multi-timestamp warning path.
 """
 
 import numpy as np
@@ -10,10 +9,8 @@ import pandas as pd
 import pytest
 import xarray as xr
 
-import app.services.caching.lifecycle as lifecycle
 import app.services.caching.slice_cache as loader
 import app.services.store.registry as store_registry_module
-from app.services.product.product import Product
 from app.services.store.registry import store_registry
 
 
@@ -136,35 +133,3 @@ def test_load_slice_without_ocean_masked_keeps_all_cells(monkeypatch):
 
     result = loader.load_slice("s3://b/x.zarr", "2024-01-16", ["v"])  # flag defaults off
     assert not np.isnan(result["v"]).any()
-
-
-def test_evict_product_cache_clears_l2(monkeypatch):
-    """evict_product_cache must clear slice cache entries for the product."""
-    p = Product(id="ev", source_path="s3://b/ev.zarr", variable="v")
-    ds = _ds_with_time(["2024-01-15T13:00:00"])
-    monkeypatch.setattr(xr, "open_zarr", lambda *_, **__: ds)
-
-    # Populate L2.
-    loader.load_slice(p.source_path, "2024-01-16", ["v"])
-    assert any(k[0] == p.source_path for k in loader._slice_cache)
-
-    lifecycle.evict_product_cache(p)
-
-    # L2 entries for this product must be gone.
-    assert not any(k[0] == p.source_path for k in loader._slice_cache)
-
-
-def test_evict_product_cache_leaves_other_products_alone(monkeypatch):
-    p_keep = Product(id="keep", source_path="s3://b/keep.zarr", variable="v")
-    p_drop = Product(id="drop", source_path="s3://b/drop.zarr", variable="v")
-    ds = _ds_with_time(["2024-01-15T13:00:00"])
-    monkeypatch.setattr(xr, "open_zarr", lambda *_, **__: ds)
-
-    loader.load_slice(p_keep.source_path, "2024-01-16", ["v"])
-    loader.load_slice(p_drop.source_path, "2024-01-16", ["v"])
-
-    lifecycle.evict_product_cache(p_drop)
-
-    # keep's entry still in slice cache.
-    assert any(k[0] == p_keep.source_path for k in loader._slice_cache)
-    assert not any(k[0] == p_drop.source_path for k in loader._slice_cache)

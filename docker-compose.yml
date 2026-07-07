@@ -6,11 +6,8 @@ services:
     # As only allow ssh tunnel to call port 8000, set only listens to request to port 8000 from local.
     ports:
       - "127.0.0.1:8000:8000"
-    volumes:
-      - ./data:/app/data
     environment:
       - PYTHONUNBUFFERED=1
-      - ADMIN_API_KEY=${ADMIN_API_KEY}
       - TILE_TIMEZONE=${TILE_TIMEZONE:-Australia/Sydney}
       - STORE_TTL_SECONDS=${STORE_TTL_SECONDS:-600}
       # S3_ANON=true (default) uses anonymous access for s3:// URLs — correct for IMOS's
