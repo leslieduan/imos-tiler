@@ -8,6 +8,7 @@ from fastapi.openapi.models import Example
 from fastapi.responses import Response
 
 from app.schemas.visual_tiles import ColormapListResponse
+from app.services.caching.memoizer import Memoizer
 from app.services.caching.slice_cache import load_slice_uncached
 from app.services.colormap.legend import render_legend
 from app.services.colormap.registry import list_colormaps
@@ -23,7 +24,6 @@ from app.services.store.spatial import (
     native_resolution_in_bbox,
 )
 from app.utils.image import AnimatedFormat, ImageFormat, animated_media_type, media_type
-from app.utils.memoizer import Memoizer
 
 from .products import router as products_router
 from .shared import (

@@ -14,7 +14,7 @@ import os
 from cachetools import TTLCache
 
 from app.services.caching.backend_factory import create_memoizer
-from app.utils.memoizer import CacheBackend
+from app.services.caching.memoizer import CacheBackend
 
 _PROCESSED_CACHE_SIZE = int(os.environ.get("PROCESSED_CACHE_SIZE", 50))
 # L1 entries serve the tile-burst for one (product, date, LOD); same idle-RAM

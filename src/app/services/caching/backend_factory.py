@@ -9,8 +9,8 @@
 import os
 from collections.abc import MutableMapping
 
+from app.services.caching.memoizer import CacheBackend, Memoizer, NullMemoizer, RedisMemoizer
 from app.services.caching.redis_client import get_redis_client
-from app.utils.memoizer import CacheBackend, Memoizer, NullMemoizer, RedisMemoizer
 
 _REDIS_LOCK_TTL_SECONDS = int(os.environ.get("REDIS_LOCK_TTL_SECONDS", 30))
 _REDIS_WAIT_TIMEOUT_SECONDS = float(os.environ.get("REDIS_WAIT_TIMEOUT_SECONDS", 15))

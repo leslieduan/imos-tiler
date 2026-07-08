@@ -16,7 +16,7 @@ import time
 import fakeredis
 import pytest
 
-from app.utils.memoizer import RedisMemoizer
+from app.services.caching.memoizer import RedisMemoizer
 
 
 @pytest.fixture

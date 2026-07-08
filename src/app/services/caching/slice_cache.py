@@ -16,9 +16,9 @@ import xarray as xr
 from cachetools import TTLCache
 
 from app.services.caching.backend_factory import create_memoizer
+from app.services.caching.memoizer import CacheBackend
 from app.services.rendering.masks import apply_ocean_mask
 from app.services.store.registry import get_store, store_registry
-from app.utils.memoizer import CacheBackend
 
 logger = logging.getLogger(__name__)
 

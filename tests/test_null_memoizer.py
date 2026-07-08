@@ -1,4 +1,4 @@
-from app.utils.memoizer import CacheBackend, NullMemoizer
+from app.services.caching.memoizer import CacheBackend, NullMemoizer
 
 
 def test_null_memoizer_always_recomputes():

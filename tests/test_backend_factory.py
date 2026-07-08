@@ -2,7 +2,7 @@ import fakeredis
 import pytest
 
 from app.services.caching.backend_factory import create_memoizer
-from app.utils.memoizer import Memoizer, NullMemoizer, RedisMemoizer
+from app.services.caching.memoizer import Memoizer, NullMemoizer, RedisMemoizer
 
 
 def test_defaults_to_memory_backend(monkeypatch):
