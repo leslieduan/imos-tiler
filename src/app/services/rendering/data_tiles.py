@@ -19,7 +19,7 @@ from collections.abc import Callable
 import numpy as np
 import xarray as xr
 
-from app.services.caching.processed_cache import _processed_cache, processed_memo
+from app.services.caching.processed_cache import processed_memo
 from app.services.product.product import Product
 from app.services.rendering.kernels import normalize, resample_variables_to_grid
 from app.services.rendering.masks import (
@@ -165,7 +165,7 @@ def render_tile(
 ) -> bytes:
     t_total = time.monotonic()
     key = (product.source_path, date, tuple(product.variables), lod)
-    l1_hit = key in _processed_cache
+    l1_hit = processed_memo.contains(key)
 
     t0 = time.monotonic()
     normalised, ocean = _get_processed(product, load_ds, lod, date)

@@ -66,7 +66,7 @@ def test_tile_unknown_product():
 
 def test_tile_bad_lod():
     with (
-        patch("app.routers.public.data_tiles.get_lod_grids", return_value=_LOD_GRIDS),
+        patch("app.routers.data_tiles.get_lod_grids", return_value=_LOD_GRIDS),
         patch("app.routers.shared.load_slice", return_value=_make_ds()),
     ):
         response = client.get("/data_tiles/sea_level_anomaly/2024-01-01/99/0/0.png")
@@ -75,7 +75,7 @@ def test_tile_bad_lod():
 
 def test_tile_out_of_bounds():
     with (
-        patch("app.routers.public.data_tiles.get_lod_grids", return_value=_LOD_GRIDS),
+        patch("app.routers.data_tiles.get_lod_grids", return_value=_LOD_GRIDS),
         patch("app.routers.shared.load_slice", return_value=_make_ds()),
     ):
         response = client.get("/data_tiles/sea_level_anomaly/2024-01-01/1/5/5.png")
@@ -88,7 +88,7 @@ def test_tile_missing_date():
         return _LOD_GRIDS
 
     with (
-        patch("app.routers.public.data_tiles.get_lod_grids", side_effect=_lod_grids_with_update),
+        patch("app.routers.data_tiles.get_lod_grids", side_effect=_lod_grids_with_update),
         patch("app.routers.shared.load_slice", side_effect=FileNotFoundError("No data")),
     ):
         response = client.get("/data_tiles/sea_level_anomaly/9999-01-01/1/0/0.png")
@@ -97,9 +97,9 @@ def test_tile_missing_date():
 
 def test_tile_ok():
     with (
-        patch("app.routers.public.data_tiles.get_lod_grids", return_value=_LOD_GRIDS),
+        patch("app.routers.data_tiles.get_lod_grids", return_value=_LOD_GRIDS),
         patch("app.routers.shared.load_slice", return_value=_make_ds()),
-        patch("app.routers.public.data_tiles.render_tile", return_value=b"\x89PNG\r\n\x1a\n"),
+        patch("app.routers.data_tiles.render_tile", return_value=b"\x89PNG\r\n\x1a\n"),
     ):
         response = client.get("/data_tiles/sea_level_anomaly/2024-01-01/1/0/0.png")
     assert response.status_code == 200
@@ -116,7 +116,7 @@ def test_manifest_unknown_product():
 
 def test_manifest_missing_date():
     with (
-        patch("app.routers.public.data_tiles.get_lod_grids", return_value=_LOD_GRIDS),
+        patch("app.routers.data_tiles.get_lod_grids", return_value=_LOD_GRIDS),
         patch("app.routers.shared.load_slice", side_effect=FileNotFoundError("No data")),
     ):
         response = client.get("/data_tiles/sea_level_anomaly/9999-01-01/manifest.json")
@@ -132,9 +132,9 @@ def test_manifest_ok():
         },
     }
     with (
-        patch("app.routers.public.data_tiles.get_lod_grids", return_value=_LOD_GRIDS),
+        patch("app.routers.data_tiles.get_lod_grids", return_value=_LOD_GRIDS),
         patch("app.routers.shared.load_slice", return_value=_make_ds()),
-        patch("app.routers.public.data_tiles.render_manifest", return_value=payload),
+        patch("app.routers.data_tiles.render_manifest", return_value=payload),
     ):
         response = client.get("/data_tiles/sea_level_anomaly/2024-01-01/manifest.json")
     assert response.status_code == 200
@@ -154,9 +154,9 @@ def test_manifest_categorical_flag_fields_pass_through():
         },
     }
     with (
-        patch("app.routers.public.data_tiles.get_lod_grids", return_value=_LOD_GRIDS),
+        patch("app.routers.data_tiles.get_lod_grids", return_value=_LOD_GRIDS),
         patch("app.routers.shared.load_slice", return_value=_make_ds()),
-        patch("app.routers.public.data_tiles.render_manifest", return_value=payload),
+        patch("app.routers.data_tiles.render_manifest", return_value=payload),
     ):
         response = client.get("/data_tiles/sea_level_anomaly/2024-01-01/manifest.json")
     assert response.status_code == 200
@@ -221,7 +221,7 @@ def test_inspect_unknown_product():
 
 
 def test_inspect_ok():
-    with patch("app.routers.public.products.get_store", return_value=_make_store_ds()):
+    with patch("app.routers.products.get_store", return_value=_make_store_ds()):
         response = client.get("/data_tiles/sea_level_anomaly/inspect")
     assert response.status_code == 200
     body = response.json()
@@ -242,7 +242,7 @@ def test_inspect_ok():
 
 def test_inspect_missing_store():
     with patch(
-        "app.routers.public.products.get_store",
+        "app.routers.products.get_store",
         side_effect=FileNotFoundError("store gone"),
     ):
         response = client.get("/data_tiles/sea_level_anomaly/inspect")
@@ -261,7 +261,7 @@ def test_inspect_multi_variable():
             "VCUR": xr.DataArray(np.random.rand(4, 4), dims=["lat", "lon"], coords=coords),
         }
     )
-    with patch("app.routers.public.products.get_store", return_value=ds):
+    with patch("app.routers.products.get_store", return_value=ds):
         response = client.get("/data_tiles/ocean_current/inspect")
     assert response.status_code == 200
     assert set(response.json()["variables"]) == {"UCUR", "VCUR"}
@@ -273,11 +273,11 @@ def test_inspect_multi_variable():
 def test_availability_ok():
     with (
         patch(
-            "app.routers.public.products.iter_product_items",
+            "app.routers.products.iter_product_items",
             return_value=list(_FAKE_PRODUCTS.items()),
         ),
         patch(
-            "app.routers.public.products.get_available_dates",
+            "app.routers.products.get_available_dates",
             return_value=["2024-06-01", "2024-07-01"],
         ),
     ):
@@ -297,10 +297,10 @@ def test_availability_date_filters():
     all_dates = ["2024-01-01", "2024-06-01", "2024-09-01", "2024-12-01"]
     with (
         patch(
-            "app.routers.public.products.iter_product_items",
+            "app.routers.products.iter_product_items",
             return_value=list(_FAKE_PRODUCTS.items()),
         ),
-        patch("app.routers.public.products.get_available_dates", return_value=all_dates),
+        patch("app.routers.products.get_available_dates", return_value=all_dates),
     ):
         response = client.get("/data_tiles/manifest?from=2024-06-01&to=2024-09-01")
     assert response.status_code == 200
@@ -315,10 +315,10 @@ def test_availability_default_from_is_dataset_start():
     # (well before 3 months ago) are returned, starting from the dataset's earliest.
     with (
         patch(
-            "app.routers.public.products.iter_product_items",
+            "app.routers.products.iter_product_items",
             return_value=list(_FAKE_PRODUCTS.items()),
         ),
-        patch("app.routers.public.products.get_available_dates", return_value=["2020-01-01"]),
+        patch("app.routers.products.get_available_dates", return_value=["2020-01-01"]),
     ):
         response = client.get("/data_tiles/manifest")
     assert response.status_code == 200
@@ -330,10 +330,10 @@ def test_availability_default_from_is_dataset_start():
 def test_availability_no_dates_in_range():
     with (
         patch(
-            "app.routers.public.products.iter_product_items",
+            "app.routers.products.iter_product_items",
             return_value=list(_FAKE_PRODUCTS.items()),
         ),
-        patch("app.routers.public.products.get_available_dates", return_value=["2020-01-01"]),
+        patch("app.routers.products.get_available_dates", return_value=["2020-01-01"]),
     ):
         response = client.get("/data_tiles/manifest?to=2019-01-01")
     assert response.status_code == 200

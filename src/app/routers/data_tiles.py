@@ -6,7 +6,8 @@ from app.services.product.manifest import render_manifest
 from app.services.product.product import get_lod_grids
 from app.services.rendering.data_tiles import render_tile
 
-from ..shared import (
+from .products import router as products_router
+from .shared import (
     DATE_EX,
     IMMUTABLE_CACHE_HEADERS,
     PRODUCT_EX,
@@ -14,7 +15,6 @@ from ..shared import (
     load_slice_or_404,
     validate_date,
 )
-from .products import router as products_router
 
 router = APIRouter()
 router.include_router(products_router)

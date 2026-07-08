@@ -13,7 +13,8 @@ import os
 
 from cachetools import TTLCache
 
-from app.utils.memoizer import Memoizer
+from app.services.caching.backend_factory import create_memoizer
+from app.utils.memoizer import CacheBackend
 
 _PROCESSED_CACHE_SIZE = int(os.environ.get("PROCESSED_CACHE_SIZE", 50))
 # L1 entries serve the tile-burst for one (product, date, LOD); same idle-RAM
@@ -22,4 +23,8 @@ _PROCESSED_CACHE_SIZE = int(os.environ.get("PROCESSED_CACHE_SIZE", 50))
 # negligible vs the steady-RAM savings during idle periods.
 _PROCESSED_CACHE_TTL = int(os.environ.get("PROCESSED_CACHE_TTL_SECONDS", 600))
 _processed_cache: TTLCache = TTLCache(maxsize=_PROCESSED_CACHE_SIZE, ttl=_PROCESSED_CACHE_TTL)
-processed_memo: Memoizer = Memoizer(_processed_cache)
+# Backend is selectable via CACHE_BACKEND (memory/redis/none, see backend_factory) so
+# ECS instances can share L1 through Redis instead of each holding a private copy.
+processed_memo: CacheBackend = create_memoizer(
+    namespace="l1", memory_cache=_processed_cache, ttl_seconds=_PROCESSED_CACHE_TTL
+)

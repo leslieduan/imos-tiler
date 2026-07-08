@@ -24,6 +24,13 @@ services:
       - SLICE_CACHE_TTL_SECONDS=${SLICE_CACHE_TTL_SECONDS:-600}
       - PROCESSED_CACHE_SIZE=${PROCESSED_CACHE_SIZE:-50}
       - PROCESSED_CACHE_TTL_SECONDS=${PROCESSED_CACHE_TTL_SECONDS:-600}
+      # CACHE_BACKEND=memory (default) keeps L1/L2 in-process, unchanged from before.
+      # Set to redis + REDIS_URL to point at a shared ElastiCache endpoint (ECS
+      # multi-instance deployments); see docs/technical.md §10.5.
+      - CACHE_BACKEND=${CACHE_BACKEND:-memory}
+      - REDIS_URL=${REDIS_URL:-}
+      - REDIS_LOCK_TTL_SECONDS=${REDIS_LOCK_TTL_SECONDS:-30}
+      - REDIS_WAIT_TIMEOUT_SECONDS=${REDIS_WAIT_TIMEOUT_SECONDS:-15}
       - ANIMATION_WORKERS=${ANIMATION_WORKERS:-10}
       # LOG_FORMAT is not set here: Docker stdout is not a TTY, so log_config.py
       # auto-selects JSON. Set LOG_FORMAT=text on the host to force human-readable

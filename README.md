@@ -164,12 +164,7 @@ GET /visual_tiles/colormaps/imos_sst/legend?width=40&height=256&orientation=vert
 ## Docs
 
 - [`docs/technical.md`](docs/technical.md) — architecture, tile coordinate systems, LOD algorithm, caching strategy, concurrency model, capacity planning, PNG encoding contract, logging
-- [`docs/cache_analysis.md`](docs/cache_analysis.md) — historical record: why an on-disk cache was chosen over Redis/EFS, and why it was later removed in favour of in-memory-only caching
 - [`docs/http_caching.md`](docs/http_caching.md) — HTTP caching design: Cache-Control headers, ETag revalidation on `/manifest`, CACHE_VERSION invalidation
-- [`docs/dataset.md`](docs/dataset.md) — representative example Zarr stores (size classes, dimensions, chunking, variables) used as planning anchors
-- [`docs/png-vs-webp-vs-bin.md`](docs/png-vs-webp-vs-bin.md) — tile format evaluation
-- [`docs/benchmark.md`](docs/benchmark.md) — response time benchmarks on EC2 (cold / disk-warm / hot)
-- [`docs/netcdf-vs-zarr.md`](docs/netcdf-vs-zarr.md) — format comparison and IMOS product file analysis
 
 ## Development
 

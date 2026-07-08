@@ -14,7 +14,6 @@ RUN uv sync --frozen --no-dev --no-install-project
 
 # Copy application code
 COPY src/ src/
-COPY scripts/ scripts/
 
 ENV PATH="/app/.venv/bin:$PATH"
 ENV PYTHONPATH="/app/src"

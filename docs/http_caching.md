@@ -1,8 +1,8 @@
 # HTTP Caching Design
 
 How responses are cached by browsers and CloudFront. Distinct from the server-side
-disk slice cache documented in `cache_analysis.md` — that one bounds origin work;
-this one bounds _network traffic to_ the origin.
+in-memory slice/processed-grid cache (`src/app/services/caching/`) — that one bounds
+origin work; this one bounds _network traffic to_ the origin.
 
 ---
 

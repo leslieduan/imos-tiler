@@ -15,9 +15,10 @@ import pandas as pd
 import xarray as xr
 from cachetools import TTLCache
 
+from app.services.caching.backend_factory import create_memoizer
 from app.services.rendering.masks import apply_ocean_mask
 from app.services.store.registry import get_store, store_registry
-from app.utils.memoizer import Memoizer
+from app.utils.memoizer import CacheBackend
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +30,11 @@ _SLICE_CACHE_SIZE = int(os.environ.get("SLICE_CACHE_SIZE", 10))
 _SLICE_CACHE_TTL = int(os.environ.get("SLICE_CACHE_TTL_SECONDS", 600))
 _SLOW_FETCH_THRESHOLD = float(os.environ.get("SLOW_FETCH_THRESHOLD_SECONDS", 5))
 _slice_cache: TTLCache = TTLCache(maxsize=_SLICE_CACHE_SIZE, ttl=_SLICE_CACHE_TTL)
-_slice_memo: Memoizer = Memoizer(_slice_cache)
+# Backend is selectable via CACHE_BACKEND (memory/redis/none, see backend_factory) so
+# ECS instances can share L2 through Redis instead of each holding a private copy.
+_slice_memo: CacheBackend = create_memoizer(
+    namespace="l2", memory_cache=_slice_cache, ttl_seconds=_SLICE_CACHE_TTL
+)
 
 
 def _compute_slice_from_store(

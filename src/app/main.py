@@ -11,8 +11,8 @@ from starlette.middleware.cors import CORSMiddleware
 from starlette.middleware.gzip import GZipMiddleware
 
 from app.config.log_config import configure_logging
-from app.routers.public.data_tiles import router as data_tiles_router
-from app.routers.public.visual_tiles import router as visual_tiles_router
+from app.routers.data_tiles import router as data_tiles_router
+from app.routers.visual_tiles import router as visual_tiles_router
 from app.services.colormap.registry import load_colormaps
 from app.services.product.registry import iter_products, load_products
 from app.services.rendering.kernels import warmup_resample

@@ -44,7 +44,7 @@
 
 The server is a FastAPI application that produces on-demand PNG tiles for IMOS ocean data products held in Zarr stores on S3.
 
-**Scope.** This server serves **gridded data stored as Zarr** only. Every product is expected to be a Zarr store on S3 with a regular lat/lon grid (`time`, `lat`, `lon` dimensions, optionally with depth/variable axes). Non-gridded data (point observations, vessel tracks, swath/orbit data) and non-Zarr formats (NetCDF, HDF5, COG, GeoTIFF) are out of scope — the entire pipeline, from `load_slice` through the LOD algorithm to the WebGL atlas, assumes a regular gridded Zarr source. See [§2](#2-why-zarr) for _why_ Zarr, and [`docs/netcdf-vs-zarr.md`](netcdf-vs-zarr.md) for the format-comparison data behind that choice.
+**Scope.** This server serves **gridded data stored as Zarr** only. Every product is expected to be a Zarr store on S3 with a regular lat/lon grid (`time`, `lat`, `lon` dimensions, optionally with depth/variable axes). Non-gridded data (point observations, vessel tracks, swath/orbit data) and non-Zarr formats (NetCDF, HDF5, COG, GeoTIFF) are out of scope — the entire pipeline, from `load_slice` through the LOD algorithm to the WebGL atlas, assumes a regular gridded Zarr source. See [§2](#2-why-zarr) for _why_ Zarr.
 
 It exposes **two independent tile pipelines** from the same underlying data:
 
@@ -64,8 +64,6 @@ Products are static config: they live in `src/app/config/products.json`, committ
 The NetCDF/HDF5 stack had an unacceptable cold-start cost for cloud-native serving. HDF5 B-tree traversal requires hundreds of sequential HTTP round-trips regardless of what the application does — it is a file-format constraint, not fixable in the application layer. Observed cold starts from home internet: GSLA SSTA ~30s, Marine Heatwave 90s+ (8m 34s TTFB measured). Even in-region on AWS, Marine Heatwave takes 2–4s on cold start due to its 15 variables × 7.8M-pixel grid.
 
 Zarr eliminates this: metadata is one `.zmetadata` HTTP request, and variable chunks are directly addressable with no traversal. The NetCDF stack has been removed.
-
-**Full format analysis and IMOS product file details: [`docs/netcdf-vs-zarr.md`](netcdf-vs-zarr.md).**
 
 ---
 
@@ -184,9 +182,7 @@ imos-tiler/
   tests/
   docs/
     technical.md                 ← this file
-    cache_analysis.md            ← cache design decision record (Redis vs EFS vs EBS vs ephemeral)
-    dataset.md                   ← per-store variable / dimension / chunking reference
-    netcdf-vs-zarr.md            ← format comparison, IMOS product file analysis, performance data
+    http_caching.md               ← HTTP caching design (Cache-Control, ETag, CACHE_VERSION)
 ```
 
 These paths are constants in `src/app/config/paths.py`, all resolved relative to the package (not the CWD) since they're static assets shipped with the code, not runtime-writable state:
@@ -308,7 +304,7 @@ For a **categorical** variable (one declaring CF `flag_values`), the manifest ad
 
 ### 6.1 Shared endpoints (mounted under both `/data_tiles` and `/visual_tiles`)
 
-`routers/public/products.py` is included by both tile routers, so these paths exist under both prefixes:
+`routers/products.py` is included by both tile routers, so these paths exist under both prefixes:
 
 ```
 GET /{prefix}/products                                          → list all registered products
@@ -439,7 +435,7 @@ GET /visual_tiles/{product_id}/{from_date}/{to_date}/animation.{ext}
 | `crs`       | `EPSG:4326`                           | CRS of the explicit `bbox`. The default bbox is always returned in EPSG:4326 regardless of `crs`.                                                                                                                        |
 | `duration`  | `200`                                 | Milliseconds per frame (10–5000).                                                                                                                                                                                        |
 
-**Resolution defaulting** — three branches in `_resolve_resolution` (`routers/public/visual_tiles.py`):
+**Resolution defaulting** — three branches in `_resolve_resolution` (`routers/visual_tiles.py`):
 
 | Input                 | Output                                                                                                                                                                                                                                                |
 | --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -726,7 +722,7 @@ Why both formats:
 
 The legend endpoint stays PNG-only — it's cached aggressively via `@lru_cache(maxsize=256)` and served with 1-year `Cache-Control: immutable` ([`http_caching.md`](http_caching.md)), so the per-byte win from WebP is not worth the API complexity for an image whose bytes ship from cache forever after the first encode.
 
-The full format-evaluation history (including why **data tiles** cannot use WebP — lossy corrupts uint24 data, lossless is 115× slower than PNG) is in [`docs/png-vs-webp-vs-bin.md`](png-vs-webp-vs-bin.md).
+**Data tiles** cannot use WebP at all — lossy compression corrupts the raw uint24-encoded values, and lossless WebP is ~115× slower to encode than PNG for this payload.
 
 ---
 
@@ -794,9 +790,9 @@ If `lat`/`lon` are still missing after renaming, `_open_store` raises `ValueErro
 
 This section covers the **server-side cache stack** (tile → S3). For **HTTP caching** (Cache-Control headers, ETag revalidation, CACHE_VERSION invalidation through browsers and CloudFront), see [`docs/http_caching.md`](http_caching.md) — a separate concern with its own design.
 
-Two-tier cache stack ordered tiles → S3: **L1 (in-memory processed grid, LRU) → L2 (in-memory slice, LRU) → S3**. Both tiers use `cachetools.TTLCache` (LRU-at-capacity plus a TTL) — when the cache reaches its configured maximum size, the **least-recently-accessed entry is evicted** to make room, and entries also expire after their configured TTL regardless of capacity pressure. Visual tiles have no L1 — requests hit L2 first. There is **no on-disk cache layer** — an L2 miss falls straight through to a live Zarr read on S3 (`.compute()`, ~2 s for a satellite-class slice). Nothing persists across a server restart: every restart starts fully cold, and every L2 miss (whether right after startup or hours into steady state) pays the same full S3 fetch cost. `store_prewarm_task` ([§11](#11-background-tasks)) only warms Zarr store *metadata* at startup — it does not populate L2 with slice data.
+Two-tier cache stack ordered tiles → S3: **L1 (processed grid) → L2 (slice) → S3**. Both tiers are backed by a `CacheBackend` implementation selected via the `CACHE_BACKEND` env var (default `memory`, see [§10.5](#105-selectable-backend-in-memory-vs-redis-vs-none)); the description below assumes the default in-memory backend. There is **no on-disk cache layer** — an L2 miss falls straight through to a live Zarr read on S3 (`.compute()`, ~2 s for a satellite-class slice). With `CACHE_BACKEND=memory` (the default), nothing persists across a server restart: every restart starts fully cold, and every L2 miss (whether right after startup or hours into steady state) pays the same full S3 fetch cost. `store_prewarm_task` ([§11](#11-background-tasks)) only warms Zarr store *metadata* at startup — it does not populate L2 with slice data.
 
-> An on-disk L3 tier existed in an earlier version of this server; the design rationale for it (disk vs Redis vs EFS vs Fargate ephemeral) is preserved as a historical record in [`docs/cache_analysis.md`](cache_analysis.md), which documents the era before it was removed.
+> An on-disk L3 tier existed in an earlier version of this server (design rationale: disk vs Redis vs EFS vs Fargate ephemeral) but has since been removed.
 
 ### 10.1 Store singleton (`services/store/registry.py`, `StoreRegistry`)
 
@@ -849,14 +845,31 @@ Primary consumers are **visual_tiles** (no L1 above it — every tile request ca
 
 ### 10.4 Stampede protection
 
-All three layers use `concurrent.futures.Future` to deduplicate concurrent misses on the same key. The slice and processed-grid layers use the shared `Memoizer` helper (`utils/memoizer.py`), which packages the "check cache → create Future → wait → publish → cleanup" pattern in one place. The store layer keeps its own per-URL Future map inside `StoreRegistry` because it layers TTL + stale-while-revalidate on top of dedup, which the generic helper deliberately does not model.
+The store layer, L1, and L2 each deduplicate concurrent misses on the same key so a burst of identical requests triggers one computation, not N. The store layer keeps its own per-URL Future map inside `StoreRegistry` because it layers TTL + stale-while-revalidate on top of dedup, which the generic helper below deliberately does not model.
 
-- `StoreRegistry._in_flight` — store opens.
-- `_slice_memo` (Memoizer over `_slice_cache`) — slice loads (`load_slice`).
-- `_processed_memo` (Memoizer over `_processed_cache`) — processed grid computation (`_get_processed`).
-- `_tile_memo` / `_bbox_memo` (Memoizers with `cache=None`) — dedup-only protection in front of the visual-tile renderer.
+- `StoreRegistry._in_flight` — store opens (always in-process; not affected by `CACHE_BACKEND`).
+- `processed_memo` (over `_processed_cache`) — processed grid computation (`_get_processed`).
+- `_slice_memo` (over `_slice_cache`) — slice loads (`load_slice`).
+- `_tile_memo` / `_bbox_memo` (`Memoizer` with `cache=None`, always in-memory regardless of `CACHE_BACKEND` — see [§10.5](#105-selectable-backend-in-memory-vs-redis-vs-none)) — dedup-only protection in front of the visual-tile renderer.
 
-The first thread to miss the cache creates the Future and does the work; all other threads arriving for the same key block on `future.result()` and receive the same result when the single computation completes. Errors propagate to all waiting threads so a failed request does not permanently block future attempts for the same key. See [§12.8](#128-per-request-capacity-origin-server-ec2ecs-in-region) for capacity implications.
+With the default in-memory backend, `processed_memo`/`_slice_memo` are `Memoizer` instances (`utils/memoizer.py`) that dedupe via `concurrent.futures.Future`: the first thread to miss the cache creates the Future and does the work; all other threads arriving for the same key block on `future.result()` and receive the same result when the single computation completes. Errors propagate to all waiting threads so a failed request does not permanently block future attempts for the same key. See [§12.8](#128-per-request-capacity-origin-server-ec2ecs-in-region) for capacity implications.
+
+`Future`-based dedup only coordinates threads within one process — it does nothing across ECS instances. See [§10.5](#105-selectable-backend-in-memory-vs-redis-vs-none) for the Redis-backed equivalent used when scaling out to multiple instances.
+
+### 10.5 Selectable backend: in-memory vs Redis vs none
+
+L1 and L2 both go through `CacheBackend` (`utils/memoizer.py`), an interface with two methods — `get_or_compute(key, factory)` and `contains(key)` — implemented by three backends, chosen once at import time by `services/caching/backend_factory.create_memoizer()` via the `CACHE_BACKEND` env var:
+
+- **`memory`** (default) — `Memoizer` wrapping the module's `TTLCache` exactly as described in [§10.2](#102-l1--processed-grid-cache-servicescachingprocessed_cachepy-_processed_cache)/[§10.3](#103-l2--slice-cache-in-memory-servicescachingslice_cachepy-_slice_cache). Each instance holds its own private cache — fine for a single instance, but under ECS autoscaling, N instances each pay the cold-fetch cost independently and hold N× the RAM for the same working set.
+- **`redis`** — `RedisMemoizer` (`utils/memoizer.py`), backed by a single ElastiCache (Redis, cluster-mode-disabled) endpoint shared by every instance, configured via `REDIS_URL` (`rediss://` for in-transit TLS). Cache values are `pickle`d (numpy arrays for L1, `xr.Dataset` for L2 — both picklable; the network + serialize round-trip is single-digit-to-tens of ms, far cheaper than the ~2 s S3 fetch it's protecting against). Cross-instance single-flight dedup replaces the in-process `Future`:
+  - **Lock**: `SET lock_key token NX EX <REDIS_LOCK_TTL_SECONDS, default 30>` — the first instance to win the key computes; the TTL bounds how long a crashed holder can block everyone else. Released via a `WATCH`/`MULTI`/`EXEC` transaction that only deletes the key if the token still matches (so an instance never deletes a lock it no longer owns) — not redis-py's built-in `Lock`, since that releases via an `EVALSHA`'d Lua script and `fakeredis` (used in tests) doesn't implement scripting.
+  - **Wakeup**: a losing instance subscribes to a per-key pub/sub channel *before* re-checking the cache (closes the race where the holder finishes between the failed lock-acquire and the subscribe call), then blocks on `get_message(timeout=REDIS_WAIT_TIMEOUT_SECONDS, default 15)`. The published message is just a signal, never the payload — the actual value is always read back via a normal `GET`, so a missed or late message can't strand a waiter.
+  - **Crash recovery**: if the wait times out, the instance falls through and attempts to acquire the lock itself, becoming the new holder and retrying the computation.
+  - Keys are namespaced (`l1:`/`l2:`) so both caches can share one ElastiCache endpoint.
+  - `PROCESSED_CACHE_SIZE`/`SLICE_CACHE_SIZE` (entry-count LRU caps) don't apply here — Redis capacity is bounded by TTL plus ElastiCache's own `maxmemory-policy`, not an app-level count.
+- **`none`** — `NullMemoizer`, an explicit opt-out: every call recomputes, nothing is cached or deduplicated. Useful for local development/testing without cache infrastructure.
+
+`_tile_memo`/`_bbox_memo` in `routers/visual_tiles.py` are deliberately **not** backend-selectable — they coalesce concurrent renders on one instance (`cache=None`, dedup-only), not cross-instance data caching, so there's no benefit to paying Redis round-trip cost there.
 
 ---
 
@@ -1040,7 +1053,7 @@ The three-pool layout bought isolation but at the cost of conceptual overhead �
 The current design collapses this to one pool with one default limiter and two named feature budgets:
 
 - **Default limiter** (size `THREAD_POOL_SIZE`, default 100) — the limiter `anyio.to_thread.current_default_thread_limiter()` returns. Used by every sync `def` tile handler (dispatched automatically by FastAPI) and by every `anyio.to_thread.run_sync(...)` call that doesn't pass an explicit limiter.
-- **`_ANIMATION_LIMITER`** (size `ANIMATION_WORKERS`, default 10) — a module-level `anyio.CapacityLimiter` in `routers/public/visual_tiles.py`. Used by the per-frame `load_slice_uncached` fan-out inside `/animation`, via the explicit `limiter=_ANIMATION_LIMITER` argument. Sized to the aiobotocore S3 connection-pool ceiling (~10/host); going higher just queues on the connection pool without reducing latency, and the bound keeps a many-frame request from monopolising the tile-handler budget.
+- **`_ANIMATION_LIMITER`** (size `ANIMATION_WORKERS`, default 10) — a module-level `anyio.CapacityLimiter` in `routers/visual_tiles.py`. Used by the per-frame `load_slice_uncached` fan-out inside `/animation`, via the explicit `limiter=_ANIMATION_LIMITER` argument. Sized to the aiobotocore S3 connection-pool ceiling (~10/host); going higher just queues on the connection pool without reducing latency, and the bound keeps a many-frame request from monopolising the tile-handler budget.
 - **`_STORE_PREWARM_LIMITER`** (size `STORE_PREWARM_WORKERS`, default 8) — a module-level `anyio.CapacityLimiter` in `services/store/registry.py`. Used by `StoreRegistry.prewarm` to gate concurrent `xr.open_zarr` opens at startup. Same S3 connection-pool rationale as `_ANIMATION_LIMITER`.
 
 All three budgets live over the **same** anyio worker pool. Anyio creates worker threads on demand and they're shared across budgets — but each call only acquires the budget it was given, so the slices are independent. A store-prewarm burst saturating its 8-slot budget does not reduce the tile-handler budget of 100, and a 30-frame animation does not steal from store-prewarm either.
@@ -1236,11 +1249,11 @@ This section quantifies how RAM grows with product count, slice size, thread-poo
 
 ### 14.1 Planning premise — what kinds of products do we plan for?
 
-The products listed in [`docs/dataset.md`](dataset.md) are **representative examples**, not an exhaustive or fixed list. Actual production products are configured in `config/products.json` (see [§13](#13-adding-a-new-product)) and will vary over time, but they are expected to **stay close in shape and scale** to the examples documented there — same order of magnitude in grid size, same dtype, same regular lat/lon convention.
+The examples below (GSLA-class, satellite-class) are **representative**, not an exhaustive or fixed list. Actual production products are configured in `config/products.json` (see [§13](#13-adding-a-new-product)) and will vary over time, but they are expected to **stay close in shape and scale** to these examples — same order of magnitude in grid size, same dtype, same regular lat/lon convention.
 
 For capacity planning we abstract those examples into **two size classes** and treat every actual product as falling into one of them:
 
-| Size class          | Anchored on (example in `dataset.md`) | Grid scale   | L2 slice in RAM | L1 processed (all LODs combined)  |
+| Size class          | Anchored on                           | Grid scale   | L2 slice in RAM | L1 processed (all LODs combined)  |
 | -------------------- | -------------------------------------- | ------------ | ---------------- | ----------------------------------- |
 | **GSLA-class**      | sea_level_anomaly / ocean_current     | ~351 × 641   | ~2 MB / var     | ~1.4 MB (single LOD)              |
 | **Satellite-class** | satellite_austemp_heatwave_8day_ssta  | ~2000 × 3900 | ~61 MB          | ~58 MB (4 LODs, ~15 MB avg/entry) |
@@ -1411,6 +1424,10 @@ Tuning knobs for the botocore client used by `fsspec`/`s3fs` underneath every Za
 | `PROCESSED_CACHE_SIZE`        | `50`    | Max entries in the L1 processed-grid cache. Sized as `SLICE_CACHE_SIZE × LOD.max_lods` with headroom.                                                                                                          |
 | `PROCESSED_CACHE_TTL_SECONDS` | `600`   | Per-entry TTL for the L1 processed-grid cache (`cachetools.TTLCache`). Same idle-RAM rationale as `SLICE_CACHE_TTL_SECONDS`.                                                                                   |
 | `STORE_TTL_SECONDS`           | `600`   | Stale-while-revalidate window for the Zarr store singleton.                                                                                                                                                    |
+| `CACHE_BACKEND`               | `memory` | Selects the L1/L2 `CacheBackend` implementation: `memory`, `redis`, or `none`. See [§10.5](#105-selectable-backend-in-memory-vs-redis-vs-none).                                                              |
+| `REDIS_URL`                   | _(none)_ | Connection string for the `redis` backend, e.g. `rediss://<endpoint>:6379/0` for TLS-enabled ElastiCache. Required when `CACHE_BACKEND=redis`; unused otherwise.                                             |
+| `REDIS_LOCK_TTL_SECONDS`      | `30`    | How long a cross-instance compute lock is held before it expires — bounds how long a crashed lock-holder can block other instances. Only used by the `redis` backend.                                        |
+| `REDIS_WAIT_TIMEOUT_SECONDS`  | `15`    | How long a losing instance waits on pub/sub for the lock-holder's result before giving up and attempting to take over the lock itself. Only used by the `redis` backend.                                     |
 
 ### 15.5 Logging
 

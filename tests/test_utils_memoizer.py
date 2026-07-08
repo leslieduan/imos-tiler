@@ -195,6 +195,20 @@ def test_stats_total_computes_skips_cache_hits():
     assert m.stats()["total_computes"] == 1
 
 
+def test_contains_reflects_cache_state():
+    cache: dict = {}
+    m = Memoizer(cache)
+    assert m.contains("k") is False
+    m.get_or_compute("k", lambda: "v")
+    assert m.contains("k") is True
+
+
+def test_contains_false_in_dedup_only_mode():
+    m = Memoizer(cache=None)
+    m.get_or_compute("k", lambda: "v")
+    assert m.contains("k") is False
+
+
 def test_lru_eviction_respected():
     """Verify the Memoizer plays nicely with an LRU cache's natural eviction."""
     cache = LRUCache(maxsize=2)
