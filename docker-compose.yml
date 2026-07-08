@@ -53,11 +53,11 @@ services:
     logging:
       # driver: awslogs
       driver: json-file
-      options:
-        awslogs-region: ap-southeast-2
-        awslogs-group: /titiler/app
-        awslogs-stream: app
-        awslogs-create-group: "true"
+      # options:
+      #   awslogs-region: ap-southeast-2
+      #   awslogs-group: /titiler/app
+      #   awslogs-stream: app
+      #   awslogs-create-group: "true"
 
   autoheal:
     image: willfarrell/autoheal:latest
