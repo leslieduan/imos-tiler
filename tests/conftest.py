@@ -1,3 +1,10 @@
+import os
+
+# Pin the cache backend before any `app` import runs `load_dotenv()`, so the
+# suite is hermetic regardless of CACHE_BACKEND set in a developer's local
+# .env for manual testing of the redis/none backends.
+os.environ["CACHE_BACKEND"] = "memory"
+
 import pytest
 
 from app.services.product.product import Product
