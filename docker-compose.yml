@@ -51,7 +51,8 @@ services:
       retries: 3
       start_period: 60s
     logging:
-      driver: awslogs
+      # driver: awslogs
+      driver: json-file
       options:
         awslogs-region: ap-southeast-2
         awslogs-group: /titiler/app
