@@ -4,26 +4,25 @@ Existing tests in test_loader.py cover get_store + get_lod_grids. These cover
 the L2 cache interaction and the multi-timestamp warning path.
 """
 
+import threading
+import time
+
 import numpy as np
 import pandas as pd
 import pytest
 import xarray as xr
 
-import app.services.caching.slice_cache as loader
 import app.services.store.registry as store_registry_module
+import app.services.store.slice_loader as loader
 from app.services.store.registry import store_registry
 
 
 @pytest.fixture(autouse=True)
 def isolate_caches():
-    """Clear in-memory caches before/after each test."""
+    """Clear the store registry before/after each test."""
     store_registry.clear()
-    loader._slice_cache.clear()
-    loader._slice_memo._inflight.clear()
     yield
     store_registry.clear()
-    loader._slice_cache.clear()
-    loader._slice_memo._inflight.clear()
 
 
 def _ds_with_time(times: list[str]) -> xr.Dataset:
@@ -61,23 +60,6 @@ def test_load_slice_unknown_date_raises_file_not_found(monkeypatch):
 
     with pytest.raises(FileNotFoundError, match="Latest available date is '2024-01-16'"):
         loader.load_slice("s3://b/x.zarr", "1999-01-01", ["v"])
-
-
-def test_load_slice_caches_result(monkeypatch):
-    """Second call for the same key must NOT hit the underlying store again."""
-    ds = _ds_with_time(["2024-01-15T13:00:00"])
-    opens = 0
-
-    def fake_open(*_, **__):
-        nonlocal opens
-        opens += 1
-        return ds
-
-    monkeypatch.setattr(xr, "open_zarr", fake_open)
-
-    loader.load_slice("s3://b/x.zarr", "2024-01-16", ["v"])
-    loader.load_slice("s3://b/x.zarr", "2024-01-16", ["v"])
-    assert opens == 1, "second call should hit slice cache, not open_zarr again"
 
 
 def test_load_slice_warns_on_multiple_timestamps_per_date(monkeypatch):
@@ -133,3 +115,43 @@ def test_load_slice_without_ocean_masked_keeps_all_cells(monkeypatch):
 
     result = loader.load_slice("s3://b/x.zarr", "2024-01-16", ["v"])  # flag defaults off
     assert not np.isnan(result["v"]).any()
+
+
+# --- concurrent stampede protection (always in-process, independent of CACHE_BACKEND) ---
+
+
+def test_concurrent_identical_loads_share_one_compute(monkeypatch):
+    """Even under CACHE_BACKEND=none (no cache backend), concurrent identical
+    load_slice calls must share one _compute_slice_from_store, not each redo the
+    S3 fetch independently. This is what `_slice_dedup` (services.caching.deduper)
+    protects — see its docstring for why this matters even without a cache."""
+    ds = _ds_with_time(["2024-01-15T13:00:00"])
+    monkeypatch.setattr(xr, "open_zarr", lambda *_, **__: ds)
+
+    calls = 0
+    proceed = threading.Event()
+    real_compute = loader._compute_slice_from_store
+
+    def slow_compute(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        proceed.wait(timeout=2)
+        return real_compute(*args, **kwargs)
+
+    monkeypatch.setattr(loader, "_compute_slice_from_store", slow_compute)
+
+    results: list = []
+
+    def worker():
+        results.append(loader.load_slice("s3://b/x.zarr", "2024-01-16", ["v"]))
+
+    threads = [threading.Thread(target=worker) for _ in range(4)]
+    for t in threads:
+        t.start()
+    time.sleep(0.1)  # let all threads register on the in-flight key
+    proceed.set()
+    for t in threads:
+        t.join(timeout=2)
+
+    assert calls == 1, "expected exactly one compute; the rest should share it via _slice_dedup"
+    assert len(results) == 4

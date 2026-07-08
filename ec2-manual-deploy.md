@@ -115,18 +115,14 @@ STORE_TTL_SECONDS=600
 # Thread pool: max concurrent sync route handlers.
 THREAD_POOL_SIZE=100
 
-# Slice cache (L2): number of fully-computed (store, date) slices to hold in RAM.
-SLICE_CACHE_SIZE=10
+# Cache backend for L1 (processed grid) / L2 (slice): "none" disables caching
+# entirely; "redis" shares a cache across instances via REDIS_URL.
+CACHE_BACKEND=none
 
-# Slice cache (L2): per-entry TTL in seconds. Entries expire this long after
-# insertion so idle RAM returns to baseline.
+# Slice cache (L2): per-entry TTL in seconds, only used when CACHE_BACKEND=redis.
 SLICE_CACHE_TTL_SECONDS=600
 
-# Processed cache (L1): number of resampled LOD grids to hold in RAM.
-PROCESSED_CACHE_SIZE=50
-
-# Processed cache (L1): per-entry TTL in seconds. Entries expire this long after
-# insertion so idle RAM returns to baseline.
+# Processed cache (L1): per-entry TTL in seconds, only used when CACHE_BACKEND=redis.
 PROCESSED_CACHE_TTL_SECONDS=600
 
 # /animation: per-frame S3 fan-out concurrency cap.

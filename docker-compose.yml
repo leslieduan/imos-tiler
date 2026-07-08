@@ -20,11 +20,9 @@ services:
       - S3_READ_TIMEOUT=${S3_READ_TIMEOUT:-30}
       - S3_MAX_ATTEMPTS=${S3_MAX_ATTEMPTS:-2}
       - THREAD_POOL_SIZE=${THREAD_POOL_SIZE:-100}
-      - SLICE_CACHE_SIZE=${SLICE_CACHE_SIZE:-10}
       - SLICE_CACHE_TTL_SECONDS=${SLICE_CACHE_TTL_SECONDS:-600}
-      - PROCESSED_CACHE_SIZE=${PROCESSED_CACHE_SIZE:-50}
       - PROCESSED_CACHE_TTL_SECONDS=${PROCESSED_CACHE_TTL_SECONDS:-600}
-      # CACHE_BACKEND=memory (default) keeps L1/L2 in-process, unchanged from before.
+      # CACHE_BACKEND=none (default) disables L1/L2 caching entirely.
       # Set to redis + REDIS_URL to point at a shared ElastiCache endpoint (ECS
       # multi-instance deployments); see docs/technical.md §10.5.
       - CACHE_BACKEND=${CACHE_BACKEND:-none}

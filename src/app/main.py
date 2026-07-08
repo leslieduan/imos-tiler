@@ -32,10 +32,11 @@ async def lifespan(app: FastAPI):
     load_products()
     load_colormaps()
     logger.info(
-        "Memory cache configured",
+        "Cache configured",
         extra={
-            "slice_cache_size": int(os.environ.get("SLICE_CACHE_SIZE", 10)),
-            "processed_cache_size": int(os.environ.get("PROCESSED_CACHE_SIZE", 50)),
+            "cache_backend": os.environ.get("CACHE_BACKEND", "none"),
+            "slice_cache_ttl_seconds": int(os.environ.get("SLICE_CACHE_TTL_SECONDS", 600)),
+            "processed_cache_ttl_seconds": int(os.environ.get("PROCESSED_CACHE_TTL_SECONDS", 600)),
             "store_ttl_seconds": int(os.environ.get("STORE_TTL_SECONDS", 600)),
         },
     )

@@ -5,10 +5,10 @@ from datetime import date as _Date
 from fastapi import HTTPException
 from fastapi.openapi.models import Example
 
-from app.services.caching.slice_cache import load_slice
 from app.services.colormap.resolver import resolve_colormap
 from app.services.product.product import Product
 from app.services.product.registry import get_product
+from app.services.store.slice_loader import load_slice
 
 PRODUCT_EX: dict[str, Example] = {"default": Example(value="sea_level_anomaly")}
 DATE_EX: dict[str, Example] = {"default": Example(value="2024-02-24")}

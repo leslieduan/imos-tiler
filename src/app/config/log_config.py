@@ -17,7 +17,7 @@ Structured fields:
   CloudWatch Logs Insights (``filter product_id = "SST"``).
 
 Other log-related env vars (defined in their respective modules):
-* ``SLOW_FETCH_THRESHOLD_SECONDS`` — services/caching/slice_cache.py
+* ``SLOW_FETCH_THRESHOLD_SECONDS`` — services/store/slice_loader.py
 """
 
 import json

@@ -8,8 +8,7 @@ from fastapi.openapi.models import Example
 from fastapi.responses import Response
 
 from app.schemas.visual_tiles import ColormapListResponse
-from app.services.caching.memoizer import Memoizer
-from app.services.caching.slice_cache import load_slice_uncached
+from app.services.caching.deduper import Deduper
 from app.services.colormap.legend import render_legend
 from app.services.colormap.registry import list_colormaps
 from app.services.rendering.visual_tiles import (
@@ -18,6 +17,7 @@ from app.services.rendering.visual_tiles import (
     render_tile,
 )
 from app.services.store.registry import get_available_dates
+from app.services.store.slice_loader import load_slice_uncached
 from app.services.store.spatial import (
     bbox_to_wgs84,
     default_bbox_from_store,
@@ -49,14 +49,8 @@ _ANIMATION_LIMITER = anyio.CapacityLimiter(int(os.environ.get("ANIMATION_WORKERS
 router = APIRouter()
 router.include_router(products_router)
 
-
-# Dedup-only Memoizers (cache=None): /data_tiles already shares the rio-tiler /
-# encoding work across concurrent requests via processed_memo, visual tiles had
-# no equivalent. With these, N concurrent identical-tile requests run one render;
-# the rest block on the shared Future. No caching needed here — Cache-Control +
-# browser/CDN absorb cross-request repeats.
-_tile_memo: Memoizer = Memoizer()
-_bbox_memo: Memoizer = Memoizer()
+_tile_dedup = Deduper()
+_bbox_dedup = Deduper()
 
 
 @router.get("/colormaps", summary="List available colormaps", response_model=ColormapListResponse)
@@ -163,7 +157,7 @@ def get_tile(
         return render_tile(ds, variable, x, y, z, colormap_name, rescale_range, fmt=ext)
 
     try:
-        body = _tile_memo.get_or_compute(key, _do_render)
+        body = _tile_dedup.dedupe(key, _do_render)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
@@ -311,7 +305,7 @@ def get_bbox(
         )
 
     try:
-        body = _bbox_memo.get_or_compute(key, _do_render)
+        body = _bbox_dedup.dedupe(key, _do_render)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 

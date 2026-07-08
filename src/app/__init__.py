@@ -1,7 +1,7 @@
 """Load .env before any submodule is imported.
 
 Several config modules read env vars at *module load* time (e.g.
-``caching/slice_cache.py``'s ``SLICE_CACHE_SIZE``). Python runs this package
+``caching/slice_cache.py``'s ``SLICE_CACHE_TTL_SECONDS``). Python runs this package
 ``__init__`` before importing any ``app.*`` submodule, so calling
 ``load_dotenv()`` here guarantees the environment is populated before those
 reads — ``main.py``'s own ``load_dotenv()`` runs only *after* its ``from

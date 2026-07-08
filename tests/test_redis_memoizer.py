@@ -2,8 +2,7 @@
 
 Uses fakeredis (a single FakeServer shared by multiple client instances,
 simulating multiple ECS instances talking to one ElastiCache endpoint).
-Concurrency is exercised with real threads, matching test_utils_memoizer.py's
-convention for the in-memory Memoizer.
+Concurrency is exercised with real threads.
 
 Note: redis-py's built-in Lock releases via an EVALSHA'd Lua script, which
 fakeredis does not implement — that's why RedisMemoizer hand-rolls the lock

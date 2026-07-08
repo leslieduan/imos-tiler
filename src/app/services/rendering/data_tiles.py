@@ -19,6 +19,7 @@ from collections.abc import Callable
 import numpy as np
 import xarray as xr
 
+from app.services.caching.deduper import Deduper
 from app.services.caching.processed_cache import processed_memo
 from app.services.product.product import Product
 from app.services.rendering.kernels import normalize, resample_variables_to_grid
@@ -29,6 +30,10 @@ from app.services.rendering.masks import (
 from app.utils.image import encode_rgba
 
 logger = logging.getLogger(__name__)
+
+# Always in-process, independent of CACHE_BACKEND — see Deduper's docstring
+# for why this matters even (especially) under CACHE_BACKEND=none.
+_processed_dedup = Deduper()
 
 
 def _var_range(ds: xr.Dataset, var: str) -> tuple[float, float]:
@@ -120,13 +125,22 @@ def _compute_processed(
 def _get_processed(
     product: Product, load_ds: Callable[[], xr.Dataset], lod: int, date: str
 ) -> tuple[list[np.ndarray], np.ndarray]:
-    """load_ds only called once per (product, date) when the processed grid is not cached yet."""
+    """load_ds only called once per (product, date) when the processed grid is not cached yet.
+
+    Concurrent identical requests always share one compute in-process via
+    ``_processed_dedup`` (independent of ``CACHE_BACKEND``); when
+    ``CACHE_BACKEND=redis``, ``processed_memo`` additionally coalesces across
+    instances and caches the result.
+    """
     key = (product.source_path, date, tuple(product.variables), lod)
 
     def factory() -> tuple[list[np.ndarray], np.ndarray]:
         return _compute_processed(product, load_ds(), lod)
 
-    return processed_memo.get_or_compute(key, factory)
+    def compute() -> tuple[list[np.ndarray], np.ndarray]:
+        return processed_memo.get_or_compute(key, factory)
+
+    return _processed_dedup.dedupe(key, compute)
 
 
 def _extract_chunk(

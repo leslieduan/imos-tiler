@@ -1,8 +1,10 @@
+import threading
+import time
+
 import numpy as np
-import pytest
 import xarray as xr
 
-import app.services.caching.processed_cache as processed_cache_module
+import app.services.rendering.data_tiles as data_tiles_module
 from app.services.product.manifest import render_manifest
 from app.services.product.product import Product
 from app.services.rendering.data_tiles import render_tile
@@ -42,12 +44,17 @@ UV_PRODUCT = Product(
     padding=0,
 )
 
-
-@pytest.fixture(autouse=True)
-def clear_processed_cache():
-    processed_cache_module._processed_cache.clear()
-    yield
-    processed_cache_module._processed_cache.clear()
+# 2x2 grid of 8px chunks so two different tiles (cx, cy) map to the same
+# processed-grid key — used to test that concurrent renders of different
+# tiles at the same (product, date, lod) share one _compute_processed call.
+MULTI_TILE_PRODUCT = Product(
+    id="test_multi_tile",
+    source_path="",
+    variable="sst",
+    lod_grids={1: (2, 2)},
+    chunk_px=(8, 8),
+    padding=0,
+)
 
 
 def test_render_tile_scalar_is_valid_png():
@@ -148,3 +155,46 @@ def test_render_tile_categorical_is_valid_png():
     # must produce a valid PNG (resample is nearest under the hood).
     png = render_tile(CATEGORICAL_PRODUCT, _make_categorical_ds, 1, 0, 0, "2024-01-01")
     assert png[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+# --- concurrent stampede protection (always in-process, independent of CACHE_BACKEND) ---
+
+
+def test_concurrent_tiles_at_same_lod_share_one_processed_compute(monkeypatch):
+    """Two different tiles (cx, cy) in the same (product, date, lod) grid must
+    share one _compute_processed call when requested concurrently, not each
+    redo the resample independently. This is what `_processed_dedup`
+    (services.caching.deduper) protects — see its docstring for why this
+    matters even under CACHE_BACKEND=none."""
+    ds = _make_ds(["sst"])
+    calls = 0
+    proceed = threading.Event()
+    real_compute = data_tiles_module._compute_processed
+
+    def slow_compute(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        proceed.wait(timeout=2)
+        return real_compute(*args, **kwargs)
+
+    monkeypatch.setattr(data_tiles_module, "_compute_processed", slow_compute)
+
+    results: list[bytes] = []
+
+    def render(cx, cy):
+        results.append(render_tile(MULTI_TILE_PRODUCT, lambda: ds, 1, cx, cy, "2024-01-01"))
+
+    threads = [
+        threading.Thread(target=render, args=(0, 0)),
+        threading.Thread(target=render, args=(1, 1)),
+    ]
+    for t in threads:
+        t.start()
+    time.sleep(0.1)  # let both threads register on the in-flight key
+    proceed.set()
+    for t in threads:
+        t.join(timeout=2)
+
+    assert calls == 1, "expected exactly one compute; the rest should share it via _processed_dedup"
+    assert len(results) == 2
+    assert all(body[:8] == b"\x89PNG\r\n\x1a\n" for body in results)
