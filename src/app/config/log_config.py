@@ -1,33 +1,32 @@
 """Logging configuration for the tile server.
 
-Call ``configure_logging()`` once at startup (after ``load_dotenv()``) to wire
-up formatters, application-namespace loggers, and the health-check filter.
+Call ``configure_logging()`` once at startup to wire up formatters,
+application-namespace loggers, and the health-check filter.
 
-Format selection (``LOG_FORMAT`` env var):
+Format selection (``settings.LOG_FORMAT``):
 
-* unset — auto: JSON when stdout is not a TTY (containers, EC2, CI),
+* ``None`` (default) — auto: JSON when stdout is not a TTY (containers, CI),
   human-readable when it is (local dev terminal). No config needed in either env.
-* ``json``  — force JSON regardless of TTY state.
-* ``text``  — force human-readable regardless of TTY state (e.g. docker run -it).
+* ``"json"``  — force JSON regardless of TTY state.
+* ``"text"``  — force human-readable regardless of TTY state.
 
 Structured fields:
 
 * Pass values via ``extra={"key": value, ...}`` rather than ``%s``-interpolating
   into the message — they become top-level JSON fields and are queryable in
   CloudWatch Logs Insights (``filter product_id = "SST"``).
-
-Other log-related env vars (defined in their respective modules):
 """
 
 import json
 import logging
 import logging.config
-import os
 import sys
 from datetime import UTC, datetime
 
 from uvicorn.config import LOGGING_CONFIG
 from uvicorn.logging import DefaultFormatter as _UvicornDefaultFormatter
+
+from app.config import settings
 
 # Standard LogRecord attributes. Anything in record.__dict__ outside this set is
 # treated as a user-supplied extra and promoted to a top-level JSON field.
@@ -121,10 +120,11 @@ class SuppressHealthChecks(logging.Filter):
 def _use_json() -> bool:
     """Return True when JSON log format should be used.
 
-    Explicit override via LOG_FORMAT takes priority; otherwise auto-detect from
-    whether stdout is a TTY (terminal → human-readable, container/CI → JSON).
+    Explicit override via settings.LOG_FORMAT takes priority; otherwise
+    auto-detect from whether stdout is a TTY (terminal → human-readable,
+    container/CI → JSON).
     """
-    explicit = os.environ.get("LOG_FORMAT", "").lower()
+    explicit = (settings.LOG_FORMAT or "").lower()
     if explicit == "json":
         return True
     if explicit == "text":
@@ -133,7 +133,7 @@ def _use_json() -> bool:
 
 
 def configure_logging() -> None:
-    """Apply logging config. Must be called after load_dotenv()."""
+    """Apply logging config."""
     if _use_json():
         LOGGING_CONFIG["formatters"]["default"] = {"()": JsonFormatter}
         LOGGING_CONFIG["formatters"]["access"] = {"()": JsonFormatter}
@@ -152,7 +152,7 @@ def configure_logging() -> None:
     # the "app" namespace as the parent means app.main, app.services.*, and
     # app.routers.* all propagate here and stop (propagate=False prevents
     # further fallthrough to the root logger, which uvicorn leaves unconfigured).
-    app_level = os.environ.get("LOG_LEVEL", "INFO").upper()
+    app_level = settings.LOG_LEVEL.upper()
     LOGGING_CONFIG["loggers"]["app"] = {
         "handlers": ["default"],
         "level": app_level,

@@ -12,47 +12,19 @@ uv sync --group dev
 ```
 
 ```bash
-# Run the development server (.env is loaded automatically if present)
+# Run the development server
 uv run uvicorn app.main:app --reload
 ```
 
-To enable debug-level application logs (e.g. to see sub-daily timestamp collisions or cache internals):
+All server configuration (timezone, cache backend, S3 timeouts, log level, etc.) lives in [`src/app/config/settings.py`](src/app/config/settings.py) as plain constants — no env vars, no `.env` file. To change a value, edit the file and restart the server.
 
-```bash
-LOG_LEVEL=DEBUG uv run uvicorn app.main:app --reload
-```
-
-`LOG_LEVEL` accepts any standard Python log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`). Default is `INFO`.
+To enable debug-level application logs (e.g. to see sub-daily timestamp collisions or cache internals), set `LOG_LEVEL = "DEBUG"` in `settings.py`.
 
 Server available at `http://localhost:8000`. Interactive API docs at `http://localhost:8000/docs`.
 
-### Docker
-
-To enable debug logs, add `LOG_LEVEL=DEBUG` to a `.env` file in the project root (logs go to CloudWatch in JSON format):
-
-```bash
-LOG_LEVEL=DEBUG
-```
-
-```bash
-# Build and start
-docker compose up --build
-
-# Run in background
-docker compose up -d --build
-
-# Stop
-docker compose down
-
-# Tail logs
-docker compose logs -f
-```
-
-Server is available at `http://localhost:80`.
-
 ## Important: date timezone convention
 
-> **Warning:** All dates in the API (`{date}` path params, `from`/`to` query params, `available_dates` responses) are in the server's configured local timezone. This is controlled by the `TILE_TIMEZONE` env var (default `Australia/Sydney` — AEST/AEDT). To deploy this server for a different region, set `TILE_TIMEZONE` to any valid IANA timezone name (e.g. `America/New_York`, `Europe/London`) in `.env` or `docker-compose.yml` before starting — all date conversion will use that timezone automatically.
+> **Warning:** All dates in the API (`{date}` path params, `from`/`to` query params, `available_dates` responses) are in the server's configured local timezone. This is controlled by the `TILE_TIMEZONE` constant in `src/app/config/settings.py` (default `Australia/Sydney` — AEST/AEDT). To deploy this server for a different region, set `TILE_TIMEZONE` to any valid IANA timezone name (e.g. `America/New_York`, `Europe/London`) before starting — all date conversion will use that timezone automatically.
 >
 > The underlying Zarr store timestamps are always UTC. The server converts between them internally.
 >

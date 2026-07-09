@@ -1,11 +1,3 @@
-import os
-
-# Pin the cache backend before any `app` import runs `load_dotenv()`, so the
-# suite is hermetic regardless of CACHE_BACKEND set in a developer's local
-# .env. Tests that need the redis backend set CACHE_BACKEND themselves and
-# monkeypatch get_redis_client (see test_backend_factory.py).
-os.environ["CACHE_BACKEND"] = "none"
-
 import pytest
 
 from app.services.product.product import Product

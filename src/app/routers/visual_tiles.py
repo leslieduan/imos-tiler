@@ -1,12 +1,12 @@
 import asyncio
 import functools
-import os
 
 import anyio
 from fastapi import APIRouter, HTTPException, Path, Query
 from fastapi.openapi.models import Example
 from fastapi.responses import Response
 
+from app.config.settings import ANIMATION_WORKERS
 from app.schemas.visual_tiles import ColormapListResponse
 from app.services.caching.deduper import Deduper
 from app.services.colormap.legend import render_legend
@@ -44,7 +44,7 @@ _MAX_ANIMATION_FRAMES = 30
 # pool as a *separate* concurrency budget from tile handlers — a 30-frame
 # request cannot starve tile-handler slots. Sized to the aiobotocore S3
 # connection-pool ceiling (~10/host) — going higher just queues on the pool.
-_ANIMATION_LIMITER = anyio.CapacityLimiter(int(os.environ.get("ANIMATION_WORKERS", 10)))
+_ANIMATION_LIMITER = anyio.CapacityLimiter(ANIMATION_WORKERS)
 
 router = APIRouter()
 router.include_router(products_router)

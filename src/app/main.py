@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import os
 from contextlib import asynccontextmanager
 
 import anyio
@@ -10,6 +9,7 @@ from fastapi.responses import JSONResponse
 from starlette.middleware.cors import CORSMiddleware
 from starlette.middleware.gzip import GZipMiddleware
 
+from app.config import settings
 from app.config.log_config import configure_logging
 from app.routers.data_tiles import router as data_tiles_router
 from app.routers.visual_tiles import router as visual_tiles_router
@@ -27,17 +27,17 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     limiter = anyio.to_thread.current_default_thread_limiter()
-    limiter.total_tokens = int(os.environ.get("THREAD_POOL_SIZE", 100))
+    limiter.total_tokens = settings.THREAD_POOL_SIZE
     logger.info("Thread pool size set", extra={"thread_pool_size": limiter.total_tokens})
     load_products()
     load_colormaps()
     logger.info(
         "Cache configured",
         extra={
-            "cache_backend": os.environ.get("CACHE_BACKEND", "none"),
-            "slice_cache_ttl_seconds": int(os.environ.get("SLICE_CACHE_TTL_SECONDS", 600)),
-            "processed_cache_ttl_seconds": int(os.environ.get("PROCESSED_CACHE_TTL_SECONDS", 600)),
-            "store_ttl_seconds": int(os.environ.get("STORE_TTL_SECONDS", 600)),
+            "cache_backend": settings.CACHE_BACKEND,
+            "slice_cache_ttl_seconds": settings.SLICE_CACHE_TTL_SECONDS,
+            "processed_cache_ttl_seconds": settings.PROCESSED_CACHE_TTL_SECONDS,
+            "store_ttl_seconds": settings.STORE_TTL_SECONDS,
         },
     )
 

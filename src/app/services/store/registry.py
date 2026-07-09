@@ -13,24 +13,24 @@ instead of converting every timestamp on the hot path.
 import asyncio
 import concurrent.futures
 import logging
-import os
 import threading
 import time
 
 import anyio
 import xarray as xr
 
+from app.config import settings
 from app.config.constants import COORD_NAMES
 from app.utils.dates import ts_to_local_date
 
 logger = logging.getLogger(__name__)
 
-_STORE_TTL = float(os.environ.get("STORE_TTL_SECONDS", 600))
+_STORE_TTL = float(settings.STORE_TTL_SECONDS)
 
 # Capacity gate for concurrent store opens during prewarm. Bounded to the S3
 # connection ceiling, not CPU. Runs on the shared anyio pool but a separate
 # budget so a many-product startup can't transiently consume tile-handler slots.
-_STORE_PREWARM_LIMITER = anyio.CapacityLimiter(int(os.environ.get("STORE_PREWARM_WORKERS", 8)))
+_STORE_PREWARM_LIMITER = anyio.CapacityLimiter(settings.STORE_PREWARM_WORKERS)
 
 # Per-syscall timeouts on every S3 connection. Without these, a stuck socket can
 # pin a worker thread indefinitely (Python threads can't be cancelled, so a
@@ -40,9 +40,9 @@ _STORE_PREWARM_LIMITER = anyio.CapacityLimiter(int(os.environ.get("STORE_PREWARM
 # and passes it as `config=` to create_client, so a `config` key in client_kwargs
 # collides with that positional and raises TypeError.
 _S3_CONFIG_KWARGS = {
-    "connect_timeout": int(os.environ.get("S3_CONNECT_TIMEOUT", 5)),
-    "read_timeout": int(os.environ.get("S3_READ_TIMEOUT", 30)),
-    "retries": {"max_attempts": int(os.environ.get("S3_MAX_ATTEMPTS", 2)), "mode": "standard"},
+    "connect_timeout": settings.S3_CONNECT_TIMEOUT,
+    "read_timeout": settings.S3_READ_TIMEOUT,
+    "retries": {"max_attempts": settings.S3_MAX_ATTEMPTS, "mode": "standard"},
 }
 
 
@@ -50,15 +50,14 @@ def _storage_options(store_url: str) -> dict:
     """Storage-backend options for fsspec/zarr, derived from the URL scheme.
 
     - ``s3://`` defaults to anonymous access (IMOS's AODN buckets are public). Set
-      ``S3_ANON=false`` to let fsspec discover AWS credentials via the standard
-      chain (env vars → ``~/.aws/credentials`` → IAM role) — needed for private
-      buckets.
+      ``settings.S3_ANON = False`` to let fsspec discover AWS credentials via the
+      standard chain (env vars → ``~/.aws/credentials`` → IAM role) — needed for
+      private buckets.
     - Other schemes (``file://``, ``https://``, ``gs://``, plain paths …) pass no
       options; fsspec / its backend picks sensible defaults.
     """
     if store_url.startswith("s3://"):
-        anon = os.environ.get("S3_ANON", "true").lower() not in ("false", "0", "no")
-        return {"anon": anon, "config_kwargs": _S3_CONFIG_KWARGS}
+        return {"anon": settings.S3_ANON, "config_kwargs": _S3_CONFIG_KWARGS}
     return {}
 
 

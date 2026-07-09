@@ -1,13 +1,14 @@
 """Pure date utility functions shared across routers and services."""
 
-import os
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 
+from app.config.settings import TILE_TIMEZONE
+
 # All date strings exposed by the API are local dates in this timezone.
 # Requests must send them back unchanged.
-LOCAL_TZ = ZoneInfo(os.environ.get("TILE_TIMEZONE", "Australia/Sydney"))
+LOCAL_TZ = ZoneInfo(TILE_TIMEZONE)
 
 
 def ts_to_local_date(ts) -> str:

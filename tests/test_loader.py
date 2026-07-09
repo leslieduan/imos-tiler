@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 import xarray as xr
 
+from app.config import settings
 from app.services.product.product import Product, get_lod_grids
 from app.services.store.registry import _storage_options, get_store, store_registry
 
@@ -70,15 +71,14 @@ def test_get_lod_grids_fast_path_skips_store(monkeypatch):
     assert not opened
 
 
-def test_storage_options_s3_defaults_anon(monkeypatch):
-    monkeypatch.delenv("S3_ANON", raising=False)
+def test_storage_options_s3_defaults_anon():
     opts = _storage_options("s3://bucket/path.zarr")
     assert opts["anon"] is True
     assert "connect_timeout" in opts["config_kwargs"]
 
 
-def test_storage_options_s3_anon_disabled_via_env(monkeypatch):
-    monkeypatch.setenv("S3_ANON", "false")
+def test_storage_options_s3_anon_disabled(monkeypatch):
+    monkeypatch.setattr(settings, "S3_ANON", False)
     opts = _storage_options("s3://bucket/path.zarr")
     assert opts["anon"] is False
     assert "connect_timeout" in opts["config_kwargs"]

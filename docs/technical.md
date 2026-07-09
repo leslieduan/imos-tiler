@@ -33,7 +33,7 @@
 
 13. [Adding a new product](#13-adding-a-new-product)
 14. [Capacity and resource planning](#14-capacity-and-resource-planning)
-15. [Environment variables](#15-environment-variables)
+15. [Configuration constants](#15-configuration-constants)
 16. [Logging](#16-logging)
 
 ---
@@ -144,7 +144,8 @@ imos-tiler/
       paths.py                   ← PRODUCTS_CONFIG_PATH, COLORMAPS_CONFIG_PATH, LAND_MASK_PATH, OCEAN_MASK_PATH
       products.json               ← static product config, committed with the code — see §13
       colormaps.json              ← static custom-colormap config, committed with the code
-      log_config.py              ← logging setup (JSON in Docker, coloured text locally)
+      log_config.py              ← logging setup (JSON when stdout isn't a TTY, coloured text locally)
+      settings.py                ← app configuration constants (timezone, cache backend, S3 timeouts, thread pool, log level) — see §13
     routers/
       shared.py                  ← shared router helpers (PRODUCT_EX/DATE_EX examples, get_product_or_404, load_slice_or_404)
       public/                    ← public tile endpoints (package)
@@ -180,8 +181,6 @@ imos-tiler/
       geo.py                     ← dataset_bounds + json_safe_float
       colors.py                  ← hex parsing + ramp/categorical LUT builders
       image.py                   ← encode_rgba(arr, fmt) + empty_tile(fmt) + media_type(fmt) — PNG/WebP encoders shared by both renderers
-  docker/
-    Dockerfile
   tests/
   docs/
     technical.md                 ← this file
@@ -197,7 +196,7 @@ These paths are constants in `src/app/config/paths.py`, all resolved relative to
 | `LAND_MASK_PATH`        | packaged asset          | Committed coastline raster used by coastal fill; see [§7.6](#76-coastal-fill-sparse-products).                 |
 | `OCEAN_MASK_PATH`       | packaged asset          | Committed valid-domain raster used by the ocean-validity mask; see [§7.6](#76-coastal-fill-sparse-products).   |
 
-**Load-order note.** Module-level env reads (e.g. `caching/slice_cache.py`'s `SLICE_CACHE_TTL_SECONDS`, are captured at **module-import** time, so `.env` must already be loaded by then. That is why `load_dotenv()` lives in `src/app/__init__.py` (which Python runs before any `app.*` submodule import) rather than in `main.py` — a `load_dotenv()` after `main.py`'s config imports would be too late and the module would capture the compiled-in default. A real environment variable (shell `export` / Docker `environment:`) still overrides `.env`, since `load_dotenv()` does not clobber existing vars.
+**Configuration note.** There is no `.env` file and no env-var overrides — every operational knob lives as a plain Python constant in `config/settings.py` (e.g. `caching/slice_cache.py`'s `SLICE_CACHE_TTL_SECONDS`), read at **module-import** time. To change a value, edit `settings.py` and restart the server — same pattern as editing `products.json`/`colormaps.json`.
 
 ---
 
@@ -742,7 +741,7 @@ Conventions applied at store-open and date-parsing time so that all downstream c
 | Zarr store `time` coordinate | UTC — numpy `datetime64[ns]` is always UTC by convention                              |
 | API request/response dates   | Local time in `TILE_TIMEZONE` (default `Australia/Sydney`, AEST UTC+10 / AEDT UTC+11) |
 
-`TILE_TIMEZONE` is an IANA timezone name read at startup. To deploy this server for a different region, set it in `.env` or `docker-compose.yml` before starting — no code changes needed. All date conversion (manifest output, tile request matching, error messages) uses the configured timezone automatically.
+`TILE_TIMEZONE` is an IANA timezone name constant in `config/settings.py`. To deploy this server for a different region, edit that constant and restart — no other code changes needed. All date conversion (manifest output, tile request matching, error messages) uses the configured timezone automatically.
 
 All satellite passes over Australia occur during Australian daytime. Their UTC timestamps typically fall on the **previous UTC day** (e.g. a pass at `2022-06-01 01:20 AEST` is `2022-05-31 15:20 UTC`). Comparing UTC dates to local request dates directly would return a 404 for every such record.
 
@@ -750,10 +749,10 @@ All satellite passes over Australia occur during Australian daytime. Their UTC t
 
 ### 9.2 How the server handles dates
 
-`LOCAL_TZ` is read once at startup from the `TILE_TIMEZONE` environment variable in `utils/dates.py`:
+`LOCAL_TZ` is built once at startup from the `TILE_TIMEZONE` constant (`config/settings.py`) in `utils/dates.py`:
 
 ```python
-LOCAL_TZ = ZoneInfo(os.environ.get("TILE_TIMEZONE", "Australia/Sydney"))
+LOCAL_TZ = ZoneInfo(TILE_TIMEZONE)
 
 def ts_to_local_date(ts) -> str:
     return str(pd.Timestamp(ts).tz_localize("UTC").tz_convert(LOCAL_TZ).strftime("%Y-%m-%d"))
@@ -793,7 +792,7 @@ If `lat`/`lon` are still missing after renaming, `_open_store` raises `ValueErro
 
 This section covers the **server-side cache stack** (tile → S3). For **HTTP caching** (Cache-Control headers, ETag revalidation, CACHE_VERSION invalidation through browsers and CloudFront), see [`docs/http_caching.md`](http_caching.md) — a separate concern with its own design.
 
-Two-tier cache stack ordered tiles → S3: **L1 (processed grid) → L2 (slice) → S3**. Both tiers are backed by a `CacheBackend` implementation selected via the `CACHE_BACKEND` env var (default `none`, see [§10.5](#105-selectable-backend-redis-vs-none)). There is **no on-disk cache layer** — an L2 miss falls straight through to a live Zarr read on S3 (`.compute()`, ~2 s for a satellite-class slice). With `CACHE_BACKEND=none` (the default), there is no cache at all: every request recomputes from S3, and nothing persists across a server restart. With `CACHE_BACKEND=redis`, cached values live in a shared ElastiCache endpoint rather than the app process, so they persist across an individual instance's restart (but not across a Redis flush/failover). `store_prewarm_task` ([§11](#11-background-tasks)) only warms Zarr store _metadata_ at startup — it does not populate L2 with slice data.
+Two-tier cache stack ordered tiles → S3: **L1 (processed grid) → L2 (slice) → S3**. Both tiers are backed by a `CacheBackend` implementation selected via the `CACHE_BACKEND` constant in `config/settings.py` (default `none`, see [§10.5](#105-selectable-backend-redis-vs-none)). There is **no on-disk cache layer** — an L2 miss falls straight through to a live Zarr read on S3 (`.compute()`, ~2 s for a satellite-class slice). With `CACHE_BACKEND=none` (the default), there is no cache at all: every request recomputes from S3, and nothing persists across a server restart. With `CACHE_BACKEND=redis`, cached values live in a shared ElastiCache endpoint rather than the app process, so they persist across an individual instance's restart (but not across a Redis flush/failover). `store_prewarm_task` ([§11](#11-background-tasks)) only warms Zarr store _metadata_ at startup — it does not populate L2 with slice data.
 
 > An on-disk L3 tier existed in an earlier version of this server (design rationale: disk vs Redis vs EFS vs Fargate ephemeral) but has since been removed.
 
@@ -857,10 +856,10 @@ Outside this pairing, `StoreRegistry._in_flight` deduplicates store opens with i
 
 ### 10.5 Selectable backend: Redis vs none
 
-L1 and L2 both go through `CacheBackend` (`services/caching/memoizer.py`), an interface with one method — `get_or_compute(key, factory)` — implemented by two backends, chosen once at import time by `services/caching/backend_factory.create_memoizer()` via the `CACHE_BACKEND` env var:
+L1 and L2 both go through `CacheBackend` (`services/caching/memoizer.py`), an interface with one method — `get_or_compute(key, factory)` — implemented by two backends, chosen once at import time by `services/caching/backend_factory.create_memoizer()` via the `CACHE_BACKEND` constant in `config/settings.py`:
 
 - **`none`** (default) — `NullMemoizer`, an explicit opt-out: every call recomputes, nothing is cached or deduplicated. No cache infrastructure required; the accepted cost is that every L1/L2 request pays full resample/S3 cost.
-- **`redis`** — `RedisMemoizer` (`services/caching/memoizer.py`), backed by a single ElastiCache (Redis, cluster-mode-disabled) endpoint shared by every instance, configured via `REDIS_URL` (`rediss://` for in-transit TLS). Cache values are `pickle`d (numpy arrays for L1, `xr.Dataset` for L2 — both picklable; the network + serialize round-trip is single-digit-to-tens of ms, far cheaper than the ~2 s S3 fetch it's protecting against). Cross-instance single-flight dedup:
+- **`redis`** — `RedisMemoizer` (`services/caching/memoizer.py`), backed by a single ElastiCache (Redis, cluster-mode-disabled) endpoint shared by every instance, configured via the `REDIS_URL` constant (`rediss://` for in-transit TLS). Cache values are `pickle`d (numpy arrays for L1, `xr.Dataset` for L2 — both picklable; the network + serialize round-trip is single-digit-to-tens of ms, far cheaper than the ~2 s S3 fetch it's protecting against). Cross-instance single-flight dedup:
   - **Lock**: `SET lock_key token NX EX <REDIS_LOCK_TTL_SECONDS, default 30>` — the first instance to win the key computes; the TTL bounds how long a crashed holder can block everyone else. Released via a `WATCH`/`MULTI`/`EXEC` transaction that only deletes the key if the token still matches (so an instance never deletes a lock it no longer owns) — not redis-py's built-in `Lock`, since that releases via an `EVALSHA`'d Lua script and `fakeredis` (used in tests) doesn't implement scripting.
   - **Wakeup**: a losing instance subscribes to a per-key pub/sub channel _before_ re-checking the cache (closes the race where the holder finishes between the failed lock-acquire and the subscribe call), then blocks on `get_message(timeout=REDIS_WAIT_TIMEOUT_SECONDS, default 15)`. The published message is just a signal, never the payload — the actual value is always read back via a normal `GET`, so a missed or late message can't strand a waiter.
   - **Crash recovery**: if the wait times out, the instance falls through and attempts to acquire the lock itself, becoming the new holder and retrying the computation.
@@ -881,7 +880,7 @@ The server runs one long-lived background task scheduled on the event loop at st
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     limiter = anyio.to_thread.current_default_thread_limiter()
-    limiter.total_tokens = int(os.environ.get("THREAD_POOL_SIZE", 100))
+    limiter.total_tokens = settings.THREAD_POOL_SIZE
 
     load_products()                      # sync: read products.json into PRODUCTS dict
     load_colormaps()                     # sync: read colormaps.json into the colormap registry
@@ -993,7 +992,7 @@ The thread pool stops being the bottleneck during I/O wait.
 
 ```python
 limiter = anyio.to_thread.current_default_thread_limiter()
-limiter.total_tokens = int(os.environ.get("THREAD_POOL_SIZE", 100))
+limiter.total_tokens = settings.THREAD_POOL_SIZE
 ```
 
 The pool has `THREAD_POOL_SIZE` slots (default 100). Each in-flight sync request occupies one slot from the start of the handler to its return. The Python GIL means only one thread executes CPU-bound Python at a time, but:
@@ -1308,89 +1307,87 @@ Since there is no app-level cache RAM to plan around, instance sizing reduces to
 |      100 (default) |                    ~6 GB |            ~6.4 GB | `m6i.xlarge` (16 GB)                                  |
 |                200 |                   ~12 GB |           ~12.4 GB | `m6i.2xlarge` (32 GB)                                 |
 
-At scale (many products, high sustained traffic), horizontal scale-out behind CloudFront is generally preferred over a single large node for cost and resilience — each replica is sized independently per the table above, and all replicas read from the same S3 stores. If moving to `CACHE_BACKEND=redis` to share cache state across replicas, ElastiCache node sizing is a separate exercise: size for `(distinct hot (product, date) pairs) × avg entry size`, governed by TTL and `maxmemory-policy`, not by any app env var.
+At scale (many products, high sustained traffic), horizontal scale-out behind CloudFront is generally preferred over a single large node for cost and resilience — each replica is sized independently per the table above, and all replicas read from the same S3 stores. If moving to `CACHE_BACKEND=redis` to share cache state across replicas, ElastiCache node sizing is a separate exercise: size for `(distinct hot (product, date) pairs) × avg entry size`, governed by TTL and `maxmemory-policy`, not by any app-level constant.
 
 > Full capacity-per-request-type tables (hot / cold throughput per request) are in [§12.8](#128-per-request-capacity-origin-server-ec2ecs-in-region) and [§12.9](#129-scaling-thread_pool_size).
 
-## 15. Environment variables
+## 15. Configuration constants
 
-Consolidated reference. Defaults match the application code; the Docker Compose overrides in `docker-compose.yml` use the same defaults.
+Consolidated reference for `config/settings.py`. There are no env vars and no `.env` file — every operational knob is a plain constant, edited in place and picked up on the next server restart.
 
 ### 15.1 Configuration philosophy — where does a new tunable belong?
 
-This codebase holds configuration in three places. Both env vars and code constants are evaluated once at startup, so from a "when does it take effect" perspective they are equivalent — the choice of layer is a deliberate **signal** about how a value should change, not a runtime distinction.
+This codebase holds configuration in three places. All are Python constants evaluated once at startup, so from a "when does it take effect" perspective they are equivalent — the choice of layer is a deliberate **signal** about how a value should change, not a runtime distinction.
 
-| Layer                                           | What lives here                                                                                          | Change discipline                                                               | Examples                                                                                           |
-| ----------------------------------------------- | -------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| **Env vars** (this section)                     | Operational knobs — perf, resource limits, secrets. Do **not** affect wire format or shader contract.    | Rotate freely at deploy; the value itself doesn't need code review.             | `THREAD_POOL_SIZE`, `CACHE_BACKEND`, `STORE_TTL_SECONDS`                                           |
-| **Code constants** (`config/constants.py`)      | Wire / shader contracts — values that must stay in lockstep with the frontend or with the data encoding. | Change via PR so frontend and server stay in sync; the diff is the audit trail. | `LOD.max_lods`, `LOD.min_coarsest`, `LOD.zoom_thresholds`, `CHUNK_PX`, `PADDING` (global defaults) |
-| **Per-product fields** (`config/products.json`) | Data characteristics that legitimately vary across products.                                             | Set per product in the config file; redeploy.                                   | `chunk_px`, `padding`, `variable`, `source_path`                                                   |
+| Layer                                            | What lives here                                                                                          | Change discipline                                                                | Examples                                                                                             |
+| ------------------------------------------------- | --------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| **`config/settings.py`** (this section)          | Operational knobs — perf, resource limits, backend selection. Do **not** affect wire format or shader contract. | Edit directly; the value itself doesn't need coordinated frontend review.       | `THREAD_POOL_SIZE`, `CACHE_BACKEND`, `STORE_TTL_SECONDS`                                             |
+| **`config/constants.py`**                        | Wire / shader contracts — values that must stay in lockstep with the frontend or with the data encoding. | Change via PR so frontend and server stay in sync; the diff is the audit trail. | `LOD.max_lods`, `LOD.min_coarsest`, `LOD.zoom_thresholds`, `CHUNK_PX`, `PADDING` (global defaults)   |
+| **Per-product fields** (`config/products.json`)  | Data characteristics that legitimately vary across products.                                             | Set per product in the config file; restart.                                    | `chunk_px`, `padding`, `variable`, `source_path`                                                     |
 
 **The rule when adding a new tunable**: ask _who needs to be informed when the value changes?_
 
-- Only the operator → **env var**.
-- The frontend (or any wire-format consumer) needs a matching update → **code constant**, so the change goes through code review alongside the frontend change.
+- Only the operator → **`config/settings.py`**.
+- The frontend (or any wire-format consumer) needs a matching update → **`config/constants.py`**, so the change goes through code review alongside the frontend change.
 - Only one product is affected → **per-product field** in `config/products.json`.
 
-A wrong-layer choice has real costs: making `max_lods` an env var would let an ops engineer raise it to `6` thinking "more LODs = better detail", silently overflowing the WebGL atlas's 4096×4096 (≈64 MB VRAM) cap and triggering LRU tile thrashing — rendering still works, but UX degrades through re-upload churn that ops can't easily diagnose without frontend context. Making `THREAD_POOL_SIZE` a code constant would require a redeploy and PR for every perf-tuning experiment.
+A wrong-layer choice has real costs: making `max_lods` a freely-edited operational setting would let someone raise it to `6` thinking "more LODs = better detail", silently overflowing the WebGL atlas's 4096×4096 (≈64 MB VRAM) cap and triggering LRU tile thrashing — rendering still works, but UX degrades through re-upload churn that's hard to diagnose without frontend context.
 
 ### 15.2 Server
 
-| Variable        | Default            | Description                                                                                 |
+| Constant        | Default            | Description                                                                                 |
 | --------------- | ------------------ | ------------------------------------------------------------------------------------------- |
 | `TILE_TIMEZONE` | `Australia/Sydney` | IANA timezone for date conversion. See [§9](#9-date-timezone-and-coordinate-normalisation). |
 
 ### 15.3 S3 client
 
-Tuning knobs for the botocore client used by `fsspec`/`s3fs` underneath every Zarr read. The defaults match `docker-compose.yml`; assembled into a single `botocore.Config` at module import in `services/store/registry.py` and passed through `client_kwargs` to `fsspec` for every `s3://` URL.
+Tuning knobs for the botocore client used by `fsspec`/`s3fs` underneath every Zarr read. Assembled into a single `botocore.Config` at module import in `services/store/registry.py` and passed through `client_kwargs` to `fsspec` for every `s3://` URL.
 
-| Variable             | Default | Description                                                                                                                                                                                                                                                            |
+| Constant             | Default | Description                                                                                                                                                                                                                                                            |
 | -------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `S3_ANON`            | `true`  | When `true` (or any non-`false`/`0`/`no` value), uses anonymous access — correct for the public AODN buckets. Set to `false` to let `fsspec` discover AWS credentials via env vars, `~/.aws/credentials`, or the EC2 instance role.                                    |
+| `S3_ANON`            | `True`  | Uses anonymous access — correct for the public AODN buckets. Set `False` to let `fsspec` discover AWS credentials via env vars, `~/.aws/credentials`, or an IAM role.                                                                                                  |
 | `S3_CONNECT_TIMEOUT` | `5`     | Seconds for DNS + TCP/TLS handshake. Bounds how long a stuck network state can pin a worker thread before failing — Python threads can't be cancelled, so without this an unreachable endpoint would hold the thread until the kernel eventually timed out (minutes).  |
 | `S3_READ_TIMEOUT`    | `30`    | Seconds of socket inactivity before a read fails. **Per-read**, not per-request — multi-MB Zarr chunks are fine within 30s of continuous progress; the timeout only fires when the connection genuinely stalls. Pairs with `S3_MAX_ATTEMPTS` to retry transient blips. |
 | `S3_MAX_ATTEMPTS`    | `2`     | Maximum total attempts (initial + retries) per S3 operation, using botocore's `standard` retry mode (exponential backoff on retryable errors). Keep low so a slow request fails fast instead of compounding cold-S3 latency across retries.                            |
 
 ### 15.4 Threading and cache sizing
 
-| Variable                      | Default  | Description                                                                                                                                                              |
+| Constant                      | Default  | Description                                                                                                                                                              |
 | ----------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `THREAD_POOL_SIZE`            | `100`    | Anyio thread-pool size. Each in-flight sync request uses one slot. See [§12](#12-concurrency-event-loop-and-threading).                                                  |
 | `ANIMATION_WORKERS`           | `10`     | Capacity-limiter cap for `/animation` per-frame S3 fan-out. Sized to the aiobotocore S3 connection pool. See [§12.6](#126-one-pool-two-named-budgets).                   |
 | `STORE_PREWARM_WORKERS`       | `8`      | Capacity-limiter cap for concurrent `xr.open_zarr` opens during startup store prewarm. Sized to the S3 connection pool. See [§12.6](#126-one-pool-two-named-budgets).    |
-| `SLICE_CACHE_TTL_SECONDS`     | `600`    | Per-entry TTL for the L2 slice cache. Only used when `CACHE_BACKEND=redis` — sets the Redis key TTL; unused (no cache) when `CACHE_BACKEND=none`.                        |
-| `PROCESSED_CACHE_TTL_SECONDS` | `600`    | Per-entry TTL for the L1 processed-grid cache. Same `CACHE_BACKEND=redis`-only scope as `SLICE_CACHE_TTL_SECONDS`.                                                       |
+| `SLICE_CACHE_TTL_SECONDS`     | `600`    | Per-entry TTL for the L2 slice cache. Only used when `CACHE_BACKEND = "redis"` — sets the Redis key TTL; unused (no cache) when `CACHE_BACKEND = "none"`.                |
+| `PROCESSED_CACHE_TTL_SECONDS` | `600`    | Per-entry TTL for the L1 processed-grid cache. Same `"redis"`-only scope as `SLICE_CACHE_TTL_SECONDS`.                                                                   |
 | `STORE_TTL_SECONDS`           | `600`    | Stale-while-revalidate window for the Zarr store singleton.                                                                                                              |
-| `CACHE_BACKEND`               | `none`   | Selects the L1/L2 `CacheBackend` implementation: `redis` or `none`. See [§10.5](#105-selectable-backend-redis-vs-none).                                                  |
-| `REDIS_URL`                   | _(none)_ | Connection string for the `redis` backend, e.g. `rediss://<endpoint>:6379/0` for TLS-enabled ElastiCache. Required when `CACHE_BACKEND=redis`; unused otherwise.         |
+| `CACHE_BACKEND`               | `"none"` | Selects the L1/L2 `CacheBackend` implementation: `"redis"` or `"none"`. See [§10.5](#105-selectable-backend-redis-vs-none).                                              |
+| `REDIS_URL`                   | `""`     | Connection string for the `redis` backend, e.g. `rediss://<endpoint>:6379/0` for TLS-enabled ElastiCache. Required when `CACHE_BACKEND = "redis"`; unused otherwise.     |
 | `REDIS_LOCK_TTL_SECONDS`      | `30`     | How long a cross-instance compute lock is held before it expires — bounds how long a crashed lock-holder can block other instances. Only used by the `redis` backend.    |
 | `REDIS_WAIT_TIMEOUT_SECONDS`  | `15`     | How long a losing instance waits on pub/sub for the lock-holder's result before giving up and attempting to take over the lock itself. Only used by the `redis` backend. |
 
 ### 15.5 Logging
 
-| Variable     | Default  | Description                                                                                                                                                                      |
-| ------------ | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `LOG_FORMAT` | _(auto)_ | `json` — force JSON output. `text` — force human-readable. Unset (default) — JSON when stdout is not a TTY (containers, EC2, CI), human-readable when it is (local terminal).    |
-| `LOG_LEVEL`  | `INFO`   | Application log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`). Controls `services`, `routers`, and `main` namespaces. Uvicorn's own log level is set separately via `--log-level`. |
-
-See `docker-compose.yml` for the production wiring of these variables.
+| Constant     | Default  | Description                                                                                                                                                                      |
+| ------------ | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `LOG_FORMAT` | `None`   | `"json"` — force JSON output. `"text"` — force human-readable. `None` (default) — JSON when stdout is not a TTY (containers, CI), human-readable when it is (local terminal).    |
+| `LOG_LEVEL`  | `"INFO"` | Application log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`). Controls `services`, `routers`, and `main` namespaces. Uvicorn's own log level is set separately via `--log-level`. |
 
 ---
 
 ## 16. Logging
 
-All logging configuration lives in `log_config.py`. `main.py` calls `configure_logging()` once at startup; `.env` is already loaded by then because `load_dotenv()` runs in `src/app/__init__.py` before any submodule import (see [§4](#4-file-layout)). Nothing else touches logging setup.
+All logging configuration lives in `log_config.py`. `main.py` calls `configure_logging()` once at startup. Nothing else touches logging setup.
 
 ### 16.1 Format selection
 
 Format is chosen automatically from the TTY state of stdout — no configuration needed in most environments:
 
-| Environment        | stdout TTY? | `LOG_FORMAT` | Format used                                    |
-| ------------------ | ----------- | ------------ | ---------------------------------------------- |
-| Local dev terminal | yes         | unset        | Human-readable (uvicorn default)               |
-| Docker / EC2 / CI  | no          | unset        | JSON (one object per line)                     |
-| Any                | —           | `json`       | JSON (forced)                                  |
-| Any                | —           | `text`       | Human-readable (forced, e.g. `docker run -it`) |
+| Environment        | stdout TTY? | `LOG_FORMAT` | Format used                       |
+| ------------------- | ----------- | ------------- | ---------------------------------- |
+| Local dev terminal  | yes         | `None`        | Human-readable (uvicorn default)   |
+| Container / CI      | no          | `None`        | JSON (one object per line)         |
+| Any                 | —           | `"json"`      | JSON (forced)                      |
+| Any                 | —           | `"text"`      | Human-readable (forced)            |
 
 JSON records share a single schema for both app logs and uvicorn access logs:
 
