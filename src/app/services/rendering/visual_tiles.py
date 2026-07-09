@@ -9,7 +9,6 @@ numpy arrays before the single image encode.
 """
 
 import logging
-import time
 from collections.abc import Callable, Mapping
 from typing import Any
 
@@ -41,7 +40,6 @@ def warmup_visual() -> None:
     one-time init overhead (warp kernel, projection database, rio_tiler internals).
     Synchronous; intended to be called once during startup.
     """
-    t0 = time.monotonic()
     da = xr.DataArray(
         np.zeros((16, 16), dtype=np.float32),
         dims=("lat", "lon"),
@@ -57,8 +55,6 @@ def warmup_visual() -> None:
         _img_to_rgba(img, cm)
     except Exception:
         logger.warning("Visual warmup failed", exc_info=True)
-        return
-    logger.debug("[timing] visual warmup", extra={"ms": round((time.monotonic() - t0) * 1000, 1)})
 
 
 def _img_to_rgba(img: ImageData, cm: dict[int, tuple[int, int, int, int]]) -> np.ndarray:

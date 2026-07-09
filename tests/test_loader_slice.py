@@ -1,7 +1,7 @@
 """loader.load_slice + date-index resolution.
 
 Existing tests in test_loader.py cover get_store + get_lod_grids. These cover
-the L2 cache interaction and the multi-timestamp warning path.
+the L2 cache interaction and the multi-timestamp resolution path.
 """
 
 import threading
@@ -12,7 +12,6 @@ import pandas as pd
 import pytest
 import xarray as xr
 
-import app.services.store.registry as store_registry_module
 import app.services.store.slice_loader as loader
 from app.services.store.registry import store_registry
 
@@ -62,23 +61,16 @@ def test_load_slice_unknown_date_raises_file_not_found(monkeypatch):
         loader.load_slice("s3://b/x.zarr", "1999-01-01", ["v"])
 
 
-def test_load_slice_warns_on_multiple_timestamps_per_date(monkeypatch):
-    """Two UTC timestamps mapping to the same local date should log debug but still serve."""
+def test_load_slice_uses_first_timestamp_when_multiple_map_to_same_date(monkeypatch):
+    """Two UTC timestamps mapping to the same local date should still serve,
+    using the first (index-order) timestamp's data."""
     # Two times that both land on Sydney local date 2024-01-16.
     ds = _ds_with_time(["2024-01-15T13:00:00", "2024-01-15T14:00:00"])
     monkeypatch.setattr(xr, "open_zarr", lambda *_, **__: ds)
 
-    # Debug log fires from store_registry when building the date index (once per
-    # store open), not from loader on every load. Patch that logger directly.
-    debug_calls: list = []
-    monkeypatch.setattr(
-        store_registry_module.logger, "debug", lambda *a, **kw: debug_calls.append(a)
-    )
+    result = loader.load_slice("s3://b/x.zarr", "2024-01-16", ["v"])
 
-    loader.load_slice("s3://b/x.zarr", "2024-01-16", ["v"])
-
-    assert debug_calls, "expected a debug log when multiple UTC times map to one local date"
-    assert any("Multiple timestamps" in str(args[0]) for args in debug_calls)
+    assert np.array_equal(result["v"].values, ds["v"].isel(time=0).values)
 
 
 # --- ocean_masked flag ---

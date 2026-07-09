@@ -17,6 +17,19 @@ class Deduper:
     themselves. Must be driven from a worker thread (sync ``def`` handler or
     ``anyio.to_thread.run_sync``), never directly from an ``async def`` on the
     event loop — waiting on the result is a blocking call.
+
+    Still worth it even where a ``RedisMemoizer`` (distributed lock,
+    ``CACHE_BACKEND=redis``) sits behind it:
+
+    - ``RedisMemoizer`` only dedupes when ``CACHE_BACKEND=redis`` is actually
+      configured. ``CACHE_BACKEND=none`` (this project's default) has no lock
+      at all, so this is the *only* protection against a concurrent burst
+      redoing the same work — not an optimisation on top of something else.
+    - Even with the distributed lock enabled, without this every thread in a
+      local burst would each make its own Redis round trip (a failed `SET NX`
+      + a `pubsub` subscribe + wait) to discover someone else already won.
+      This coalesces the whole local burst into one Redis contender first, so
+      only one thread per process ever touches Redis for a given key.
     """
 
     def __init__(self) -> None:

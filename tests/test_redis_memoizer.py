@@ -41,7 +41,7 @@ def test_cache_miss_computes_and_stores(server):
 
     assert m.get_or_compute("k", factory) == "computed"
     assert calls == 1
-    assert m.contains("k") is True
+    assert m.redis.exists(m._cache_key("k"))
 
 
 def test_cache_hit_skips_factory(server):
@@ -145,14 +145,9 @@ def test_exception_in_factory_releases_lock_and_does_not_cache(server):
     with pytest.raises(RuntimeError, match="boom"):
         m.get_or_compute("k", failing)
 
-    assert m.contains("k") is False
+    assert not m.redis.exists(m._cache_key("k"))
     assert m.redis.exists(m._lock_key("k")) == 0  # lock released, not left dangling
 
     # A later call must not be poisoned by the earlier failure.
     assert m.get_or_compute("k", lambda: "ok") == "ok"
     assert calls == 1
-
-
-def test_contains_false_when_missing(server):
-    m = make_memoizer(server)
-    assert m.contains("nope") is False

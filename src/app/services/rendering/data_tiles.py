@@ -11,9 +11,7 @@ each of R/G with the mask in B (alpha stays opaque so the shader can use B as
 data).
 """
 
-import logging
 import math
-import time
 from collections.abc import Callable
 
 import numpy as np
@@ -28,8 +26,6 @@ from app.services.rendering.masks import (
     land_mask_for_grid,
 )
 from app.utils.image import encode_rgba
-
-logger = logging.getLogger(__name__)
 
 # Always in-process, independent of CACHE_BACKEND — see Deduper's docstring
 # for why this matters even (especially) under CACHE_BACKEND=none.
@@ -67,15 +63,12 @@ def _compute_processed(
     total_h = grid_rows * product.chunk_px[1]
     variables = product.variables
 
-    t0 = time.monotonic()
     raw = resample_variables_to_grid(ds, variables, total_w, total_h)
     # Sparse products (e.g. GSLA): extend valid data toward the coast before
     # normalising, so the filled cells register as valid in the per-variable mask.
     if product.coastal_fill is not None:
         raw = [inpaint_nearest(r, product.coastal_fill.max_dist_px) for r in raw]
-    resample_ms = (time.monotonic() - t0) * 1000
 
-    t0 = time.monotonic()
     # Scalar: pack one value across 3 bytes (R/G/B) for sub-percent precision over the
     # data range. Multi-variable: one byte per channel — precision drops to ~0.4%, but
     # the frontend shader needs each channel independently addressable.
@@ -107,18 +100,7 @@ def _compute_processed(
         # onto land.
         land = land_mask_for_grid(lon_min, lon_max, lat_min, lat_max, total_w, total_h)
         ocean = ocean & ~land
-    normalize_ms = (time.monotonic() - t0) * 1000
 
-    logger.debug(
-        "[timing] processed grid built",
-        extra={
-            "product_id": product.id,
-            "lod": lod,
-            "grid_px": f"{total_w}x{total_h}",
-            "resample_ms": round(resample_ms, 1),
-            "normalize_ms": round(normalize_ms, 1),
-        },
-    )
     return normalised, ocean
 
 
@@ -177,19 +159,11 @@ def _extract_chunk(
 def render_tile(
     product: Product, load_ds: Callable[[], xr.Dataset], lod: int, cx: int, cy: int, date: str
 ) -> bytes:
-    t_total = time.monotonic()
-    key = (product.source_path, date, tuple(product.variables), lod)
-    l1_hit = processed_memo.contains(key)
-
-    t0 = time.monotonic()
     normalised, ocean = _get_processed(product, load_ds, lod, date)
-    get_processed_ms = (time.monotonic() - t0) * 1000
 
     grid_cols, grid_rows = product.lod_grids[lod]
     total_w = grid_cols * product.chunk_px[0]
     total_h = grid_rows * product.chunk_px[1]
-
-    t0 = time.monotonic()
 
     def chunk_of(arr: np.ndarray) -> np.ndarray:
         return _extract_chunk(arr, cx, cy, total_w, total_h, product.chunk_px, product.padding)
@@ -217,24 +191,4 @@ def render_tile(
         img[:, :, 2] = chunk_m * 255
         img[:, :, 3] = 255
 
-    pack_ms = (time.monotonic() - t0) * 1000
-
-    t0 = time.monotonic()
-    png = encode_rgba(img)
-    encode_ms = (time.monotonic() - t0) * 1000
-
-    logger.debug(
-        "[timing] tile rendered",
-        extra={
-            "product_id": product.id,
-            "date": date,
-            "lod": lod,
-            "tile": f"{cx}/{cy}",
-            "l1_hit": l1_hit,
-            "get_processed_ms": round(get_processed_ms, 1),
-            "pack_ms": round(pack_ms, 1),
-            "encode_ms": round(encode_ms, 1),
-            "total_ms": round((time.monotonic() - t_total) * 1000, 1),
-        },
-    )
-    return png
+    return encode_rgba(img)

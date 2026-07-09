@@ -14,11 +14,5 @@ def test_null_memoizer_always_recomputes():
     assert m.get_or_compute("k", factory) == 2
 
 
-def test_null_memoizer_contains_always_false():
-    m = NullMemoizer()
-    m.get_or_compute("k", lambda: "v")
-    assert m.contains("k") is False
-
-
 def test_null_memoizer_is_a_cache_backend():
     assert isinstance(NullMemoizer(), CacheBackend)

@@ -190,14 +190,14 @@ imos-tiler/
 
 These paths are constants in `src/app/config/paths.py`, all resolved relative to the package (not the CWD) since they're static assets shipped with the code, not runtime-writable state:
 
-| Constant                | Default               | Notes                                                                                       |
-| ----------------------- | --------------------- | -------------------------------------------------------------------------------------------- |
+| Constant                | Default                 | Notes                                                                                                          |
+| ----------------------- | ----------------------- | -------------------------------------------------------------------------------------------------------------- |
 | `PRODUCTS_CONFIG_PATH`  | `config/products.json`  | Committed with the code; edit + redeploy to add/remove/change a product — see [§13](#13-adding-a-new-product). |
-| `COLORMAPS_CONFIG_PATH` | `config/colormaps.json` | Same as above, for custom colormaps.                                                          |
-| `LAND_MASK_PATH`        | packaged asset        | Committed coastline raster used by coastal fill; see [§7.6](#76-coastal-fill-sparse-products). |
-| `OCEAN_MASK_PATH`       | packaged asset        | Committed valid-domain raster used by the ocean-validity mask; see [§7.6](#76-coastal-fill-sparse-products). |
+| `COLORMAPS_CONFIG_PATH` | `config/colormaps.json` | Same as above, for custom colormaps.                                                                           |
+| `LAND_MASK_PATH`        | packaged asset          | Committed coastline raster used by coastal fill; see [§7.6](#76-coastal-fill-sparse-products).                 |
+| `OCEAN_MASK_PATH`       | packaged asset          | Committed valid-domain raster used by the ocean-validity mask; see [§7.6](#76-coastal-fill-sparse-products).   |
 
-**Load-order note.** Module-level env reads (e.g. `caching/slice_cache.py`'s `SLICE_CACHE_TTL_SECONDS`, `store/slice_loader.py`'s `SLOW_FETCH_THRESHOLD_SECONDS`) are captured at **module-import** time, so `.env` must already be loaded by then. That is why `load_dotenv()` lives in `src/app/__init__.py` (which Python runs before any `app.*` submodule import) rather than in `main.py` — a `load_dotenv()` after `main.py`'s config imports would be too late and the module would capture the compiled-in default. A real environment variable (shell `export` / Docker `environment:`) still overrides `.env`, since `load_dotenv()` does not clobber existing vars.
+**Load-order note.** Module-level env reads (e.g. `caching/slice_cache.py`'s `SLICE_CACHE_TTL_SECONDS`, are captured at **module-import** time, so `.env` must already be loaded by then. That is why `load_dotenv()` lives in `src/app/__init__.py` (which Python runs before any `app.*` submodule import) rather than in `main.py` — a `load_dotenv()` after `main.py`'s config imports would be too late and the module would capture the compiled-in default. A real environment variable (shell `export` / Docker `environment:`) still overrides `.env`, since `load_dotenv()` does not clobber existing vars.
 
 ---
 
@@ -318,10 +318,10 @@ GET /{prefix}/{product_id}/{date}/point?lat=&lon=                → variable va
 
 `/manifest` parameters:
 
-| Parameter | Default                            | Description                       |
-| --------- | ---------------------------------- | --------------------------------- |
+| Parameter | Default                                | Description                       |
+| --------- | -------------------------------------- | --------------------------------- |
 | `from`    | each product's earliest available date | Start date inclusive (YYYY-MM-DD) |
-| `to`      | unbounded                          | End date inclusive (YYYY-MM-DD)   |
+| `to`      | unbounded                              | End date inclusive (YYYY-MM-DD)   |
 
 ```json
 {
@@ -343,7 +343,7 @@ GET /{prefix}/{product_id}/{date}/point?lat=&lon=                → variable va
 
 **Performance**: dates are read from the `time` coordinate of each Zarr store — a 1-D array held in the store singleton. No spatial data chunks are touched. Filtering is an in-memory string comparison. Responses are sub-millisecond once the store is warm.
 
-**`/inspect` — store introspection.** Returns a description of the product's underlying Zarr store: dimension sizes, and for each declared variable its `dimensions`, `shape`, `dtype`, native on-disk `chunks`, `units`, and `attributes`, plus the dataset's global `attributes`. Unlike `/manifest` (which describes a single date's slice and serves the WebGL decode contract), `inspect` reads the **full store dataset** via `get_store` — so the reported dimensions include the `time` axis and chunk shapes reflect the on-disk Zarr layout. Only the product's *declared* variables are reported, not every array in the store. Numpy-typed attributes (np scalars/arrays, NaN/inf) are coerced to JSON-safe values. The store grows as new dates land, so it uses the same revalidate headers as `/manifest` (`max-age=300, must-revalidate`).
+**`/inspect` — store introspection.** Returns a description of the product's underlying Zarr store: dimension sizes, and for each declared variable its `dimensions`, `shape`, `dtype`, native on-disk `chunks`, `units`, and `attributes`, plus the dataset's global `attributes`. Unlike `/manifest` (which describes a single date's slice and serves the WebGL decode contract), `inspect` reads the **full store dataset** via `get_store` — so the reported dimensions include the `time` axis and chunk shapes reflect the on-disk Zarr layout. Only the product's _declared_ variables are reported, not every array in the store. Numpy-typed attributes (np scalars/arrays, NaN/inf) are coerced to JSON-safe values. The store grows as new dates land, so it uses the same revalidate headers as `/manifest` (`max-age=300, must-revalidate`).
 
 ```json
 {
@@ -450,10 +450,10 @@ GET /visual_tiles/{product_id}/{from_date}/{to_date}/animation.{ext}
 
 **Caching design** — this endpoint deliberately differs from the other tile endpoints:
 
-| Layer                      | Behaviour                                                                                                                                                                                                                                          |
-| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| L2 slice cache | **Bypassed.** Animations call `load_slice_uncached` (`services/store/slice_loader.py`) which never touches L2 and fetches straight from the Zarr store. A rare 30-frame request can therefore not evict hot slices (`CACHE_BACKEND=redis`) serving the static `/visual_tiles` and `/data_tiles` endpoints. |
-| HTTP cache headers         | **None.** No `Cache-Control` set. CloudFront/CDN configurations should treat this path as no-cache; otherwise rare requests would still incur full origin cost while occupying CDN storage.                                                        |
+| Layer              | Behaviour                                                                                                                                                                                                                                                                                                  |
+| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| L2 slice cache     | **Bypassed.** Animations call `load_slice_uncached` (`services/store/slice_loader.py`) which never touches L2 and fetches straight from the Zarr store. A rare 30-frame request can therefore not evict hot slices (`CACHE_BACKEND=redis`) serving the static `/visual_tiles` and `/data_tiles` endpoints. |
+| HTTP cache headers | **None.** No `Cache-Control` set. CloudFront/CDN configurations should treat this path as no-cache; otherwise rare requests would still incur full origin cost while occupying CDN storage.                                                                                                                |
 
 **Frame loading** — the handler is `async def`. Per-frame `load_slice_uncached` calls are dispatched in parallel via `asyncio.gather(*(anyio.to_thread.run_sync(..., limiter=_ANIMATION_LIMITER) for ...))`, so a cold N-frame request blocks on roughly the slowest single-frame S3 read rather than the serial sum. Frame order is preserved because `gather` returns results in input order. The work runs on the shared anyio pool but under `_ANIMATION_LIMITER` (`ANIMATION_WORKERS`, default 10), a budget independent of the default tile-handler budget — a 30-frame fan-out can't starve tile-handler slots. See [§12.6](#126-one-pool-two-named-budgets).
 
@@ -577,7 +577,7 @@ Opt-in per product. Disabled unless `coastal_fill` is set on the `Product` (see 
 
 **The fix (`services/rendering/masks.py`, applied in `_compute_processed`).** Two steps, both bounded so we never fabricate values far from a real measurement:
 
-1. **Inpaint** — `inpaint_nearest` extends each resampled variable toward the coast by copying the nearest valid value into NaN cells within `max_dist_px` (Euclidean, in **LOD-grid pixels**), via `scipy.ndimage.distance_transform_edt(return_indices=True)`. Cells farther than that stay NaN. Linear interpolation is the wrong tool here — the gap is at the *edge* of the data (extrapolation), not between points.
+1. **Inpaint** — `inpaint_nearest` extends each resampled variable toward the coast by copying the nearest valid value into NaN cells within `max_dist_px` (Euclidean, in **LOD-grid pixels**), via `scipy.ndimage.distance_transform_edt(return_indices=True)`. Cells farther than that stay NaN. Linear interpolation is the wrong tool here — the gap is at the _edge_ of the data (extrapolation), not between points.
 2. **Coastline cut** — `land_mask_for_grid` samples a real coastline onto the LOD grid (same `linspace` mapping as resample, longitudes wrapped to `[−180, 180)` for antimeridian domains) and the result is ANDed into the ocean mask: `ocean &= ~land`. So fabricated values that fall on land are clipped back to transparent.
 
 Because the cut writes the existing ocean-mask channel (alpha for scalar, B for UV — see [§7.5](#75-png-encoding-contract)), there is **no shader change** and the LOD contract is untouched.
@@ -591,7 +591,7 @@ Because the cut writes the existing ocean-mask channel (alpha for scalar, B for 
 - The filled band is **fabricated data** — copies of the nearest real value, least reliable exactly where the signal is least reliable. Treat it as cosmetic.
 - `max_dist_px` is in LOD-grid pixels, so its geographic reach depends on the product's grid resolution. For GSLA (~0.18°/px) `4` ≈ 0.7° ≈ ~80 km of reach before the coastline trims it.
 - Changing `max_dist_px` (or the asset) alters rendered bytes for an existing URL — bump `CACHE_VERSION` ([§7.5](#75-png-encoding-contract) note in `config/constants.py`).
-- **Visual tiles are not covered.** Mirroring this on the `/visual_tiles` (rio-tiler) pipeline by filling the *native* grid achieves almost nothing for GSLA, because its native grid already covers the ocean fully (its NaN cells are essentially land). The visible visual-tile gap is created downstream by rio-tiler's reprojection and would have to be filled at *output/tile resolution*; that is deliberately not implemented.
+- **Visual tiles are not covered.** Mirroring this on the `/visual_tiles` (rio-tiler) pipeline by filling the _native_ grid achieves almost nothing for GSLA, because its native grid already covers the ocean fully (its NaN cells are essentially land). The visible visual-tile gap is created downstream by rio-tiler's reprojection and would have to be filled at _output/tile resolution_; that is deliberately not implemented.
 
 ---
 
@@ -690,9 +690,9 @@ The data range for a categorical colormap is inferred from the key range (`min(k
 
 A colormap entry is **not** bound to a product — a categorical colormap is defined standalone, and its sorted category values are persisted alongside the LUT. The coupling is instead checked at **render time** (tile / bbox / animation) by a single gate, `_validate_categorical_request` in `services/rendering/visual_tiles.py`, which raises `ValueError` (mapped to `400 Bad Request`). It lives in the renderer rather than the router because the variable's `attrs` — the only way to tell whether the variable is categorical — are already loaded there for the render dispatch, so the checks cost no extra store read. The rules:
 
-- a categorical colormap requires a categorical variable (one with CF `flag_values`) — applied to a *continuous* variable it is rejected, since it would otherwise fall through to the scale-dependent ramp path;
+- a categorical colormap requires a categorical variable (one with CF `flag_values`) — applied to a _continuous_ variable it is rejected, since it would otherwise fall through to the scale-dependent ramp path;
 - a categorical colormap's category values must exactly equal the variable's `flag_values` — e.g. keys `{1, 2, 3, 4}` on a variable whose `flag_values` are `{0, 1, 2, 3, 4}` is rejected rather than silently shifting every colour by one slot;
-- a categorical variable rejects an explicit *continuous* colormap (pass a categorical one or omit it for the default palette); and
+- a categorical variable rejects an explicit _continuous_ colormap (pass a categorical one or omit it for the default palette); and
 - a categorical variable rejects lossy `.webp` / animated WebP output (see §8.4).
 
 Practical rules:
@@ -719,7 +719,7 @@ Why both formats:
 - **PNG** is lossless; the only safe choice for categorical colormaps (hard colour boundaries) and the default everywhere else for backward compatibility.
 - **WebP (lossy, q=85)** is typically 40–70% smaller than PNG for smooth colour ramps — the common visual-tile case. Encode time is comparable to PNG (lossy WebP is fast; lossless WebP is the slow one and is not exposed here). The visual quality difference is imperceptible for ocean-render output.
 
-**Categorical variables reject `.webp`** (and animated WebP) with HTTP 400. Lossy compression introduces ringing/blocking around the discrete colour transitions that define a categorical map, which would silently corrupt the rendered classes. The gate keys off the *variable* being categorical (CF `flag_values`), not the colormap, and lives in `_validate_categorical_request` (`services/rendering/visual_tiles.py`) alongside the other categorical-request checks.
+**Categorical variables reject `.webp`** (and animated WebP) with HTTP 400. Lossy compression introduces ringing/blocking around the discrete colour transitions that define a categorical map, which would silently corrupt the rendered classes. The gate keys off the _variable_ being categorical (CF `flag_values`), not the colormap, and lives in `_validate_categorical_request` (`services/rendering/visual_tiles.py`) alongside the other categorical-request checks.
 
 **Format choice is per-URL, not per-request.** Each `.{ext}` is a distinct path, so CDNs/browsers cache PNG and WebP independently with no `Vary` header gymnastics. Implementation lives in `utils/image.py` (`encode_rgba`, `empty_tile`, `media_type`) so adding another format (e.g. JXL) is one branch.
 
@@ -746,7 +746,7 @@ Conventions applied at store-open and date-parsing time so that all downstream c
 
 All satellite passes over Australia occur during Australian daytime. Their UTC timestamps typically fall on the **previous UTC day** (e.g. a pass at `2022-06-01 01:20 AEST` is `2022-05-31 15:20 UTC`). Comparing UTC dates to local request dates directly would return a 404 for every such record.
 
-**Why not just bucket everything by UTC day and avoid a timezone rule entirely?** Because the API is day-granularity — every date-bearing endpoint request identifies one calendar day, and "which day" is a matter of interpretation, not a fixed instant. `Australia/Sydney`'s midnight-to-midnight window is offset from UTC's by +10/+11 hours, so a Sydney day and a UTC day are different 24-hour spans of the same underlying timestamps. Converting a UTC instant to "the local day" and converting it to "the UTC day" can legitimately give different answers for the same timestamp — that's not a bug, it's two different (equally valid) day conventions disagreeing. The problem isn't that UTC is the wrong choice — it's that whichever convention is chosen, it must be the *same* convention everywhere a day boundary is drawn. `TILE_TIMEZONE` exists to name that single convention explicitly (rather than leaving "day" ambiguous), and `LOCAL_TZ` being one module-level constant, imported everywhere, is what keeps `get_available_dates` (day boundaries drawn when building the index) and `load_slice` (day boundaries drawn when resolving a request) from silently disagreeing. If they disagreed, a date the manifest advertises could 404 on request, or resolve to a different day's data than the one shown.
+**Why not just bucket everything by UTC day and avoid a timezone rule entirely?** Because the API is day-granularity — every date-bearing endpoint request identifies one calendar day, and "which day" is a matter of interpretation, not a fixed instant. `Australia/Sydney`'s midnight-to-midnight window is offset from UTC's by +10/+11 hours, so a Sydney day and a UTC day are different 24-hour spans of the same underlying timestamps. Converting a UTC instant to "the local day" and converting it to "the UTC day" can legitimately give different answers for the same timestamp — that's not a bug, it's two different (equally valid) day conventions disagreeing. The problem isn't that UTC is the wrong choice — it's that whichever convention is chosen, it must be the _same_ convention everywhere a day boundary is drawn. `TILE_TIMEZONE` exists to name that single convention explicitly (rather than leaving "day" ambiguous), and `LOCAL_TZ` being one module-level constant, imported everywhere, is what keeps `get_available_dates` (day boundaries drawn when building the index) and `load_slice` (day boundaries drawn when resolving a request) from silently disagreeing. If they disagreed, a date the manifest advertises could 404 on request, or resolve to a different day's data than the one shown.
 
 ### 9.2 How the server handles dates
 
@@ -793,7 +793,7 @@ If `lat`/`lon` are still missing after renaming, `_open_store` raises `ValueErro
 
 This section covers the **server-side cache stack** (tile → S3). For **HTTP caching** (Cache-Control headers, ETag revalidation, CACHE_VERSION invalidation through browsers and CloudFront), see [`docs/http_caching.md`](http_caching.md) — a separate concern with its own design.
 
-Two-tier cache stack ordered tiles → S3: **L1 (processed grid) → L2 (slice) → S3**. Both tiers are backed by a `CacheBackend` implementation selected via the `CACHE_BACKEND` env var (default `none`, see [§10.5](#105-selectable-backend-redis-vs-none)). There is **no on-disk cache layer** — an L2 miss falls straight through to a live Zarr read on S3 (`.compute()`, ~2 s for a satellite-class slice). With `CACHE_BACKEND=none` (the default), there is no cache at all: every request recomputes from S3, and nothing persists across a server restart. With `CACHE_BACKEND=redis`, cached values live in a shared ElastiCache endpoint rather than the app process, so they persist across an individual instance's restart (but not across a Redis flush/failover). `store_prewarm_task` ([§11](#11-background-tasks)) only warms Zarr store *metadata* at startup — it does not populate L2 with slice data.
+Two-tier cache stack ordered tiles → S3: **L1 (processed grid) → L2 (slice) → S3**. Both tiers are backed by a `CacheBackend` implementation selected via the `CACHE_BACKEND` env var (default `none`, see [§10.5](#105-selectable-backend-redis-vs-none)). There is **no on-disk cache layer** — an L2 miss falls straight through to a live Zarr read on S3 (`.compute()`, ~2 s for a satellite-class slice). With `CACHE_BACKEND=none` (the default), there is no cache at all: every request recomputes from S3, and nothing persists across a server restart. With `CACHE_BACKEND=redis`, cached values live in a shared ElastiCache endpoint rather than the app process, so they persist across an individual instance's restart (but not across a Redis flush/failover). `store_prewarm_task` ([§11](#11-background-tasks)) only warms Zarr store _metadata_ at startup — it does not populate L2 with slice data.
 
 > An on-disk L3 tier existed in an earlier version of this server (design rationale: disk vs Redis vs EFS vs Fargate ephemeral) but has since been removed.
 
@@ -843,7 +843,7 @@ Primary consumers are **visual_tiles** (no L1 above it — every tile request ca
 Every dedup point in this server is layered as **in-process `Deduper` first, `CacheBackend` second**:
 
 - `Deduper` (`services/caching/deduper.py`) always runs, in every process, regardless of `CACHE_BACKEND`. The first thread to see a key creates a `concurrent.futures.Future` and computes; all other threads arriving for the same key block on `future.result()` and receive the same result. Errors propagate to all waiting threads via `future.set_exception`, and the in-flight entry is cleared in `finally` so a failed compute doesn't permanently block subsequent attempts for the same key.
-- `CacheBackend` (`NullMemoizer`/`RedisMemoizer`, [§10.5](#105-selectable-backend-redis-vs-none)) sits behind it. Under `CACHE_BACKEND=none` it adds nothing (every call recomputes) — `Deduper` is therefore the *only* stampede protection L1/L2 have. Under `CACHE_BACKEND=redis` it adds cross-instance dedup + caching on top: `Deduper` means only one thread per process ever contends for the distributed lock, instead of every thread in a local burst.
+- `CacheBackend` (`NullMemoizer`/`RedisMemoizer`, [§10.5](#105-selectable-backend-redis-vs-none)) sits behind it. Under `CACHE_BACKEND=none` it adds nothing (every call recomputes) — `Deduper` is therefore the _only_ stampede protection L1/L2 have. Under `CACHE_BACKEND=redis` it adds cross-instance dedup + caching on top: `Deduper` means only one thread per process ever contends for the distributed lock, instead of every thread in a local burst.
 
 Each `Deduper` instance lives with its one consumer, not with its paired `CacheBackend` — it's used in three places:
 
@@ -857,12 +857,12 @@ Outside this pairing, `StoreRegistry._in_flight` deduplicates store opens with i
 
 ### 10.5 Selectable backend: Redis vs none
 
-L1 and L2 both go through `CacheBackend` (`services/caching/memoizer.py`), an interface with two methods — `get_or_compute(key, factory)` and `contains(key)` — implemented by two backends, chosen once at import time by `services/caching/backend_factory.create_memoizer()` via the `CACHE_BACKEND` env var:
+L1 and L2 both go through `CacheBackend` (`services/caching/memoizer.py`), an interface with one method — `get_or_compute(key, factory)` — implemented by two backends, chosen once at import time by `services/caching/backend_factory.create_memoizer()` via the `CACHE_BACKEND` env var:
 
 - **`none`** (default) — `NullMemoizer`, an explicit opt-out: every call recomputes, nothing is cached or deduplicated. No cache infrastructure required; the accepted cost is that every L1/L2 request pays full resample/S3 cost.
 - **`redis`** — `RedisMemoizer` (`services/caching/memoizer.py`), backed by a single ElastiCache (Redis, cluster-mode-disabled) endpoint shared by every instance, configured via `REDIS_URL` (`rediss://` for in-transit TLS). Cache values are `pickle`d (numpy arrays for L1, `xr.Dataset` for L2 — both picklable; the network + serialize round-trip is single-digit-to-tens of ms, far cheaper than the ~2 s S3 fetch it's protecting against). Cross-instance single-flight dedup:
   - **Lock**: `SET lock_key token NX EX <REDIS_LOCK_TTL_SECONDS, default 30>` — the first instance to win the key computes; the TTL bounds how long a crashed holder can block everyone else. Released via a `WATCH`/`MULTI`/`EXEC` transaction that only deletes the key if the token still matches (so an instance never deletes a lock it no longer owns) — not redis-py's built-in `Lock`, since that releases via an `EVALSHA`'d Lua script and `fakeredis` (used in tests) doesn't implement scripting.
-  - **Wakeup**: a losing instance subscribes to a per-key pub/sub channel *before* re-checking the cache (closes the race where the holder finishes between the failed lock-acquire and the subscribe call), then blocks on `get_message(timeout=REDIS_WAIT_TIMEOUT_SECONDS, default 15)`. The published message is just a signal, never the payload — the actual value is always read back via a normal `GET`, so a missed or late message can't strand a waiter.
+  - **Wakeup**: a losing instance subscribes to a per-key pub/sub channel _before_ re-checking the cache (closes the race where the holder finishes between the failed lock-acquire and the subscribe call), then blocks on `get_message(timeout=REDIS_WAIT_TIMEOUT_SECONDS, default 15)`. The published message is just a signal, never the payload — the actual value is always read back via a normal `GET`, so a missed or late message can't strand a waiter.
   - **Crash recovery**: if the wait times out, the instance falls through and attempts to acquire the lock itself, becoming the new holder and retrying the computation.
   - Keys are namespaced (`l1:`/`l2:`) so both caches can share one ElastiCache endpoint.
   - Capacity is bounded by per-entry TTL (`PROCESSED_CACHE_TTL_SECONDS`/`SLICE_CACHE_TTL_SECONDS`) plus ElastiCache's own `maxmemory-policy`, not an app-level entry count — there is no `*_CACHE_SIZE` setting.
@@ -873,7 +873,7 @@ L1 and L2 both go through `CacheBackend` (`services/caching/memoizer.py`), an in
 
 ## 11. Background tasks
 
-The server runs one long-lived background task scheduled on the event loop at startup (`store_prewarm_task`), plus several ad-hoc background actions. None of them block request handling — see [§12](#12-concurrency-event-loop-and-threading) for why. There is no periodic background task in this server: with no on-disk slice cache to refresh or evict, the only startup work is warming Zarr *store* metadata, which is a one-shot.
+The server runs one long-lived background task scheduled on the event loop at startup (`store_prewarm_task`), plus several ad-hoc background actions. None of them block request handling — see [§12](#12-concurrency-event-loop-and-threading) for why. There is no periodic background task in this server: with no on-disk slice cache to refresh or evict, the only startup work is warming Zarr _store_ metadata, which is a one-shot.
 
 ### 11.1 Lifespan overview (`main.py`)
 
@@ -900,7 +900,7 @@ async def lifespan(app: FastAPI):
     except asyncio.CancelledError: pass
 ```
 
-Everything before `yield` runs on startup; everything after runs on shutdown. **The server begins handling requests immediately at `yield`** — it does not wait for the store prewarm to finish. `store_prewarm_task` pauses at `await` points so the event loop is free for incoming requests. Note that `store_prewarm_task` only opens each unique Zarr store's *metadata* (`xr.open_zarr`, no data chunks) via `services/store/registry.py` — it does not populate the L2 slice cache with any actual data, so every date's first slice read still pays the full S3 fetch regardless of when it happens in the process's life.
+Everything before `yield` runs on startup; everything after runs on shutdown. **The server begins handling requests immediately at `yield`** — it does not wait for the store prewarm to finish. `store_prewarm_task` pauses at `await` points so the event loop is free for incoming requests. Note that `store_prewarm_task` only opens each unique Zarr store's _metadata_ (`xr.open_zarr`, no data chunks) via `services/store/registry.py` — it does not populate the L2 slice cache with any actual data, so every date's first slice read still pays the full S3 fetch regardless of when it happens in the process's life.
 
 ### 11.2 Other background actions
 
@@ -1017,15 +1017,15 @@ This is why a multi-second store prewarm at startup does not delay the first req
 
 ### 12.4 Quick reference
 
-| Component                         | Runs on                                                                                                                                             | Why                                                                                                                                                                                                                                                                          |
-| --------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| HTTP accept / parse / route       | Event loop                                                                                                                                          | Pure async I/O; never blocks                                                                                                                                                                                                                                                 |
-| Tile/manifest/point handlers      | Anyio pool, default limiter (`THREAD_POOL_SIZE`)                                                                                                    | Sync `def` so blocking xarray/rio-tiler/PIL calls don't freeze the loop                                                                                                                                                                                                      |
-| `/animation`                      | Event-loop coroutine → `anyio.to_thread.run_sync` per frame, gated by `_ANIMATION_LIMITER` (`ANIMATION_WORKERS`, default 10)                        | `async def` so per-frame `load_slice_uncached` calls fan out via `asyncio.gather`; latency drops to ~max(per-frame) instead of the serial sum. Limiter keeps a many-frame request from monopolising the tile-handler budget — see [§12.6](#126-one-pool-two-named-budgets) |
-| `/products`, `/colormaps` listing | Event loop (`async def`)                                                                                                                            | In-memory dict reads only                                                                                                                                                                                                                                                    |
-| Store prewarm at startup          | Anyio pool, gated by `_STORE_PREWARM_LIMITER` (`STORE_PREWARM_WORKERS`)                                                                             | Concurrent metadata fetches, tracked as `asyncio.Task`                                                                                                                                                                                                                       |
-| Store TTL refresh                 | One daemon thread per URL on TTL expiry                                                                                                             | Stale store returned immediately; fresh open happens in the background                                                                                                                                                                                                       |
-| In-flight stampede dedup          | Anyio pool (callers block on `Future`)                                                                                                              | Holds a slot but does no work — see §12.2                                                                                                                                                                                                                                    |
+| Component                         | Runs on                                                                                                                      | Why                                                                                                                                                                                                                                                                        |
+| --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| HTTP accept / parse / route       | Event loop                                                                                                                   | Pure async I/O; never blocks                                                                                                                                                                                                                                               |
+| Tile/manifest/point handlers      | Anyio pool, default limiter (`THREAD_POOL_SIZE`)                                                                             | Sync `def` so blocking xarray/rio-tiler/PIL calls don't freeze the loop                                                                                                                                                                                                    |
+| `/animation`                      | Event-loop coroutine → `anyio.to_thread.run_sync` per frame, gated by `_ANIMATION_LIMITER` (`ANIMATION_WORKERS`, default 10) | `async def` so per-frame `load_slice_uncached` calls fan out via `asyncio.gather`; latency drops to ~max(per-frame) instead of the serial sum. Limiter keeps a many-frame request from monopolising the tile-handler budget — see [§12.6](#126-one-pool-two-named-budgets) |
+| `/products`, `/colormaps` listing | Event loop (`async def`)                                                                                                     | In-memory dict reads only                                                                                                                                                                                                                                                  |
+| Store prewarm at startup          | Anyio pool, gated by `_STORE_PREWARM_LIMITER` (`STORE_PREWARM_WORKERS`)                                                      | Concurrent metadata fetches, tracked as `asyncio.Task`                                                                                                                                                                                                                     |
+| Store TTL refresh                 | One daemon thread per URL on TTL expiry                                                                                      | Stale store returned immediately; fresh open happens in the background                                                                                                                                                                                                     |
+| In-flight stampede dedup          | Anyio pool (callers block on `Future`)                                                                                       | Holds a slot but does no work — see §12.2                                                                                                                                                                                                                                  |
 
 ### 12.5 Failure modes to watch
 
@@ -1065,11 +1065,11 @@ Both bound concurrent work, but they live at different points in the spawn lifec
 
 #### Why two named budgets, not one
 
-| Concern                                               | What the layout buys                                                                                                                                                                                                                             |
-| ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Tile traffic isolated from animation requests**     | A 30-frame `/animation` request consumes at most 10 anyio slots, not all 100. Without `_ANIMATION_LIMITER`, a couple of concurrent animation requests could saturate the tile budget.                                                            |
-| **Tile traffic isolated from store-prewarm bursts**   | A deployment with 50 distinct sources won't briefly consume 50 pool threads on startup — `_STORE_PREWARM_LIMITER` caps it at 8.                                                                                                               |
-| **Resource ceilings decoupled from request capacity** | `ANIMATION_WORKERS=10` and `STORE_PREWARM_WORKERS=8` both match the aiobotocore S3 connection-pool ceiling (~10/host) — the real bottleneck for S3 work. Both are independent of how many tile requests can run concurrently.                    |
+| Concern                                               | What the layout buys                                                                                                                                                                                                          |
+| ----------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Tile traffic isolated from animation requests**     | A 30-frame `/animation` request consumes at most 10 anyio slots, not all 100. Without `_ANIMATION_LIMITER`, a couple of concurrent animation requests could saturate the tile budget.                                         |
+| **Tile traffic isolated from store-prewarm bursts**   | A deployment with 50 distinct sources won't briefly consume 50 pool threads on startup — `_STORE_PREWARM_LIMITER` caps it at 8.                                                                                               |
+| **Resource ceilings decoupled from request capacity** | `ANIMATION_WORKERS=10` and `STORE_PREWARM_WORKERS=8` both match the aiobotocore S3 connection-pool ceiling (~10/host) — the real bottleneck for S3 work. Both are independent of how many tile requests can run concurrently. |
 
 #### Non-pool worker threads (unchanged)
 
@@ -1116,12 +1116,12 @@ S3 latency from within the same AWS region is an internal network hop — effect
 
 **Cold requests (S3):**
 
-| Factor                       | Value                                                                             |
-| ----------------------------- | ---------------------------------------------------------------------------------- |
-| Request duration             | ~400 ms (GSLA-class) — ~1.5–2 s (satellite-class)                                 |
+| Factor                       | Value                                                                                                                                |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| Request duration             | ~400 ms (GSLA-class) — ~1.5–2 s (satellite-class)                                                                                    |
 | Max simultaneous cold slices | 100 (thread pool limit; identical concurrent keys always deduplicated in-process by `_dedup`, see [§10.4](#104-stampede-protection)) |
-| Throughput burst             | ~250 req/s (GSLA-class) — ~50–70 req/s (satellite-class)                          |
-| Bottleneck                   | S3 fetch + CPU (decompression + numpy resample)                                  |
+| Throughput burst             | ~250 req/s (GSLA-class) — ~50–70 req/s (satellite-class)                                                                             |
+| Bottleneck                   | S3 fetch + CPU (decompression + numpy resample)                                                                                      |
 
 The dominant cost on a cold request is the **S3 fetch itself** (~300–800 ms per Zarr chunk; the satellite-class slice needs 6 chunks).
 
@@ -1133,17 +1133,17 @@ The throughput numbers in §12.8 are **burst ceilings** computed as `THREAD_POOL
 
 **What scales with `THREAD_POOL_SIZE`, and what doesn't:**
 
-| Resource                        | Scales with pool size? | Actual ceiling                                                                                           |
+| Resource                         | Scales with pool size? | Actual ceiling                                                                                           |
 | -------------------------------- | ---------------------- | -------------------------------------------------------------------------------------------------------- |
-| Burst capacity (short spikes)   | **Yes**, linearly      | Transient RAM: `pool_size × 61 MB` worst-case unique satellite slices in flight                          |
-| Hot sustained throughput        | **No**                 | CPU. On 4 vCPU with GIL-releasing PNG encode, plateaus around **~250–400 req/s** regardless of pool size |
+| Burst capacity (short spikes)    | **Yes**, linearly      | Transient RAM: `pool_size × 61 MB` worst-case unique satellite slices in flight                          |
+| Hot sustained throughput         | **No**                 | CPU. On 4 vCPU with GIL-releasing PNG encode, plateaus around **~250–400 req/s** regardless of pool size |
 | Cold sustained (satellite-class) | Partially              | S3 connection pool (aiobotocore default ~10 per host) + CPU for decompress/assembly                      |
-| Queueing tolerance under burst  | **Yes**, linearly      | OS thread limit (Linux defaults: thousands per process)                                                  |
+| Queueing tolerance under burst   | **Yes**, linearly      | OS thread limit (Linux defaults: thousands per process)                                                  |
 
 **Throughput at higher `THREAD_POOL_SIZE` (burst ceilings):**
 
 | `THREAD_POOL_SIZE` | Hot burst     | Cold satellite burst | Worst-case transient RAM | Thread-stack RAM |
-| ------------------- | ------------- | --------------------- | ------------------------- | ----------------- |
+| ------------------ | ------------- | -------------------- | ------------------------ | ---------------- |
 | 50                 | ~1,500 req/s  | ~25–35 req/s         | ~3 GB                    | ~50 MB           |
 | **100** (default)  | ~3,000 req/s  | ~50–70 req/s         | ~6 GB                    | ~100 MB          |
 | 200                | ~6,000 req/s  | ~100–140 req/s       | ~12 GB                   | ~200 MB          |
@@ -1189,9 +1189,27 @@ Concurrency pressure on the origin is therefore much lower than the theoretical 
 
 ```json
 [
-  {"id": "sea_level_anomaly",                    "source_path": "s3://aodn-cloud-optimised/model_sea_level_anomaly_gridded_realtime.zarr/", "variable": "GSLA",          "chunk_px": [240, 192], "padding": 1},
-  {"id": "ocean_current",                        "source_path": "s3://aodn-cloud-optimised/model_sea_level_anomaly_gridded_realtime.zarr/", "variable": ["UCUR","VCUR"], "chunk_px": [240, 192], "padding": 1},
-  {"id": "satellite_austemp_heatwave_8day_ssta", "source_path": "s3://aodn-cloud-optimised/satellite_austemp_heatwave_8day.zarr",           "variable": "ssta",          "chunk_px": [240, 192], "padding": 1}
+  {
+    "id": "sea_level_anomaly",
+    "source_path": "s3://aodn-cloud-optimised/model_sea_level_anomaly_gridded_realtime.zarr/",
+    "variable": "GSLA",
+    "chunk_px": [240, 192],
+    "padding": 1
+  },
+  {
+    "id": "ocean_current",
+    "source_path": "s3://aodn-cloud-optimised/model_sea_level_anomaly_gridded_realtime.zarr/",
+    "variable": ["UCUR", "VCUR"],
+    "chunk_px": [240, 192],
+    "padding": 1
+  },
+  {
+    "id": "satellite_austemp_heatwave_8day_ssta",
+    "source_path": "s3://aodn-cloud-optimised/satellite_austemp_heatwave_8day.zarr",
+    "variable": "ssta",
+    "chunk_px": [240, 192],
+    "padding": 1
+  }
 ]
 ```
 
@@ -1221,22 +1239,22 @@ Delete its entry from `config/products.json` and redeploy. There is no cache evi
 
 ### 13.3 Requirements for the Zarr store
 
-| Requirement        | Detail                                                                                                                                                                                                  |
-| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Requirement        | Detail                                                                                                                                                                                                         |
+| ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Coordinate names   | Must be `lat`/`lon`/`time`, or the uppercase variants `LATITUDE`/`LONGITUDE`/`TIME` (renamed automatically on open). If a store uses different names, add a mapping to `COORD_NAMES` in `config/constants.py`. |
-| Spatial dimensions | `lat` and `lon` must be present after normalisation — `_open_store` raises `ValueError` with a clear message if not.                                                                                    |
-| CRS                | Coordinates must be geographic degrees (EPSG:4326). The visual renderer guards against projected CRS values; see [§8.1](#81-crs-guard).                                                                 |
-| Variable           | The variable(s) named in `Product.variable` must exist in the store.                                                                                                                                    |
+| Spatial dimensions | `lat` and `lon` must be present after normalisation — `_open_store` raises `ValueError` with a clear message if not.                                                                                           |
+| CRS                | Coordinates must be geographic degrees (EPSG:4326). The visual renderer guards against projected CRS values; see [§8.1](#81-crs-guard).                                                                        |
+| Variable           | The variable(s) named in `Product.variable` must exist in the store.                                                                                                                                           |
 
 ### 13.4 Optional overrides
 
 `Product` fields can be customised per product if the defaults don't fit:
 
-| Field          | Default              | When to override                                                                          |
-| -------------- | -------------------- | ----------------------------------------------------------------------------------------- |
-| `chunk_px`     | `(240, 192)`         | Store has very small or very large spatial extent                                         |
-| `padding`      | `1`                  | Tile edge artefacts, or no padding needed                                                 |
-| `lod_grids`    | `{}` (auto-computed) | Pre-set known grids to skip the first-request computation                                 |
+| Field          | Default              | When to override                                                                                                                                                                 |
+| -------------- | -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `chunk_px`     | `(240, 192)`         | Store has very small or very large spatial extent                                                                                                                                |
+| `padding`      | `1`                  | Tile edge artefacts, or no padding needed                                                                                                                                        |
+| `lod_grids`    | `{}` (auto-computed) | Pre-set known grids to skip the first-request computation                                                                                                                        |
 | `coastal_fill` | `None` (off)         | Sparse/coarse products with a wide coastal transparency gap (e.g. GSLA); see [§7.6](#76-coastal-fill-sparse-products). Set `{"max_dist_px": N}` (positive int). Data tiles only. |
 
 ---
@@ -1254,29 +1272,29 @@ There is no on-disk cache tier either way — the only persistent storage this s
 The examples below (GSLA-class, satellite-class) are **representative**, not an exhaustive or fixed list. Actual production products are configured in `config/products.json` (see [§13](#13-adding-a-new-product)) and will vary over time, but they are expected to **stay close in shape and scale** to these examples — same order of magnitude in grid size, same dtype, same regular lat/lon convention.
 
 | Size class          | Anchored on                          | Grid scale   | Slice in RAM (in flight) | Processed grid, all LODs (in flight) |
-| -------------------- | ------------------------------------- | ------------ | ------------------------- | -------------------------------------- |
-| **GSLA-class**      | sea_level_anomaly / ocean_current    | ~351 × 641   | ~2 MB / var              | ~1.4 MB (single LOD)                  |
-| **Satellite-class** | satellite_austemp_heatwave_8day_ssta | ~2000 × 3900 | ~61 MB                   | ~58 MB (4 LODs, ~15 MB avg/entry)     |
+| ------------------- | ------------------------------------ | ------------ | ------------------------ | ------------------------------------ |
+| **GSLA-class**      | sea_level_anomaly / ocean_current    | ~351 × 641   | ~2 MB / var              | ~1.4 MB (single LOD)                 |
+| **Satellite-class** | satellite_austemp_heatwave_8day_ssta | ~2000 × 3900 | ~61 MB                   | ~58 MB (4 LODs, ~15 MB avg/entry)    |
 
 A production deployment is expected to be **dominated by satellite-class products** with a smaller number of GSLA-class accompaniments — see [§14.3](#143-transient-ram-under-load) for how that shapes the worst-case transient RAM under a request burst.
 
 ### 14.2 RAM components
 
-| Component                    | Sizing rule                                                                          | Magnitude                                             |
-| ------------------------------ | ---------------------------------------------------------------------------------- | ------------------------------------------------------ |
-| Process baseline             | Python + FastAPI + xarray + numpy + rio-tiler + PIL                                | ~250–350 MB                                           |
-| Store singletons             | One open `xr.Dataset` per unique URL — metadata + coord arrays only, no data chunks | ~5 MB × stores ≈ tens of MB                           |
-| In-flight slices (transient)  | See [§14.3](#143-transient-ram-under-load)                                          | Up to several GB peak under a large concurrent burst  |
-| In-flight processed grids (transient) | `unique_keys × grid_size` (LOD-4 = 41 MB)                                    | Hundreds of MB peak                                    |
+| Component                             | Sizing rule                                                                         | Magnitude                                            |
+| ------------------------------------- | ----------------------------------------------------------------------------------- | ---------------------------------------------------- |
+| Process baseline                      | Python + FastAPI + xarray + numpy + rio-tiler + PIL                                 | ~250–350 MB                                          |
+| Store singletons                      | One open `xr.Dataset` per unique URL — metadata + coord arrays only, no data chunks | ~5 MB × stores ≈ tens of MB                          |
+| In-flight slices (transient)          | See [§14.3](#143-transient-ram-under-load)                                          | Up to several GB peak under a large concurrent burst |
+| In-flight processed grids (transient) | `unique_keys × grid_size` (LOD-4 = 41 MB)                                           | Hundreds of MB peak                                  |
 
 ### 14.3 Transient RAM under load
 
-`Deduper` ([§10.4](#104-stampede-protection)) always coalesces concurrent identical requests in-process, regardless of `CACHE_BACKEND` — so transient RAM scales with **unique cold keys in flight**, not raw concurrent request count, in both backend modes: a burst of many requests for the *same* `(product, date)` costs one slice's worth of RAM, not `N ×`.
+`Deduper` ([§10.4](#104-stampede-protection)) always coalesces concurrent identical requests in-process, regardless of `CACHE_BACKEND` — so transient RAM scales with **unique cold keys in flight**, not raw concurrent request count, in both backend modes: a burst of many requests for the _same_ `(product, date)` costs one slice's worth of RAM, not `N ×`.
 
-What differs between backends is what happens on *different* keys arriving concurrently (e.g. many users viewing different products/dates at once):
+What differs between backends is what happens on _different_ keys arriving concurrently (e.g. many users viewing different products/dates at once):
 
 - **`CACHE_BACKEND=none` (default).** Every distinct key runs its own compute; there is no cache to short-circuit a second wave of requests for a key that already finished. Worst-case transient RAM is `min(THREAD_POOL_SIZE, unique_concurrent_keys) × slice_size`. With `THREAD_POOL_SIZE = 100` and a burst dominated by distinct satellite-class slices (~61 MB), that ceiling is **~6 GB** — short-lived but real. This is why `THREAD_POOL_SIZE` sizing ([§12.9](#129-scaling-thread_pool_size)) is the primary RAM lever under the default backend.
-- **`CACHE_BACKEND=redis`.** Same worst-case transient ceiling for the initial burst (still bounded by unique keys in flight, same formula), but a *repeat* burst for the same keys hits the Redis cache instead of recomputing, so sustained load produces less transient churn than under `none`.
+- **`CACHE_BACKEND=redis`.** Same worst-case transient ceiling for the initial burst (still bounded by unique keys in flight, same formula), but a _repeat_ burst for the same keys hits the Redis cache instead of recomputing, so sustained load produces less transient churn than under `none`.
 
 Provision RAM for the worst-case transient ceiling above regardless of backend, or lower `THREAD_POOL_SIZE` to cap it.
 
@@ -1284,11 +1302,11 @@ Provision RAM for the worst-case transient ceiling above regardless of backend, 
 
 Since there is no app-level cache RAM to plan around, instance sizing reduces to: process baseline (~350 MB) + transient RAM headroom for the configured `THREAD_POOL_SIZE` (see [§14.3](#143-transient-ram-under-load) and the table in [§12.9](#129-scaling-thread_pool_size)).
 
-| `THREAD_POOL_SIZE` | Worst-case transient RAM | Steady + transient | Suggested instance                          |
-| ------------------: | -------------------------: | -------------------: | -------------------------------------------- |
-|                  50 |                    ~3 GB |             ~3.4 GB | `m6i.large` (8 GB) — tight; prefer 100+ vCPU headroom |
-|      100 (default) |                    ~6 GB |             ~6.4 GB | `m6i.xlarge` (16 GB)                        |
-|                 200 |                   ~12 GB |            ~12.4 GB | `m6i.2xlarge` (32 GB)                       |
+| `THREAD_POOL_SIZE` | Worst-case transient RAM | Steady + transient | Suggested instance                                    |
+| -----------------: | -----------------------: | -----------------: | ----------------------------------------------------- |
+|                 50 |                    ~3 GB |            ~3.4 GB | `m6i.large` (8 GB) — tight; prefer 100+ vCPU headroom |
+|      100 (default) |                    ~6 GB |            ~6.4 GB | `m6i.xlarge` (16 GB)                                  |
+|                200 |                   ~12 GB |           ~12.4 GB | `m6i.2xlarge` (32 GB)                                 |
 
 At scale (many products, high sustained traffic), horizontal scale-out behind CloudFront is generally preferred over a single large node for cost and resilience — each replica is sized independently per the table above, and all replicas read from the same S3 stores. If moving to `CACHE_BACKEND=redis` to share cache state across replicas, ElastiCache node sizing is a separate exercise: size for `(distinct hot (product, date) pairs) × avg entry size`, governed by TTL and `maxmemory-policy`, not by any app env var.
 
@@ -1302,11 +1320,11 @@ Consolidated reference. Defaults match the application code; the Docker Compose 
 
 This codebase holds configuration in three places. Both env vars and code constants are evaluated once at startup, so from a "when does it take effect" perspective they are equivalent — the choice of layer is a deliberate **signal** about how a value should change, not a runtime distinction.
 
-| Layer                                                 | What lives here                                                                                          | Change discipline                                                               | Examples                                                                                           |
-| ------------------------------------------------------ | -------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| **Env vars** (this section)                           | Operational knobs — perf, resource limits, secrets. Do **not** affect wire format or shader contract.    | Rotate freely at deploy; the value itself doesn't need code review.             | `THREAD_POOL_SIZE`, `CACHE_BACKEND`, `STORE_TTL_SECONDS`                                        |
-| **Code constants** (`config/constants.py`)            | Wire / shader contracts — values that must stay in lockstep with the frontend or with the data encoding. | Change via PR so frontend and server stay in sync; the diff is the audit trail. | `LOD.max_lods`, `LOD.min_coarsest`, `LOD.zoom_thresholds`, `CHUNK_PX`, `PADDING` (global defaults) |
-| **Per-product fields** (`config/products.json`)       | Data characteristics that legitimately vary across products.                                             | Set per product in the config file; redeploy.                                  | `chunk_px`, `padding`, `variable`, `source_path`                                                   |
+| Layer                                           | What lives here                                                                                          | Change discipline                                                               | Examples                                                                                           |
+| ----------------------------------------------- | -------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| **Env vars** (this section)                     | Operational knobs — perf, resource limits, secrets. Do **not** affect wire format or shader contract.    | Rotate freely at deploy; the value itself doesn't need code review.             | `THREAD_POOL_SIZE`, `CACHE_BACKEND`, `STORE_TTL_SECONDS`                                           |
+| **Code constants** (`config/constants.py`)      | Wire / shader contracts — values that must stay in lockstep with the frontend or with the data encoding. | Change via PR so frontend and server stay in sync; the diff is the audit trail. | `LOD.max_lods`, `LOD.min_coarsest`, `LOD.zoom_thresholds`, `CHUNK_PX`, `PADDING` (global defaults) |
+| **Per-product fields** (`config/products.json`) | Data characteristics that legitimately vary across products.                                             | Set per product in the config file; redeploy.                                   | `chunk_px`, `padding`, `variable`, `source_path`                                                   |
 
 **The rule when adding a new tunable**: ask _who needs to be informed when the value changes?_
 
@@ -1335,26 +1353,25 @@ Tuning knobs for the botocore client used by `fsspec`/`s3fs` underneath every Za
 
 ### 15.4 Threading and cache sizing
 
-| Variable                      | Default | Description                                                                                                                                                                                                    |
-| ----------------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `THREAD_POOL_SIZE`            | `100`   | Anyio thread-pool size. Each in-flight sync request uses one slot. See [§12](#12-concurrency-event-loop-and-threading).                                                                                        |
-| `ANIMATION_WORKERS`           | `10`    | Capacity-limiter cap for `/animation` per-frame S3 fan-out. Sized to the aiobotocore S3 connection pool. See [§12.6](#126-one-pool-two-named-budgets).                                                         |
-| `STORE_PREWARM_WORKERS`       | `8`     | Capacity-limiter cap for concurrent `xr.open_zarr` opens during startup store prewarm. Sized to the S3 connection pool. See [§12.6](#126-one-pool-two-named-budgets).                                          |
-| `SLICE_CACHE_TTL_SECONDS`     | `600`   | Per-entry TTL for the L2 slice cache. Only used when `CACHE_BACKEND=redis` — sets the Redis key TTL; unused (no cache) when `CACHE_BACKEND=none`.                                                              |
-| `PROCESSED_CACHE_TTL_SECONDS` | `600`   | Per-entry TTL for the L1 processed-grid cache. Same `CACHE_BACKEND=redis`-only scope as `SLICE_CACHE_TTL_SECONDS`.                                                                                            |
-| `STORE_TTL_SECONDS`           | `600`   | Stale-while-revalidate window for the Zarr store singleton.                                                                                                                                                    |
-| `CACHE_BACKEND`               | `none`  | Selects the L1/L2 `CacheBackend` implementation: `redis` or `none`. See [§10.5](#105-selectable-backend-redis-vs-none).                                                                                       |
-| `REDIS_URL`                   | _(none)_ | Connection string for the `redis` backend, e.g. `rediss://<endpoint>:6379/0` for TLS-enabled ElastiCache. Required when `CACHE_BACKEND=redis`; unused otherwise.                                             |
-| `REDIS_LOCK_TTL_SECONDS`      | `30`    | How long a cross-instance compute lock is held before it expires — bounds how long a crashed lock-holder can block other instances. Only used by the `redis` backend.                                        |
-| `REDIS_WAIT_TIMEOUT_SECONDS`  | `15`    | How long a losing instance waits on pub/sub for the lock-holder's result before giving up and attempting to take over the lock itself. Only used by the `redis` backend.                                     |
+| Variable                      | Default  | Description                                                                                                                                                              |
+| ----------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `THREAD_POOL_SIZE`            | `100`    | Anyio thread-pool size. Each in-flight sync request uses one slot. See [§12](#12-concurrency-event-loop-and-threading).                                                  |
+| `ANIMATION_WORKERS`           | `10`     | Capacity-limiter cap for `/animation` per-frame S3 fan-out. Sized to the aiobotocore S3 connection pool. See [§12.6](#126-one-pool-two-named-budgets).                   |
+| `STORE_PREWARM_WORKERS`       | `8`      | Capacity-limiter cap for concurrent `xr.open_zarr` opens during startup store prewarm. Sized to the S3 connection pool. See [§12.6](#126-one-pool-two-named-budgets).    |
+| `SLICE_CACHE_TTL_SECONDS`     | `600`    | Per-entry TTL for the L2 slice cache. Only used when `CACHE_BACKEND=redis` — sets the Redis key TTL; unused (no cache) when `CACHE_BACKEND=none`.                        |
+| `PROCESSED_CACHE_TTL_SECONDS` | `600`    | Per-entry TTL for the L1 processed-grid cache. Same `CACHE_BACKEND=redis`-only scope as `SLICE_CACHE_TTL_SECONDS`.                                                       |
+| `STORE_TTL_SECONDS`           | `600`    | Stale-while-revalidate window for the Zarr store singleton.                                                                                                              |
+| `CACHE_BACKEND`               | `none`   | Selects the L1/L2 `CacheBackend` implementation: `redis` or `none`. See [§10.5](#105-selectable-backend-redis-vs-none).                                                  |
+| `REDIS_URL`                   | _(none)_ | Connection string for the `redis` backend, e.g. `rediss://<endpoint>:6379/0` for TLS-enabled ElastiCache. Required when `CACHE_BACKEND=redis`; unused otherwise.         |
+| `REDIS_LOCK_TTL_SECONDS`      | `30`     | How long a cross-instance compute lock is held before it expires — bounds how long a crashed lock-holder can block other instances. Only used by the `redis` backend.    |
+| `REDIS_WAIT_TIMEOUT_SECONDS`  | `15`     | How long a losing instance waits on pub/sub for the lock-holder's result before giving up and attempting to take over the lock itself. Only used by the `redis` backend. |
 
 ### 15.5 Logging
 
-| Variable                       | Default  | Description                                                                                                                                                                      |
-| ------------------------------ | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `LOG_FORMAT`                   | _(auto)_ | `json` — force JSON output. `text` — force human-readable. Unset (default) — JSON when stdout is not a TTY (containers, EC2, CI), human-readable when it is (local terminal).    |
-| `LOG_LEVEL`                    | `INFO`   | Application log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`). Controls `services`, `routers`, and `main` namespaces. Uvicorn's own log level is set separately via `--log-level`. |
-| `SLOW_FETCH_THRESHOLD_SECONDS` | `5`      | Log a `WARNING` when a cold S3 `.compute()` takes longer than this many seconds. See [§16.5](#165-operational-signals).                                                          |
+| Variable     | Default  | Description                                                                                                                                                                      |
+| ------------ | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `LOG_FORMAT` | _(auto)_ | `json` — force JSON output. `text` — force human-readable. Unset (default) — JSON when stdout is not a TTY (containers, EC2, CI), human-readable when it is (local terminal).    |
+| `LOG_LEVEL`  | `INFO`   | Application log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`). Controls `services`, `routers`, and `main` namespaces. Uvicorn's own log level is set separately via `--log-level`. |
 
 See `docker-compose.yml` for the production wiring of these variables.
 
@@ -1426,11 +1443,9 @@ If any line is missing, the corresponding feature is either misconfigured (missi
 
 Lines to watch for in production. Filter on `message` for the event name; the listed fields ride alongside it as queryable JSON.
 
-| Level     | `message`                                                    | Key fields                                      | What it means                                                                                                                                                                             |
-| --------- | ------------------------------------------------------------ | ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `WARNING` | `Slow S3 fetch`                                              | `store_url`, `date`, `seconds`                  | A cold `.compute()` exceeded `SLOW_FETCH_THRESHOLD_SECONDS`. S3 is slow for this key — check S3 region and VPC endpoints, or consider switching to `CACHE_BACKEND=redis` with a higher `SLICE_CACHE_TTL_SECONDS` so the slice stays warm in L2 longer once fetched, reducing how often this date is re-fetched. |
-| `DEBUG`   | `Multiple timestamps map to single date; first will be used` | `count`, `date`, `store_url`, `first_timestamp` | The Zarr store has more than one UTC timestamp resolving to the same local date (expected for sub-daily stores). The first timestamp is used. Enable `LOG_LEVEL=DEBUG` to see these.      |
-| `ERROR`   | `Unhandled error`                                            | `method`, `path`                                | An uncaught exception reached the global handler — always signals a bug. The full traceback rides in `exc`.                                                                               |
+| Level     | `message`                                                    | Key fields                                      | What it means                                                                                                                                                                                                                                      |
+| --------- | ------------------------------------------------------------ | ----------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ERROR`   | `Unhandled error`                                            | `method`, `path`                                | An uncaught exception reached the global handler — always signals a bug. The full traceback rides in `exc`.                                                                                                                                        |
 
 ### 16.6 Health check suppression
 

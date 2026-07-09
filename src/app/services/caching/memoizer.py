@@ -32,17 +32,12 @@ T = TypeVar("T")
 class CacheBackend(ABC):
     """Shared contract for cache + cross-instance dedup implementations.
 
-    Only ``get_or_compute`` and ``contains`` are part of this interface —
-    they're the only methods any production caller invokes.
+    ``get_or_compute`` is the only method any production caller invokes.
     """
 
     @abstractmethod
     def get_or_compute(self, key: Hashable, factory: Callable[[], T]) -> T:
         """Return cached value, wait on an in-flight compute, or run ``factory()`` once."""
-
-    @abstractmethod
-    def contains(self, key: Hashable) -> bool:
-        """Peek whether ``key`` is cached, without triggering a compute."""
 
 
 class NullMemoizer(CacheBackend):
@@ -53,9 +48,6 @@ class NullMemoizer(CacheBackend):
 
     def get_or_compute(self, key: Hashable, factory: Callable[[], T]) -> T:
         return factory()
-
-    def contains(self, key: Hashable) -> bool:
-        return False
 
 
 class RedisMemoizer(CacheBackend):
@@ -97,9 +89,6 @@ class RedisMemoizer(CacheBackend):
 
     def _channel(self, key: Hashable) -> str:
         return f"{self.namespace}:done:{key!r}"
-
-    def contains(self, key: Hashable) -> bool:
-        return bool(self.redis.exists(self._cache_key(key)))
 
     def get_or_compute(self, key: Hashable, factory: Callable[[], T]) -> T:
         cache_key = self._cache_key(key)

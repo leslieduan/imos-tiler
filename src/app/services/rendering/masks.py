@@ -25,7 +25,6 @@ No new runtime deps: numpy + scipy only (scipy already required). The .npz asset
 are pre-baked by scripts (no netCDF engine at runtime).
 """
 
-import logging
 from functools import lru_cache
 from pathlib import Path
 
@@ -34,8 +33,6 @@ import xarray as xr
 from scipy.ndimage import distance_transform_edt
 
 from app.config.paths import LAND_MASK_PATH, OCEAN_MASK_PATH
-
-logger = logging.getLogger(__name__)
 
 # Loaded lazily so import (and tests that never touch land) don't pay the unpack,
 # and so a missing asset only fails the products that actually opt in.
@@ -69,10 +66,6 @@ def load_land_mask() -> tuple[np.ndarray, dict[str, float]]:
                 "lon_min": float(npz["lon_min"]),
                 "lat_max": float(npz["lat_max"]),
             }
-        logger.debug(
-            "[coastal] land mask loaded",
-            extra={"shape": shape, "land_frac": round(float(_land_mask.mean()), 3)},
-        )
     assert _land_meta is not None
     return _land_mask, _land_meta
 
@@ -133,10 +126,6 @@ def load_ocean_mask() -> tuple[np.ndarray, dict[str, float]]:
                 "lon_min": float(npz["lon_min"]),
                 "lat_max": float(npz["lat_max"]),
             }
-        logger.debug(
-            "[coastal] ocean mask loaded",
-            extra={"shape": shape, "valid_frac": round(float(_ocean_mask.mean()), 3)},
-        )
     assert _ocean_meta is not None
     return _ocean_mask, _ocean_meta
 

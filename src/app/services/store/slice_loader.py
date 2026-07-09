@@ -9,10 +9,6 @@ instances and caches the result (see ``services.caching.slice_cache``).
 Long-lived store handles live in their own module ([[store.registry]]).
 """
 
-import logging
-import os
-import time
-
 import pandas as pd
 import xarray as xr
 
@@ -21,9 +17,6 @@ from app.services.caching.slice_cache import slice_memo
 from app.services.rendering.masks import apply_ocean_mask
 from app.services.store.registry import get_store, store_registry
 
-logger = logging.getLogger(__name__)
-
-_SLOW_FETCH_THRESHOLD = float(os.environ.get("SLOW_FETCH_THRESHOLD_SECONDS", 5))
 # Always in-process, independent of CACHE_BACKEND — see Deduper's docstring
 # for why this matters even (especially) under CACHE_BACKEND=none.
 _slice_dedup = Deduper()
@@ -55,19 +48,7 @@ def _fetch_slice_from_store(store_url: str, date: str, variables: list[str]) -> 
         hint = f" Latest available date is {latest!r}." if latest else " No dates are available."
         raise FileNotFoundError(f"No data for date {date!r}.{hint}")
     try:
-        t0 = time.monotonic()
-        result = store[variables].sel(time=pd.Timestamp(matching[0])).compute()
-        elapsed = time.monotonic() - t0
-        logger.debug(
-            "[timing] slice loaded from S3",
-            extra={"date": date, "s3_fetch_ms": round(elapsed * 1000, 1)},
-        )
-        if elapsed > _SLOW_FETCH_THRESHOLD:
-            logger.warning(
-                "Slow S3 fetch",
-                extra={"store_url": store_url, "date": date, "seconds": elapsed},
-            )
-        return result
+        return store[variables].sel(time=pd.Timestamp(matching[0])).compute()
     except KeyError as e:
         raise FileNotFoundError(f"No data found for date {date}") from e
 

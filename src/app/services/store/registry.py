@@ -84,24 +84,13 @@ def _open_store(store_url: str) -> xr.Dataset:
     return ds
 
 
-def _build_date_index(ds: xr.Dataset, store_url: str = "") -> dict[str, list]:
+def _build_date_index(ds: xr.Dataset) -> dict[str, list]:
     """Return {local_date: [timestamps]} for the dataset's time coord, or {} if missing."""
     if "time" not in ds.dims:
         return {}
     index: dict[str, list] = {}
     for ts in ds.coords["time"].values:
         index.setdefault(ts_to_local_date(ts), []).append(ts)
-    for date, timestamps in index.items():
-        if len(timestamps) > 1:
-            logger.debug(
-                "Multiple timestamps map to single date; first will be used",
-                extra={
-                    "count": len(timestamps),
-                    "date": date,
-                    "store_url": store_url,
-                    "first_timestamp": str(timestamps[0]),
-                },
-            )
     return index
 
 
@@ -153,7 +142,7 @@ class StoreRegistry:
 
         try:
             ds = _open_store(store_url)
-            index = _build_date_index(ds, store_url)
+            index = _build_date_index(ds)
             self._publish(store_url, ds, index)
             logger.info(
                 "Store opened",
@@ -209,7 +198,7 @@ class StoreRegistry:
     def _refresh_background(self, store_url: str) -> None:
         try:
             ds = _open_store(store_url)
-            index = _build_date_index(ds, store_url)
+            index = _build_date_index(ds)
             self._publish(store_url, ds, index)
             logger.info("Store refreshed", extra={"store_url": store_url})
         except Exception:

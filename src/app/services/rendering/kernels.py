@@ -13,7 +13,6 @@ request doesn't pay the one-time init cost.
 
 import logging
 import threading
-import time
 
 import numpy as np
 import xarray as xr
@@ -288,7 +287,6 @@ def warmup_resample() -> None:
     tile request doesn't pay one-time init overhead. Synchronous; intended to be
     called once during startup.
     """
-    t0 = time.monotonic()
     ds = xr.Dataset(
         {"v": (("lat", "lon"), np.zeros((16, 16), dtype=np.float32))},
         coords={"lat": np.linspace(1.0, 0.0, 16), "lon": np.linspace(0.0, 1.0, 16)},
@@ -302,10 +300,3 @@ def warmup_resample() -> None:
         _numba_nearest(sample, 32, 32)
         _numba_normalize_uint32(sample, 0.0, 1.0, 16777215)
         _numba_normalize_uint8(sample, 0.0, 1.0, 255)
-    logger.debug(
-        "[timing] resample warmup",
-        extra={
-            "ms": round((time.monotonic() - t0) * 1000, 1),
-            "backend": "numba" if _HAS_NUMBA else "xr.interp",
-        },
-    )
