@@ -50,10 +50,3 @@ S3_ANON = True
 S3_CONNECT_TIMEOUT = 5
 S3_READ_TIMEOUT = 30
 S3_MAX_ATTEMPTS = 2
-
-# "INFO", "DEBUG", "WARNING", "ERROR", ...
-LOG_LEVEL = "INFO"
-
-# None — auto: JSON when stdout is not a TTY (containers, CI), human-readable
-# when it is (local dev terminal). "json" or "text" forces the format regardless.
-LOG_FORMAT: str | None = None

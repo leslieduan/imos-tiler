@@ -144,8 +144,7 @@ imos-tiler/
       paths.py                   ← PRODUCTS_CONFIG_PATH, COLORMAPS_CONFIG_PATH, LAND_MASK_PATH, OCEAN_MASK_PATH
       products.json               ← static product config, committed with the code — see §13
       colormaps.json              ← static custom-colormap config, committed with the code
-      log_config.py              ← logging setup (JSON when stdout isn't a TTY, coloured text locally)
-      settings.py                ← app configuration constants (timezone, cache backend, S3 timeouts, thread pool, log level) — see §13
+      settings.py                ← app configuration constants (timezone, cache backend, S3 timeouts, thread pool) — see §13
     routers/
       shared.py                  ← shared router helpers (PRODUCT_EX/DATE_EX examples, get_product_or_404, load_slice_or_404)
       public/                    ← public tile endpoints (package)
@@ -1365,85 +1364,8 @@ Tuning knobs for the botocore client used by `fsspec`/`s3fs` underneath every Za
 | `REDIS_LOCK_TTL_SECONDS`      | `30`     | How long a cross-instance compute lock is held before it expires — bounds how long a crashed lock-holder can block other instances. Only used by the `redis` backend.    |
 | `REDIS_WAIT_TIMEOUT_SECONDS`  | `15`     | How long a losing instance waits on pub/sub for the lock-holder's result before giving up and attempting to take over the lock itself. Only used by the `redis` backend. |
 
-### 15.5 Logging
-
-| Constant     | Default  | Description                                                                                                                                                                      |
-| ------------ | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `LOG_FORMAT` | `None`   | `"json"` — force JSON output. `"text"` — force human-readable. `None` (default) — JSON when stdout is not a TTY (containers, CI), human-readable when it is (local terminal).    |
-| `LOG_LEVEL`  | `"INFO"` | Application log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`). Controls `services`, `routers`, and `main` namespaces. Uvicorn's own log level is set separately via `--log-level`. |
-
 ---
 
 ## 16. Logging
 
-All logging configuration lives in `log_config.py`. `main.py` calls `configure_logging()` once at startup. Nothing else touches logging setup.
-
-### 16.1 Format selection
-
-Format is chosen automatically from the TTY state of stdout — no configuration needed in most environments:
-
-| Environment        | stdout TTY? | `LOG_FORMAT` | Format used                       |
-| ------------------- | ----------- | ------------- | ---------------------------------- |
-| Local dev terminal  | yes         | `None`        | Human-readable (uvicorn default)   |
-| Container / CI      | no          | `None`        | JSON (one object per line)         |
-| Any                 | —           | `"json"`      | JSON (forced)                      |
-| Any                 | —           | `"text"`      | Human-readable (forced)            |
-
-JSON records share a single schema for both app logs and uvicorn access logs:
-
-```json
-{"time": "2026-05-19T06:02:50.073+00:00", "level": "INFO", "logger": "services.store.registry", "message": "Store opened", "store_url": "s3://bucket/sla.zarr", "date_count": 365}
-{"time": "2026-05-19T06:02:51.210+00:00", "level": "ERROR", "logger": "main", "message": "Unhandled error", "method": "GET", "path": "/data_tiles/...", "exc": "Traceback ..."}
-{"time": "2026-05-19T06:03:00.001+00:00", "level": "INFO", "logger": "uvicorn.access", "message": "...", "client_addr": "1.2.3.4:52100", "request_line": "GET /data_tiles/sla/2026-05-19/2/0/0.png HTTP/1.1", "status_code": 200}
-```
-
-### 16.2 Structured fields
-
-`message` is a stable event name (e.g. `"Store opened"`, `"Slow S3 fetch"`); variable values are emitted as top-level JSON fields alongside it. This makes them queryable directly in CloudWatch Logs Insights without parsing the message string:
-
-```
-fields @timestamp, level, message, store_url, date, seconds
-| filter message = "Slow S3 fetch" and seconds > 10
-| sort @timestamp desc
-```
-
-Convention in code: pass values through `extra={...}` rather than `%s`-interpolating into the message.
-
-```python
-logger.info(
-    "Store opened",
-    extra={"store_url": store_url, "date_count": len(index)},
-)
-```
-
-`JsonFormatter` promotes any non-stdlib attribute on the record (i.e. anything supplied via `extra={}`, plus the fields uvicorn attaches to access records) to a top-level JSON field automatically.
-
-### 16.3 Application logger namespaces
-
-Uvicorn's default `LOGGING_CONFIG` only wires `uvicorn.*` loggers to its handler. `configure_logging()` also routes `services`, `routers`, and `main` through the same handler so all application logs share one format and one destination.
-
-### 16.4 Startup log sequence
-
-A clean startup produces these `message` values in order (all `INFO` unless noted), each with its own structured fields:
-
-```
-Thread pool size set            thread_pool_size=100
-Loaded products from disk       count=3, path=.../config/products.json
-Loaded colormaps from disk      count=2, path=.../config/colormaps.json
-Memory cache configured         slice_cache_size=10, processed_cache_size=50, store_ttl_seconds=600
-Store opened                    store_url=s3://..., date_count=365             ← one per product, from the store-prewarm task
-```
-
-If any line is missing, the corresponding feature is either misconfigured (missing env var) or failed silently. There is no separate disk-cache or refresh-cycle startup line to check for — the only startup background work is `store_prewarm_task`, and its per-store completion shows up as one `Store opened` line per unique store URL.
-
-### 16.5 Operational signals
-
-Lines to watch for in production. Filter on `message` for the event name; the listed fields ride alongside it as queryable JSON.
-
-| Level     | `message`                                                    | Key fields                                      | What it means                                                                                                                                                                                                                                      |
-| --------- | ------------------------------------------------------------ | ----------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ERROR`   | `Unhandled error`                                            | `method`, `path`                                | An uncaught exception reached the global handler — always signals a bug. The full traceback rides in `exc`.                                                                                                                                        |
-
-### 16.6 Health check suppression
-
-`GET /health` responses are filtered from the uvicorn access log by `SuppressHealthChecks` (added in `configure_logging()`). Load-balancer probes fire every few seconds and would otherwise dominate the access log volume. App-level `/health` handler logs are unaffected — only the access-log entry is dropped.
+There is no logging framework. Startup and error events are plain `print()` calls (stdout), and unhandled exceptions print their traceback via `traceback.print_exc()`. Nothing to configure — output goes wherever stdout goes (terminal locally, captured by the container runtime in deployment).

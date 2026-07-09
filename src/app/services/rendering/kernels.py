@@ -11,15 +11,12 @@ Hot path for every cold-L1 data tile. Two pieces:
 request doesn't pay the one-time init cost.
 """
 
-import logging
 import threading
 
 import numpy as np
 import xarray as xr
 
 from app.services.colormap.categorical import is_categorical_variable
-
-logger = logging.getLogger(__name__)
 
 # Serialises entry into the parallel=True kernels below: only one parallel region
 # may be open in the process at a time.
@@ -209,7 +206,7 @@ except (
     ImportError
 ):  # pragma: no cover — numba is a hard dep; this guards against broken install only
     _HAS_NUMBA = False
-    logger.warning("numba unavailable; falling back to xr.interp (~5× slower on Intel)")
+    print("numba unavailable; falling back to xr.interp (~5× slower on Intel)")
 
 
 def resample_variables_to_grid(

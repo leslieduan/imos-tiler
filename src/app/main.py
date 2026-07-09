@@ -1,5 +1,5 @@
 import asyncio
-import logging
+import traceback
 from contextlib import asynccontextmanager
 
 import anyio
@@ -10,7 +10,6 @@ from starlette.middleware.cors import CORSMiddleware
 from starlette.middleware.gzip import GZipMiddleware
 
 from app.config import settings
-from app.config.log_config import configure_logging
 from app.routers.data_tiles import router as data_tiles_router
 from app.routers.visual_tiles import router as visual_tiles_router
 from app.services.colormap.registry import load_colormaps
@@ -19,21 +18,17 @@ from app.services.rendering.kernels import warmup_resample
 from app.services.rendering.visual_tiles import warmup_visual
 from app.services.store.registry import prewarm_stores
 
-configure_logging()
-
-logger = logging.getLogger(__name__)
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     limiter = anyio.to_thread.current_default_thread_limiter()
     limiter.total_tokens = settings.THREAD_POOL_SIZE
-    logger.info("Thread pool size set", extra={"thread_pool_size": limiter.total_tokens})
+    print(f"Thread pool size set: {limiter.total_tokens}")
     load_products()
     load_colormaps()
-    logger.info(
-        "Cache configured",
-        extra={
+    print(
+        "Cache configured:",
+        {
             "cache_backend": settings.CACHE_BACKEND,
             "slice_cache_ttl_seconds": settings.SLICE_CACHE_TTL_SECONDS,
             "processed_cache_ttl_seconds": settings.PROCESSED_CACHE_TTL_SECONDS,
@@ -46,14 +41,15 @@ async def lifespan(app: FastAPI):
     store_urls = list({p.source_path for p in iter_products()})
     store_prewarm_task = asyncio.create_task(prewarm_stores(store_urls))
     yield
-    logger.info("Shutting down")
+    print("Shutting down")
     store_prewarm_task.cancel()
     try:
         await store_prewarm_task
     except asyncio.CancelledError:
         pass
     except Exception:
-        logger.exception("Background task exited with error")
+        print("Background task exited with error")
+        traceback.print_exc()
 
 
 app = FastAPI(
@@ -87,10 +83,8 @@ app.include_router(visual_tiles_router, prefix="/visual_tiles", tags=["visual_ti
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
-    logger.exception(
-        "Unhandled error",
-        extra={"method": request.method, "path": request.url.path},
-    )
+    print(f"Unhandled error: method={request.method} path={request.url.path}")
+    traceback.print_exc()
     return JSONResponse(status_code=500, content={"detail": "Internal server error"})
 
 

@@ -8,7 +8,7 @@ each fits inside rio_tiler's strict ±180 bound; the parts are composited as
 numpy arrays before the single image encode.
 """
 
-import logging
+import traceback
 from collections.abc import Callable, Mapping
 from typing import Any
 
@@ -32,8 +32,6 @@ from app.utils.image import (
     encode_rgba_animation,
 )
 
-logger = logging.getLogger(__name__)
-
 
 def warmup_visual() -> None:
     """Prime rio_tiler + GDAL warp so the first visual tile request doesn't pay
@@ -54,7 +52,8 @@ def warmup_visual() -> None:
         img.rescale(in_range=[(0.0, 1.0)])
         _img_to_rgba(img, cm)
     except Exception:
-        logger.warning("Visual warmup failed", exc_info=True)
+        print("Visual warmup failed")
+        traceback.print_exc()
 
 
 def _img_to_rgba(img: ImageData, cm: dict[int, tuple[int, int, int, int]]) -> np.ndarray:

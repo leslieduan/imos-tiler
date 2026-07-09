@@ -15,14 +15,11 @@ Single front door for everything product-related at runtime:
 """
 
 import json
-import logging
 from pathlib import Path
 
 from app.config.constants import TILE
 from app.config.paths import PRODUCTS_CONFIG_PATH
 from app.services.product.product import CoastalFill, Product
-
-logger = logging.getLogger(__name__)
 
 _config_path = Path(PRODUCTS_CONFIG_PATH)
 
@@ -71,7 +68,7 @@ def load_products() -> None:
     present — never an empty dict.
     """
     if not _config_path.exists():
-        logger.info("No products.json found — starting with empty product list")
+        print("No products.json found — starting with empty product list")
         return
     entries: list[dict] = json.loads(_config_path.read_text())
     new = {entry["id"]: _from_dict(entry) for entry in entries}
@@ -79,10 +76,7 @@ def load_products() -> None:
         PRODUCTS[product_id] = product
     for stale_id in [k for k in PRODUCTS if k not in new]:
         del PRODUCTS[stale_id]
-    logger.info(
-        "Loaded products from disk",
-        extra={"count": len(PRODUCTS), "path": str(_config_path)},
-    )
+    print(f"Loaded {len(PRODUCTS)} products from {_config_path}")
 
 
 def list_products() -> list[dict]:

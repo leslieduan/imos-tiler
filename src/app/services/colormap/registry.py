@@ -1,5 +1,4 @@
 import json
-import logging
 from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
@@ -7,8 +6,6 @@ from typing import Literal
 from app.config.paths import COLORMAPS_CONFIG_PATH
 
 ColormapMode = Literal["ramp", "categorical"]
-
-logger = logging.getLogger(__name__)
 
 _config_path = Path(COLORMAPS_CONFIG_PATH)
 _custom_colormaps: dict[str, list[tuple[int, int, int, int]]] = {}
@@ -54,14 +51,11 @@ def get_category_values(name: str) -> list[int] | None:
 def load_colormaps() -> None:
     """Read colormaps.json from disk into the in-memory registry. Called once on startup."""
     if not _config_path.exists():
-        logger.info("No colormaps.json found — starting with in-memory defaults only")
+        print("No colormaps.json found — starting with in-memory defaults only")
         return
     data: dict[str, list | dict] = json.loads(_config_path.read_text())
     _reload(data)
-    logger.info(
-        "Loaded colormaps from disk",
-        extra={"count": len(_custom_colormaps), "path": str(_config_path)},
-    )
+    print(f"Loaded {len(_custom_colormaps)} colormaps from {_config_path}")
 
 
 def list_colormaps() -> dict[str, list]:

@@ -12,9 +12,9 @@ instead of converting every timestamp on the hot path.
 
 import asyncio
 import concurrent.futures
-import logging
 import threading
 import time
+import traceback
 
 import anyio
 import xarray as xr
@@ -22,8 +22,6 @@ import xarray as xr
 from app.config import settings
 from app.config.constants import COORD_NAMES
 from app.utils.dates import ts_to_local_date
-
-logger = logging.getLogger(__name__)
 
 _STORE_TTL = float(settings.STORE_TTL_SECONDS)
 
@@ -121,10 +119,7 @@ class StoreRegistry:
                 # TTL expired — return stale store and trigger a background refresh.
                 if store_url not in self._refreshing:
                     self._refreshing.add(store_url)
-                    logger.info(
-                        "Store TTL expired, refreshing in background",
-                        extra={"store_url": store_url},
-                    )
+                    print(f"Store TTL expired, refreshing in background: {store_url}")
                     threading.Thread(
                         target=self._refresh_background, args=(store_url,), daemon=True
                     ).start()
@@ -143,10 +138,7 @@ class StoreRegistry:
             ds = _open_store(store_url)
             index = _build_date_index(ds)
             self._publish(store_url, ds, index)
-            logger.info(
-                "Store opened",
-                extra={"store_url": store_url, "date_count": len(index)},
-            )
+            print(f"Store opened: {store_url} (date_count={len(index)})")
             future.set_result(ds)
         except Exception as e:
             future.set_exception(e)
@@ -174,7 +166,8 @@ class StoreRegistry:
             try:
                 await anyio.to_thread.run_sync(self.get, url, limiter=_STORE_PREWARM_LIMITER)
             except Exception:
-                logger.exception("Store prewarm failed", extra={"store_url": url})
+                print(f"Store prewarm failed: {url}")
+                traceback.print_exc()
 
         await asyncio.gather(*(_one(url) for url in store_urls))
 
@@ -199,9 +192,10 @@ class StoreRegistry:
             ds = _open_store(store_url)
             index = _build_date_index(ds)
             self._publish(store_url, ds, index)
-            logger.info("Store refreshed", extra={"store_url": store_url})
+            print(f"Store refreshed: {store_url}")
         except Exception:
-            logger.exception("Background refresh failed", extra={"store_url": store_url})
+            print(f"Background refresh failed: {store_url}")
+            traceback.print_exc()
         finally:
             with self._lock:
                 self._refreshing.discard(store_url)
